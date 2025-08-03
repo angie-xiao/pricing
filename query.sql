@@ -60,6 +60,7 @@ CREATE TEMP TABLE raw_events AS  (
     SELECT DISTINCT
         f.asin,
         f.customer_shipment_item_id,
+        p.promotion_key,
         TO_DATE(p.start_datetime, 'YYYY-MM-DD') as promo_start_date,
         TO_DATE(p.end_datetime, 'YYYY-MM-DD') as promo_end_date,
         DATE_PART('year', p.start_datetime) as event_year,
@@ -158,6 +159,23 @@ CREATE TEMP TABLE raw_events AS  (
 ); 
 
 
+
+DROP TABLE IF EXISTS event_discounts;
+CREATE TEMP TABLE event_discounts AS (
+    SELECT
+        r.*,
+        da.promotion_pricing_amount, 
+        da.creation_discount_percent, 
+        da.current_discount_percent
+    FROM raw_events r
+        LEFT JOIN andes.pdm.dim_promotion_asin da
+        ON r.promotion_key = da.promotion_key
+        AND r.asin = da.asin
+    WHERE da.region_id = 1
+        AND da.marketplace_key = 7
+);
+
+
 DROP TABLE IF EXISTS promotion_details;
 CREATE TEMP TABLE promotion_details AS (
 
@@ -170,6 +188,9 @@ CREATE TEMP TABLE promotion_details AS (
             event_month,
             promo_start_date,
             promo_end_date,
+            promotion_pricing_amount, 
+            creation_discount_percent, 
+            current_discount_percent,
             (CASE event_name
                 WHEN 'PRIME DAY' THEN 1
                 WHEN 'BLACK FRIDAY' THEN 2
@@ -179,7 +200,7 @@ CREATE TEMP TABLE promotion_details AS (
                 WHEN 'NYNY' THEN 6
                 ELSE 99
             END) as event_priority_order
-        FROM raw_events
+        FROM event_discounts
     ),
 
     -- Handle overlaps by prioritizing events
@@ -192,6 +213,9 @@ CREATE TEMP TABLE promotion_details AS (
             event_month,
             promo_start_date,
             promo_end_date,
+            promotion_pricing_amount, 
+            creation_discount_percent, 
+            current_discount_percent,
             ROW_NUMBER() OVER (
                 PARTITION BY 
                     asin,
@@ -210,7 +234,10 @@ CREATE TEMP TABLE promotion_details AS (
         event_year,
         event_month,
         promo_start_date,
-        promo_end_date
+        promo_end_date,
+        promotion_pricing_amount, 
+        creation_discount_percent, 
+        current_discount_percent
     FROM prioritized_events
     WHERE event_rank = 1  -- Only take highest priority event when overlapping
 );
@@ -263,15 +290,21 @@ CREATE TEMP TABLE consolidated_promos AS (
     SELECT 
         p.asin,
         p.customer_shipment_item_id,
-        p.event_name,
-        DATE_PART('year', p.promo_start_date) as event_year,
-        -- Use the standard event month for consistency
-        COALESCE(e.event_month, DATE_PART('month', p.promo_start_date)) as event_month
+        p.event_year,
+
+        -- standardized 
+        e.event_month,
+        e.event_name,
+        e.promo_start_date,
+        e.promo_end_date,
+
+        p.promotion_pricing_amount, 
+        p.creation_discount_percent, 
+        p.current_discount_percent
     FROM promotion_details p
         LEFT JOIN event_standards e
         ON p.event_name = e.event_name
-        AND DATE_PART('year', p.promo_start_date) = e.event_year
-    WHERE p.event_name != 'NO_PROMOTION'
+        AND p.event_year = e.event_year
 );
 
 
@@ -308,8 +341,13 @@ CREATE TEMP TABLE unified_deal_base AS (
         b.company_code,
         b.company_name,
 
+        -- pricing & discount
+        d.promotion_pricing_amount,
+        d.creation_discount_percent,   
+        d.current_discount_percent,
+        o.our_price,
+
         -- Metrics
-        -- b.customer_shipment_item_id,
         SUM(b.shipped_units) AS shipped_units,
         SUM(b.revenue_share_amt) AS revenue_share_amt
 
@@ -322,10 +360,9 @@ CREATE TEMP TABLE unified_deal_base AS (
         b.asin,
         d.event_name,
         d.event_year,
-        -- DEAL PRICE
         b.our_price,
-        -- Order date
-        b.order_date,        
+        b.order_date,
+
         -- Product/Business hierarchy
         b.item_name,
         b.gl_product_group,
@@ -333,6 +370,12 @@ CREATE TEMP TABLE unified_deal_base AS (
         b.brand_name,
         -- b.vendor_code,
         b.company_code,
-        b.company_name
+        b.company_name,
+
+        -- pricing & discount
+        d.promotion_pricing_amount,
+        d.creation_discount_percent,   
+        d.current_discount_percent,
+        o.our_price
 );
 

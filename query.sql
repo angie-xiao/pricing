@@ -168,6 +168,8 @@ CREATE TEMP TABLE promotion_details AS (
             event_name,
             event_year,
             event_month,
+            promo_start_date,
+            promo_end_date,
             (CASE event_name
                 WHEN 'PRIME DAY' THEN 1
                 WHEN 'BLACK FRIDAY' THEN 2
@@ -198,15 +200,17 @@ CREATE TEMP TABLE promotion_details AS (
                     event_priority_order,
                     promo_start_date
             ) as event_rank
-        FROM raw_events
+        FROM event_priority
     )
 
     SELECT DISTINCT
         asin,
+        customer_shipment_item_id,
         event_name,
         event_year,
         event_month,
-        promo_start_date
+        promo_start_date,
+        promo_end_date
     FROM prioritized_events
     WHERE event_rank = 1  -- Only take highest priority event when overlapping
 );
@@ -215,6 +219,7 @@ CREATE TEMP TABLE promotion_details AS (
 -- Find the most common start/end dates for each event
 DROP TABLE IF EXISTS event_standards;
 CREATE TEMP TABLE event_standards AS (
+
     WITH event_counts AS (
         SELECT 
             event_name,
@@ -225,22 +230,24 @@ CREATE TEMP TABLE event_standards AS (
             COUNT(*) as frequency,
             -- Rank by frequency - removed month from partition
             ROW_NUMBER() OVER (
-                PARTITION BY event_name, 
-                DATE_PART('year', promo_start_date)
+                PARTITION BY 
+                    event_name, event_year
                 ORDER BY COUNT(*) DESC
             ) as rn
         FROM promotion_details
         WHERE event_name != 'NO_PROMOTION'
         GROUP BY 
             event_name,
-            DATE_PART('year', promo_start_date),
+            event_year,
+            event_month,
             promo_start_date,
             promo_end_date
     )
+
     SELECT 
         event_name,
         event_year,
-        DATE_PART('month', promo_start_date) as event_month,  -- derived from the most common start date
+        event_month, 
         promo_start_date,
         promo_end_date,
         frequency
@@ -286,7 +293,7 @@ DROP TABLE IF EXISTS unified_deal_base;
 CREATE TEMP TABLE unified_deal_base AS (
     SELECT 
         -- Deal context
-        d.asin,
+        b.asin, -- include asins that were not on deal as well
         d.event_name,
         d.event_year,
         b.our_price,
@@ -308,11 +315,11 @@ CREATE TEMP TABLE unified_deal_base AS (
 
     FROM deal_base d
         RIGHT JOIN base_orders b 
-        ON d.asin = b.asin
-        AND d.customer_shipment_item_id = b.customer_shipment_item_id
+        -- ON d.asin = b.asin
+        ON d.customer_shipment_item_id = b.customer_shipment_item_id
 
     GROUP BY
-        d.asin,
+        b.asin,
         d.event_name,
         d.event_year,
         -- DEAL PRICE

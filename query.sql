@@ -301,6 +301,7 @@ CREATE TEMP TABLE consolidated_promos AS (
         p.promotion_pricing_amount, 
         p.creation_discount_percent, 
         p.current_discount_percent
+
     FROM promotion_details p
         LEFT JOIN event_standards e
         ON p.event_name = e.event_name
@@ -317,7 +318,11 @@ CREATE TEMP TABLE deal_base AS (
         asin,
         customer_shipment_item_id,
         event_name,
-        event_year   
+        event_year,
+        promotion_pricing_amount, 
+        creation_discount_percent, 
+        current_discount_percent
+
     FROM consolidated_promos
 );
 
@@ -329,7 +334,6 @@ CREATE TEMP TABLE unified_deal_base AS (
         b.asin, -- include asins that were not on deal as well
         d.event_name,
         d.event_year,
-        b.our_price,
         b.order_date,
 
         -- Product/Business hierarchy
@@ -345,7 +349,7 @@ CREATE TEMP TABLE unified_deal_base AS (
         d.promotion_pricing_amount,
         d.creation_discount_percent,   
         d.current_discount_percent,
-        o.our_price,
+        b.our_price,
 
         -- Metrics
         SUM(b.shipped_units) AS shipped_units,
@@ -360,7 +364,6 @@ CREATE TEMP TABLE unified_deal_base AS (
         b.asin,
         d.event_name,
         d.event_year,
-        b.our_price,
         b.order_date,
 
         -- Product/Business hierarchy
@@ -376,6 +379,6 @@ CREATE TEMP TABLE unified_deal_base AS (
         d.promotion_pricing_amount,
         d.creation_discount_percent,   
         d.current_discount_percent,
-        o.our_price
+        b.our_price
 );
 

@@ -5,3 +5,6 @@ data/
 
 # code space
 .code-workspace
+
+# csv file
+.csv

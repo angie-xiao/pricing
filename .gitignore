@@ -1,0 +1,7 @@
+data/
+
+# Virtual environments
+.venv   
+
+# code space
+.code-workspace

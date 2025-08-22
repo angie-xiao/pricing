@@ -3,8 +3,14 @@ data/
 # Virtual environments
 .venv   
 
+# plotly folder
+.plotly
+
 # code space
 .code-workspace
 
 # csv file
 .csv
+
+# html files
+.html

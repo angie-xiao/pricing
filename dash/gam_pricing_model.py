@@ -8,6 +8,7 @@
 # """
 
 import os
+import random
 
 # Data Wrangling
 import pandas as pd
@@ -23,10 +24,11 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 from plotnine import ggplot, aes, geom_ribbon, geom_line,facet_wrap,labs,theme,geom_point
 import plotly.graph_objects as go
+from plotly.tools import mpl_to_plotly as ggplotly
 
 
 
-def data_engineer(df,tags):
+def data_engineer(df,tags,top_n):
     """
     """
 
@@ -66,14 +68,22 @@ def data_engineer(df,tags):
     # data points where shipped units < 10 (too little evidence)
     asp_product_df = asp_product_df[asp_product_df['shipped_units']>=10]
     
-    print('finished data engineering')
+    # only focus on top sellers
+    top10_product_lst = asp_product_df[['product', 'revenue_share_amt']].groupby('product').sum().reset_index().sort_values(by=['revenue_share_amt'],ascending=False)['product'][:top_n].tolist()
+
+    # filter for topsellers
+    asp_product_topsellers = asp_product_df[
+        asp_product_df['product'].isin(top10_product_lst)
+    ]
+
+    # print('-' * 10, ' finished data engineering', '-'*10, '\n')
     
-    return df_tags
+    return asp_product_topsellers
 
 
 def model(df,tags):
     
-    df_tags = data_engineer(df, tags)
+    df_tags = data_engineer(df, tags, top_n=10)
 
     data_filtered = df_tags[df_tags['event_name']=='NO DEAL']
 
@@ -102,15 +112,15 @@ def model(df,tags):
                 gam = ExpectileGAM(s(0), expectile=q) # initiate the model
                 gam.fit(X,y) #fit
                 gam_results[f'pred_{q}'] = gam.predict(X) # predict for that quantile
-                print(q, "|", product, "|", gam.deviance_residuals(X,y).mean())
-            print("-----------\n")
+                # print(q, "|", product, "|", gam.deviance_residuals(X,y).mean())
+            # print("-----------\n")
 
             # Store the results in a DF
             predictions_gam = pd.DataFrame(gam_results).set_index(X.index)
             predictions_gam_df = pd.concat([product_data[['asp', 'product','shipped_units']], predictions_gam], axis=1)
             all_gam_results = pd.concat([all_gam_results, predictions_gam_df], axis=0)
         
-    print("-"*10, ' finished modeling ', "*"*10, "\n")
+    # print("-"*10, ' finished modeling ', "-"*10, "\n")
 
     return all_gam_results
 
@@ -161,49 +171,78 @@ def optimization(df,tags):
         'best50':best_50,
         'best975': best_975,
         'best25':best_025,
+        'all_gam_results':all_gam_results
     }
     
-    print("-"*10, ' finished pricing optimization ', "-"*10, "\n")
+    # print("-"*10, ' finished pricing optimization ', "-"*10, "\n")
     
     return d
 
-##################################### output #####################################
 
-# # Visualize the GAM Optimization Result
-# (ggplot(
-#     # Data
-#     data = all_gam_results,
-#     # Axes
-#     mapping = aes(x='our_price', y='revenue_pred_0.5', color='product', group='product') ) + 
-# # Adding the Band
-# geom_ribbon(aes(ymax= 'revenue_pred_0.975', ymin= 'revenue_pred_0.025'), 
-#                 fill='#d3d3d3', color= '#FF000000', alpha=0.7, show_legend=False) +
-# # Adding the points
-# geom_point(aes(y='revenue_actual'), alpha=0.15, color="#2C3E50") +
-# # Adding 50th percentile line
-# geom_line(aes(y='revenue_pred_0.5'), alpha=0.5, color='darkred') +
-# # Addimg the 50th pct points
-# geom_point(data=best_50, color='red') + 
-# # Addimg the 97th pct points
-# geom_point(data=best_975, mapping= aes(y='revenue_pred_0.975'), color='blue') + 
-# # Addimg the 2.5th pct points
-# geom_point(data=best_025, mapping= aes(y='revenue_pred_0.025'), color='blue') + 
-# # Wraps by product
-# facet_wrap('product', scales='free') + 
-# # Labels
-# labs(
-#     title='Price Optimization',
-#     subtitle='Maximum median revenue (red point) vs 95% Maximum Confidence Interval',
-#     x= 'our_price',
-#     y= 'Predicted Revenue'
-#     ) +
-# theme(figure_size=(12,7))
+def viz_gam_results(all_gam_results):
+    """
+    params
+        df: pricing df
+        tags: product df
 
-# )
+    return
+        ggplot obj
+    """
 
+    # df_dct = optimization(df, tags)
+    # best_50 = df_dct['best50']
+    # best_975 = df_dct['best975']
+    # best_025 = df_dct['best25']
+    # all_gam_results = df_dct['all_gam_results']
 
-if __name__ == '__main__':
-    optimization(
-        data_folder_path='data', 
-        product_file='730d.csv', pricing_file='products.csv')
-#
+    # map color to product
+    product_lst = all_gam_results['product'].unique()
+    pltly_qual = (px.colors.qualitative.Dark24) # color palette
+    pltly_qual.extend(px.colors.qualitative.Light24)
+    colors = random.sample(pltly_qual, len(product_lst))
+    
+    color_dct = dict()
+
+    i = 0
+    while i < len(product_lst):
+        color_dct[product_lst[i]] = colors[i]
+        i+=1
+
+    # plot
+    fig = go.Figure()
+
+    for group_name, group_df in all_gam_results.groupby('product'):
+        
+        # scatter plot (actual)
+        fig.add_trace(go.Scatter(
+            x=group_df['asp'],
+            y=group_df['revenue_pred_0.5'],
+            mode='markers',
+            name=group_name,  # Name for the legend
+            marker=dict(color=color_dct[group_name], size=10),
+            legendgroup=group_name,
+            )
+        )
+        
+        # error band
+        fig.add_trace(go.Scatter(
+            name=f"group {group_name} error",
+            x=group_df['asp'].tolist() + group_df['asp'].tolist()[::-1], # x, then x reversed
+            y=group_df['revenue_pred_0.975'].tolist() + group_df['revenue_pred_0.025'].tolist()[::-1], # upper, then lower reversed
+            fill='toself',
+            fillcolor='rgba(0,100,80,0.2)',
+            line=dict(color='rgba(255,255,255,0)'),
+            legendgroup=group_name,
+            showlegend=False    
+            )
+        )
+
+    fig.update_layout(
+        yaxis_type="log",
+        title='BAU GAM Results',
+        width=1200,
+        height=650,
+    )
+
+    return fig
+

@@ -4,31 +4,14 @@ from dash import Dash, html, dash_table, dcc
 import pandas as pd
 import plotly.express as px
 from  gam_pricing_model import *
+import random
+from datetime import datetime
+ 
 
 warnings.filterwarnings('ignore')
 
 
-
-# def path_finder(foldername, filename):
-#     '''
-#     return file path based on user OS path
-#     '''
-#     current_directory = os.getcwd()
-#     base_folder = os.path.dirname(current_directory)
-#     data_folder = os.path.join(current_directory, foldername)
-#     file_path = os.path.join(data_folder, filename)
-
-#     # file_path = os.path.join(os.path.dirname(__file__), foldername, filename)
-
-#     return file_path
-
-
 def read_dfs(data_folder_path, product_file, pricing_file):        
-    # df_path = path_finder(data_folder_path, pricing_file)
-    # tags_path = path_finder(data_folder_path, product_file)
-
-    # df = pd.read_csv(df_path)
-    # tags = pd.read_csv(tags_path)
 
     df_path = f"../{data_folder_path}/{pricing_file}"
     df = pd.read_csv(df_path)
@@ -41,20 +24,20 @@ def read_dfs(data_folder_path, product_file, pricing_file):
         'product_tags': tags
     }
     
-    print('-' * 10, ' finished reading input files ', '-' * 10)
+    # print('\n', '-' * 10, ' finished reading input files ', '-' * 10, '\n')
     
     return d
 
 
-def update_graph(folder, filename):
+def price_quantity_graph(folder, filename):
     '''
-    Draw graph
+    Draw price & quantity scatterplot graph
     
     params
         folder: (sub) folder where data file is
         filename: data file to graph
     '''
-    # data_path = path_finder(folder, filename)
+
     data_path = f"../{folder}/{filename}"
     asp_product_topsellers = pd.read_csv(data_path)
     
@@ -89,8 +72,8 @@ def update_graph(folder, filename):
 
     return fig
 
-
-# read dfs
+    
+################################# READ DFS #################################
 df_dict = read_dfs(
     data_folder_path='data', 
     pricing_file='730d.csv',
@@ -99,57 +82,56 @@ df_dict = read_dfs(
 df = df_dict['pricing']
 tags = df_dict['product_tags']
 
-
+# modeling + optimization
 d = optimization(df,tags)
-best50 = d['best50']       # get data
+best50 = d['best50']
+# best_975 = d['best975']
+# best_025 = d['best25']
+all_gam_results = d['all_gam_results']
+    
 
-
-# initiate Dash
+################################# initiate Dash #################################
 app = Dash()
-
 
 # App layout
 app.layout = html.Div(children=[
-    html.H1(children='Hello Dash'),
-
-    html.Div(children='''
-        Dash: A web application framework for your data.
-    '''),
-
+    
+    # Scatter/line: price & quantity
+    html.H1(children='Exploratory Data Analysis'),
     dcc.Graph(
-        id='example-graph',
-        figure=update_graph(folder='data', filename='price_quantity.csv')         # input by VM
-    )
+        id='price_quantity',
+        figure=price_quantity_graph(folder='data', filename='price_quantity.csv')         # input by VM
+    ),
+
+
+    # GAM opt results
+    html.H1(children='GAM Optimization Result for Top 10 Best Sellers'),
+
+    html.Div(children="""
+        - Gray band: 95% confidence interval for the predicted revenue.\n
+    """),
+    html.Div(children="""
+        - Blue points: maximum revenues at 2.5% percentile and 97.5% percentile.\n
+    """),
+    html.Div(children="""
+        - Red spot: optimized price - this is where the median predicted revenue is at its maximum value.
+    """),
+    dcc.Graph(
+        id='gam_results',
+        figure=viz_gam_results(all_gam_results)
+    ),
+    
+        
+    # p50 max rev with optimal pricing table
+    html.H1(children='Optimal Prices by Product Table'),
+    html.Div(children='''
+        Median Predicted Revenue at Maximum Value.
+    '''),
+    dash_table.DataTable(data=best50.to_dict('records'), page_size=10)
     
 ])
 
-
-# app.layout = [
-#     # header
-#     html.Div(className='row', 
-#              children='Exploratory Data Analysis',
-#              style={'textAlign': 'center', 'color': 'black', 'fontSize': 30}),
-
-#     # interactive scatter/line graph (price & quantity)
-#     html.Div(className='row', children=[
-#         dcc.Graph(
-#             id='example-graph',
-#             figure=update_graph(folder='data', filename='price_quantity.csv')         # input by VM
-#         )
-#     ]),
-
-#     # optimal pricing table
-#     html.Div(className='row', children=[
-#         html.Div(className='Optimal Pricing', children=[
-#             dash_table.DataTable(
-#                 data=best50.to_dict('records'), page_size=11, 
-#                 style_table={'overflowX': 'auto'}
-#             )
-#         ])
-#     ])
-# ]
-
-
+print('\n', '-'*10 , datetime.now().strftime("%H:%M:%S"), ' Page Updated ' + '-'*10, '\n')
 
 if __name__ == '__main__':
     app.run(debug=True)
@@ -157,9 +139,13 @@ if __name__ == '__main__':
 
 
 '''
+ref:
 https://dash.plotly.com/tutorial
 
 # in terminal:
 cd dash
 py app.py
+
+host:
+http://127.0.0.1:8050/
 '''

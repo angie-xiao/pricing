@@ -34,6 +34,11 @@ from plotnine import (
 )
 import plotly.graph_objects as go
 from plotly.tools import mpl_to_plotly as ggplotly
+import dash_bootstrap_components as dbc
+from dash_bootstrap_templates import load_figure_template
+ 
+# import plotly.io as pio
+
 
 
 class output_key_dfs:
@@ -49,7 +54,7 @@ class output_key_dfs:
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
-
+    
     def data_engineer(self):
         """
         Execute following steps:
@@ -316,9 +321,40 @@ class output_key_dfs:
         return d
 
 
+    def initial_dfs(self):
+        '''
+        return a dictionary of dfs needed to get modeling steps started
+        '''
+        price_quant_df = output_key_dfs(self.pricing_df, self.product_df,10).price_quant()    # key df #1
+        d = output_key_dfs(self.pricing_df, self.product_df,10).optimization()                # modeling + optimization
+        best50 = d['best50']                                                               # key df #2
+        all_gam_results = d['all_gam_results']            
+
+        dct = {
+            'price_quant_df':price_quant_df,
+            'best50':best50,
+            'all_gam_results':all_gam_results
+        }
+
+        return dct
+    
 class viz:
-    def __init__(self):
-        pass
+    def __init__(self, template):
+        ''' '''
+        # load dash-bootstrap-templates
+        templates = [
+            "bootstrap",
+            "minty",
+            "pulse",
+            "flatly",
+            "quartz",
+            "cyborg",
+            "darkly",
+            "vapor",
+        ]
+        load_figure_template(templates)
+
+        self.template = template
 
     def price_quantity(self, price_quant_df):
         """
@@ -343,6 +379,7 @@ class viz:
                 trendline="lowess",  # used when the relationship is curved
                 trendline_color_override="blue",
                 title="Product Sales: Price vs Shipped Units",
+                template=self.template
             )
             .update_traces(marker=dict(size=7))
             .update_layout(legend_title_text="Product", yaxis_range=[0, None])
@@ -395,6 +432,7 @@ class viz:
                     line=dict(color="rgba(255,255,255,0)"),
                     legendgroup=group_name,
                     showlegend=False,
+                    # template=self.template
                 )
             )
 
@@ -407,6 +445,7 @@ class viz:
                     name=group_name,  # Name for the legend
                     marker=dict(color=color_dct[group_name], size=10),
                     legendgroup=group_name,
+                    # template=self.template
                 )
             )
 
@@ -415,6 +454,7 @@ class viz:
             title="BAU GAM Results",
             width=1200,
             height=650,
+            template=self.template
         )
 
         return fig

@@ -1,96 +1,31 @@
+
 import os
 import warnings
 from dash import Dash, html, dash_table, dcc
 import pandas as pd
 import plotly.express as px
-from  gam_pricing_model import *
+from  gam_pricing_model import output_key_dfs, viz
 import random
 from datetime import datetime
  
 
 warnings.filterwarnings('ignore')
 
-
-def read_dfs(data_folder_path, product_file, pricing_file):        
-
-    df_path = f"../{data_folder_path}/{pricing_file}"
-    df = pd.read_csv(df_path)
     
-    tag_path = f"../{data_folder_path}/{product_file}"
-    tags = pd.read_csv(tag_path)
+#################################### READ DFS ####################################
 
-    d = {
-        'pricing': df,
-        'product_tags': tags
-    }
-    
-    # print('\n', '-' * 10, ' finished reading input files ', '-' * 10, '\n')
-    
-    return d
+dash_folder = os.path.dirname(os.path.realpath(__file__))
+pricing_folder = os.path.dirname(dash_folder)
+data_folder = os.path.join(pricing_folder, 'data')
+pricing_path, tags_path = os.path.join(data_folder, '730d.csv'), os.path.join(data_folder, 'products.csv')
+pricing_df,tags_df = pd.read_csv(pricing_path),pd.read_csv(tags_path)
 
+price_quant_df = output_key_dfs(pricing_df,tags_df,10).price_quant()    # key df #1
+d = output_key_dfs(pricing_df, tags_df,10).optimization()               # modeling + optimization
+best50 = d['best50']                                                    # key df #2
+all_gam_results = d['all_gam_results']                                  # key df #3
 
-def price_quantity_graph(folder, filename):
-    '''
-    Draw price & quantity scatterplot graph
-    
-    params
-        folder: (sub) folder where data file is
-        filename: data file to graph
-    '''
-
-    data_path = f"../{folder}/{filename}"
-    asp_product_topsellers = pd.read_csv(data_path)
-    
-    # aggregate
-    price_quantity = asp_product_topsellers[['asp','shipped_units','product']].groupby(
-        ['asp','product']
-    ).sum().reset_index()
-
-    # plot
-    fig = px.scatter(
-            price_quantity,
-            x='asp',
-            y='shipped_units',
-            log_y=True,
-            color='product',
-            # opacity=.5,
-            width=1200,
-            height=600,
-            trendline='lowess', # used when the relationship is curved
-            trendline_color_override='blue',
-            title='Product Sales: Price vs Shipped Units'
-        ).update_traces(
-            marker=dict(size=7)
-        ).update_layout(
-            legend_title_text='Product',
-            yaxis_range=[0, None]
-        ).update_xaxes(
-            title_text='Price'
-        ).update_yaxes(
-            title_text='Shipped Units'
-        )
-
-    return fig
-
-    
-################################# READ DFS #################################
-df_dict = read_dfs(
-    data_folder_path='data', 
-    pricing_file='730d.csv',
-    product_file='products.csv',
-)
-df = df_dict['pricing']
-tags = df_dict['product_tags']
-
-# modeling + optimization
-d = optimization(df,tags)
-best50 = d['best50']
-# best_975 = d['best975']
-# best_025 = d['best25']
-all_gam_results = d['all_gam_results']
-    
-
-################################# initiate Dash #################################
+################################# INITIATE DASH ##################################
 app = Dash()
 
 # App layout
@@ -100,7 +35,7 @@ app.layout = html.Div(children=[
     html.H1(children='Exploratory Data Analysis'),
     dcc.Graph(
         id='price_quantity',
-        figure=price_quantity_graph(folder='data', filename='price_quantity.csv')         # input by VM
+        figure=viz().price_quantity(price_quant_df)
     ),
 
 
@@ -118,7 +53,7 @@ app.layout = html.Div(children=[
     """),
     dcc.Graph(
         id='gam_results',
-        figure=viz_gam_results(all_gam_results)
+        figure=viz().gam_results(all_gam_results)
     ),
     
         
@@ -144,7 +79,12 @@ https://dash.plotly.com/tutorial
 
 # in terminal:
 cd dash
+
+# windows
 py app.py
+
+# mac
+python3 app.py
 
 host:
 http://127.0.0.1:8050/

@@ -169,33 +169,56 @@ class output_key_dfs:
         return asp_product_topsellers
 
     def elasticity(self):
-
-        '''
+        """
         Calculate the price elasticity of each of our products:
             - % change in quantity demanded / % change in price
             - Unscented 40lb shows the highest elasticity (i.e., largest lift in units with each dollar price decreased)
 
         return
             df: elasticity
-        '''
+        """
         asp_product_topsellers = self.data_engineer()
 
         # Calculating Price-Demand elasticity
         elasticity = (
-            asp_product_topsellers
-            .groupby('product')
-            .agg({'asp': ['max', 'min'],
-                'shipped_units': ['max', 'min'],
-                'product':'count'})
+            asp_product_topsellers.groupby("product")
+            .agg(
+                {
+                    "asp": ["max", "min"],
+                    "shipped_units": ["max", "min"],
+                    "product": "count",
+                }
+            )
             .reset_index()
-            .pipe(lambda d: d.set_axis(['product', 'asp_max', 'asp_min', 'shipped_units_max', 'shipped_units_min', 'product_count'], axis=1))
-            .assign(pct_change_price=lambda d: (d['asp_max'] - d['asp_min']) / d['asp_min'] * 100,
-                    pct_change_qty  =lambda d: (d['shipped_units_max'] - d['shipped_units_min']) / d['shipped_units_min'] * 100)
+            .pipe(
+                lambda d: d.set_axis(
+                    [
+                        "product",
+                        "asp_max",
+                        "asp_min",
+                        "shipped_units_max",
+                        "shipped_units_min",
+                        "product_count",
+                    ],
+                    axis=1,
+                )
+            )
             .assign(
-                ratio=lambda d: d['pct_change_qty'] / d['pct_change_price']) # demand elasticity
+                pct_change_price=lambda d: (d["asp_max"] - d["asp_min"])
+                / d["asp_min"]
+                * 100,
+                pct_change_qty=lambda d: (
+                    d["shipped_units_max"] - d["shipped_units_min"]
+                )
+                / d["shipped_units_min"]
+                * 100,
+            )
+            .assign(
+                ratio=lambda d: d["pct_change_qty"] / d["pct_change_price"]
+            )  # demand elasticity
         )
 
-        elasticity.sort_values(by='ratio',ascending=False).reset_index(drop=True)
+        elasticity.sort_values(by="ratio", ascending=False).reset_index(drop=True)
 
         return elasticity
 
@@ -371,6 +394,9 @@ class output_key_dfs:
 
         return dct
 
+    def grid_search(self):
+        return
+
 
 class viz:
     def __init__(self, template="lux"):
@@ -501,14 +527,14 @@ class viz:
                 )
             )
 
-            # Adding the 50th pct points (optimal)
+            # Adding the expected mean
             fig.add_trace(
                 go.Scatter(
                     x=best_50["asp"],
                     y=best_50["revenue_pred_0.5"],
                     mode="markers",
                     marker=dict(color="#ac1212", size=18),
-                    name="Optimal Price",
+                    name="Expected (Mean)",
                 )
             )
 
@@ -518,8 +544,8 @@ class viz:
                     x=ci_95["asp"],
                     y=ci_95["rev"],
                     mode="markers",
-                    marker=dict(color="#d2b48c", size=18),
-                    name="Confidence Interval 95%",
+                    marker=dict(color="#c6ac8f", size=18),
+                    name="Scenario Range (Conservative-Optimistic)",
                 )
             )
 
@@ -537,53 +563,55 @@ class viz:
         """
         actually need to calculate for discount here
         """
-        fig = px.scatter(
-            asp_product_topsellers,
-            x='asp',
-            y='shipped_units',
-            facet_col='product',
-            category_orders={
-                # "product": [
-                #     'Unscented 6.5','Unscented 28.0', 'Unscented 40.0',
-                #     'Probiotic 16.0', 'Probiotic 28.0', 'Probiotic 40.0',
-                #     'Extra Strength 16.0','Extra Strength 28.0', 'Extra Strength 40.0',
-                # ]
-            },
-            # facet_col_spacing=0.1,
-            facet_row_spacing=0.15,
-            facet_col_wrap=3,
-            # # color='current_discount_percent',
-            color_continuous_scale=px.colors.sequential.Oryel,
-            trendline='lowess',
-            title='Elasticiy Analysis',
-            width=1200,
-            height=600,
-            template='plotly',
-            log_y=True,
-
-        ).update_traces(
-            marker=dict(size=7)
-        ).update_layout(
-            legend_title_text='Product',
-            title_font=dict(size=16)
-        ).update_xaxes(
-            title_text='Price',
-            title_font=dict(size=10),
-            tickfont=dict(size=10)
-        ).update_yaxes(
-            title_text='Shipped Units',
-            title_font=dict(size=10),
-            tickfont=dict(size=10)
+        fig = (
+            px.scatter(
+                asp_product_topsellers,
+                x="asp",
+                y="shipped_units",
+                facet_col="product",
+                category_orders={
+                    # "product": [
+                    #     'Unscented 6.5','Unscented 28.0', 'Unscented 40.0',
+                    #     'Probiotic 16.0', 'Probiotic 28.0', 'Probiotic 40.0',
+                    #     'Extra Strength 16.0','Extra Strength 28.0', 'Extra Strength 40.0',
+                    # ]
+                },
+                # facet_col_spacing=0.1,
+                facet_row_spacing=0.15,
+                facet_col_wrap=3,
+                # # color='current_discount_percent',
+                color_continuous_scale=px.colors.sequential.Oryel,
+                trendline="lowess",
+                title="Elasticiy Analysis",
+                width=1200,
+                height=600,
+                template="plotly",
+                log_y=True,
+            )
+            .update_traces(marker=dict(size=7))
+            .update_layout(legend_title_text="Product", title_font=dict(size=16))
+            .update_xaxes(
+                title_text="Price", title_font=dict(size=10), tickfont=dict(size=10)
+            )
+            .update_yaxes(
+                title_text="Shipped Units",
+                title_font=dict(size=10),
+                tickfont=dict(size=10),
+            )
         )
 
-        fig.update_layout(xaxis=dict(type='category'))
+        fig.update_layout(xaxis=dict(type="category"))
 
-        for annotation in fig['layout']['annotations']:
-            annotation['font'] = dict(size=10)
+        for annotation in fig["layout"]["annotations"]:
+            annotation["font"] = dict(size=10)
 
-        fig.for_each_yaxis(lambda yaxis: yaxis.update(showticklabels=True)) #show ticks
-        fig.for_each_xaxis(lambda xaxis: xaxis.update(showticklabels=True)) #show ticks
-        fig.update_yaxes(matches=None) # don't share y axis
-        fig.update_xaxes(matches=None) # don't share x axis
+        fig.for_each_yaxis(
+            lambda yaxis: yaxis.update(showticklabels=True)
+        )  # show ticks
+        fig.for_each_xaxis(
+            lambda xaxis: xaxis.update(showticklabels=True)
+        )  # show ticks
+        fig.update_yaxes(matches=None)  # don't share y axis
+        fig.update_xaxes(matches=None)  # don't share x axis
 
         return fig

@@ -12,7 +12,8 @@ import dash_bootstrap_components as dbc
 warnings.filterwarnings("ignore")
 
 
-#################################### READ DFS ####################################
+#################################### GET DFS ####################################
+# read
 dash_folder = os.path.dirname(os.path.realpath(__file__))
 pricing_folder = os.path.dirname(dash_folder)
 data_folder = os.path.join(pricing_folder, "data")
@@ -21,6 +22,7 @@ pricing_path, product_path = os.path.join(data_folder, "730d.csv"), os.path.join
 )
 pricing_df, product_df = pd.read_csv(pricing_path), pd.read_csv(product_path)
 
+# run funcs
 dct = output_key_dfs(pricing_df, product_df, 10).initial_dfs()
 price_quant_df, best50, all_gam_results = (
     dct["price_quant_df"],
@@ -28,6 +30,10 @@ price_quant_df, best50, all_gam_results = (
     dct["all_gam_results"],
 )
 best50_optimal_pricing_df = best50[["product", "asp"]]
+asp_product_topsellers = output_key_dfs(pricing_df, product_df, 10).data_engineer()
+
+elasticity_df = output_key_dfs(pricing_df, product_df, 10).elasticity().rename(columns={'ratio':'ratio'})[['product', 'ratio']].sort_values(by=['ratio'], ascending=False)
+elasticity_df['ratio'] = round(elasticity_df['ratio'],2)
 
 ################################# INITIATE DASH ##################################
 app = Dash()
@@ -86,14 +92,6 @@ app.layout = html.Div(
                         dbc.CardBody(
                             [
                                 html.Div(
-                                    "Optimal Price",
-                                    className="kpi-eyebrow",
-                                    style={
-                                        "color": "#121212",
-                                        "textAlign": "center",
-                                    },
-                                ),
-                                html.H2(
                                     id="card_title",
                                     className="kpi-title",
                                     style={
@@ -103,8 +101,55 @@ app.layout = html.Div(
                                         "margin-top": "10px",
                                     },
                                 ),
+                                html.H2(
+                                    "Optimal Price",
+                                    className="kpi-eyebrow",                                                                        
+                                    style={
+                                        "color": "#121212",
+                                        "textAlign": "center",
+                                    },
+                                    
+                                ),
                                 html.H1(
                                     id="card_asp",
+                                    className="kpi-value",
+                                    style={
+                                        "color": "#DAA520",
+                                        "textAlign": "center",
+                                    },
+                                )
+                            ]
+                        ),
+                        style={"backgroundColor": "#F5E8D8"},
+                    ),
+                    width=3,
+                    className="kpi-card",
+                ),
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody(
+                            [
+                                html.Div(
+                                    id="card_title_elasticity",
+                                    className="kpi-title",
+                                    style={
+                                        "color": "#121212",
+                                        "textAlign": "center",
+                                        "margin-bottom": "10px",
+                                        "margin-top": "10px",
+                                    },
+                                ),
+
+                                html.H2(
+                                    "Elasticity",
+                                    className="kpi-eyebrow", 
+                                    style={
+                                        "color": "#121212",
+                                        "textAlign": "center",
+                                    },
+                                ),
+                                html.H1(
+                                    id="elasticity_ratio",
                                     className="kpi-value",
                                     style={
                                         "color": "#DAA520",
@@ -116,8 +161,8 @@ app.layout = html.Div(
                         style={"backgroundColor": "#F5E8D8"},
                     ),
                     width=3,
-                    className="kpi-card",
-                ),
+                    className="kpi-card",                    
+                )
             ],
             style={"margin-left": "20px", "margin-top": "20px"},
             align="center",
@@ -165,7 +210,7 @@ app.layout = html.Div(
                 ),
             ]
         ),
-       ################################ EDA SCATTER ###############################
+       ################################ DESCRIPTIVE EDA ###############################
         html.H1(
             children="Descriptive Product Sales by Price",
             style={
@@ -182,6 +227,7 @@ app.layout = html.Div(
             style={"margin-left": "50px", "margin-top": "20px"},
         ),
         html.Br(),        
+        
         ################################ FOOTNOTE #################################
         html.Div(
             [
@@ -208,12 +254,17 @@ print(
 
 
 @callback(
-    Output("price-quantity", "figure"),
-    Output("gam_results", "figure"),
     Output("card_title", "children"),
     Output("card_asp", "children"),
+    Output("card_title_elasticity", "children"),
+    Output("elasticity_ratio", "children"),
+    Output("gam_results", "figure"),
+    Output("price-quantity", "figure"),
+    # Output("elasticity_table", "data"),
+    # Output("elasticity_graph", "figure"),
     Input("product_dropdown", "value"),
 )
+
 def update_figure(val):
     """ """
     filtered_pricing = price_quant_df[price_quant_df["product"] == val]
@@ -223,13 +274,30 @@ def update_figure(val):
         best50_optimal_pricing_df["product"] == val
     ]
 
-    fig1 = viz().price_quantity(filtered_pricing)
-    fig2 = viz().gam_results(filtered_gam)
+    price_quant_fig = viz().price_quantity(filtered_pricing)
+    gam_res_fig = viz().gam_results(filtered_gam)
 
-    new_product = filtered_table["product"]
-    new_asp = "$" + (filtered_table["asp"]).astype(str)
+    card_title = filtered_table["product"]
+    card_title_elasticity = card_title.copy()
+    card_asp = "$" + (filtered_table["asp"]).astype(str)
 
-    return fig1, fig2, new_product, new_asp
+    elasticity_ratio = elasticity_df[elasticity_df['product']==val]['ratio']
+    # filtered_elasticity_table = elasticity_df[
+    #     elasticity_df["product"] == val
+    # ]
+
+    # filtered_elasticity_graph = viz().elasticity(asp_product_topsellers[asp_product_topsellers['product']==val])
+
+    return (
+        card_title, 
+        card_asp,
+        card_title_elasticity, 
+        elasticity_ratio,
+        gam_res_fig,
+        price_quant_fig,
+        # filtered_elasticity_table.to_dict('records'),
+        # filtered_elasticity_graph
+    )
 
 
 if __name__ == "__main__":

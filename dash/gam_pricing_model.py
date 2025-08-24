@@ -339,9 +339,8 @@ class output_key_dfs:
         return dct
     
 class viz:
-    def __init__(self, template):
+    def __init__(self, template='lux'):
         ''' '''
-        # load dash-bootstrap-templates
         templates = [
             "bootstrap",
             "minty",
@@ -351,6 +350,7 @@ class viz:
             "cyborg",
             "darkly",
             "vapor",
+            "lux"
         ]
         load_figure_template(templates)
 
@@ -432,7 +432,6 @@ class viz:
                     line=dict(color="rgba(255,255,255,0)"),
                     legendgroup=group_name,
                     showlegend=False,
-                    # template=self.template
                 )
             )
 
@@ -445,7 +444,6 @@ class viz:
                     name=group_name,  # Name for the legend
                     marker=dict(color=color_dct[group_name], size=10),
                     legendgroup=group_name,
-                    # template=self.template
                 )
             )
 

@@ -489,11 +489,7 @@ class viz:
                 group_df["revenue_pred_0.975"] == group_df["revenue_pred_0.975"].max()
             ].reset_index(drop=True)
 
-            best_025.rename(columns={"revenue_pred_0.025": "rev"}, inplace=True)
-            best_975.rename(columns={"revenue_pred_0.975": "rev"}, inplace=True)
-            ci_95 = pd.concat([best_025, best_975], axis=0)
-
-            rev_actual_name = f"Revenue Actual - {group_name}"
+            # rev_actual_name = f"Revenue Actual - {}"
 
             # error band
             fig.add_trace(
@@ -520,7 +516,7 @@ class viz:
                     x=group_df["asp"],
                     y=group_df["revenue_actual"],
                     mode="markers",
-                    name=rev_actual_name,  # Name for the legend
+                    name="Revenue Actual",  # Name for the legend
                     marker=dict(symbol="x", color=color_dct[group_name], size=10),
                     # legendgroup=group_name,
                     opacity=0.5,
@@ -533,19 +529,39 @@ class viz:
                     x=best_50["asp"],
                     y=best_50["revenue_pred_0.5"],
                     mode="markers",
-                    marker=dict(color="#ac1212", size=18),
-                    name="Expected (Mean)",
+                    marker=dict(color="#B82132", size=18),
+                    name="Rec. Price",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=group_df["asp"],
+                    y=group_df["revenue_pred_0.5"],
+                    mode="lines",
+                    marker=dict(color="#B82132"),
+                    name="Expected Revenue Prediction",
                 )
             )
 
-            # Adding CI 95 points
+            # conservative
             fig.add_trace(
                 go.Scatter(
-                    x=ci_95["asp"],
-                    y=ci_95["rev"],
+                    x=best_025["asp"],
+                    y=best_025["revenue_pred_0.025"],
                     mode="markers",
-                    marker=dict(color="#c6ac8f", size=18),
-                    name="Scenario Range (Conservative-Optimistic)",
+                    marker=dict(color="#AAB396", size=18),
+                    name="Conservative Prediction",
+                )
+            )
+
+            # optimistic
+            fig.add_trace(
+                go.Scatter(
+                    x=best_975["asp"],
+                    y=best_975["revenue_pred_0.975"],
+                    mode="markers",
+                    marker=dict(color="#F2B28C", size=18),
+                    name="Optimistic Prediction",
                 )
             )
 

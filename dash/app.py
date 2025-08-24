@@ -76,10 +76,8 @@ class get_dfs:
 
         return dct_output
 
-
 #################################### GET DFS ####################################
-
-# run funcs
+    
 d = get_dfs(
     data_folder="data", pricing_file="730d.csv", product_file="products.csv"
 ).return_dct()
@@ -269,7 +267,7 @@ app.layout = html.Div(
         ########################## GRAPH - OPTIMAL PRICE #########################
         # DESCRIPTIONS
         html.H1(
-            children="Recommended Price at Expected Revenue",
+            children="Predictive - Recommended Price at Expected Revenue",
             style={
                 "font-size": "30px",
                 "textAlign": "center",
@@ -291,37 +289,44 @@ app.layout = html.Div(
         html.Div(
             children=[
                 html.B("◦ Goal: "),
-                "Pick the price where we expect to make the most money on average.",
+                "Pick the price where we expect to make the most money on average",
+                html.I(" (i.e., expected or mean revenue)." ),
             ],
             style={"margin-left": "50px", "margin-top": "2px"},
         ),
         html.Div(
             children=[
                 html.B("◦ How: "),
-                "Model how sales change with price.",
-                "For every price point, we compute ",
-                html.I("Expected Revenue = Price * Expected Units."),
+                "Model how sales change with price based on historical data ",
+                html.I("(i.e., 'x' markers in graph)." ),
             ],
             style={"margin-left": "50px", "margin-top": "2px"},
         ),
         html.Div(
             children=[
                 html.B("◦ Range of scenarios: "),
-                "From conservative to optimistic (or from low to higher sales), and the central expectation (average).",
-            ],
-            style={"margin-left": "50px", "margin-top": "2px"},
-        ),
-        html.Div(
-            children=[
-                html.B("◦ Robusticity: "),
-                "Recommended price is the most robust if conservative, expected, and optimistic points are near the same peak.",
+                "From conservative to optimistic, or from low to higher sales, represented by ",
+                html.I("(i.e., the gray band).")
             ],
             style={"margin-left": "50px", "margin-top": "2px"},
         ),
         html.Div(
             children=[
                 html.B("◦ Recommended price: "),
-                "The peak of the expected revenue curve.",
+                "The peak of the expected/mean revenue curve ",
+                html.I("(i.e., the red dot)."),
+                "to maximize the expected/mean revenue.",
+            ],
+            style={"margin-left": "50px", "margin-top": "2px"},
+        ),
+        html.Div(
+            children=[
+                html.B("◦ Robusticity: "),
+                "Recommended price is the most robust if expected ",
+                html.I("(i.e., red dot), "),
+                "conservative, and optimistic points ", 
+                html.I("(i.e., yellow dots) "),
+                "are near the same peak."
             ],
             style={"margin-left": "50px", "margin-top": "2px"},
         ),

@@ -40,7 +40,7 @@ app = Dash(__name__, external_stylesheets=external_stylesheets)
 app.layout = html.Div(
     children=[
         html.Br(),
-        ############################## HEADER ##############################
+        ################################# HEADER #################################
         html.H1(
             children="Optimal Pricing Modeling",
             style={
@@ -53,7 +53,7 @@ app.layout = html.Div(
             },
         ),
         html.Br(),
-        ############################### DROP DOWN & CARD ###############################
+        ############################ DROP DOWN & CARD ############################
         dbc.Row(
             [
                 # Left column: Label + Dropdown stacked
@@ -123,27 +123,10 @@ app.layout = html.Div(
             align="center",
             justify="center",
         ),
-        ################################ EDA SCATTER ###############################
-        html.H1(
-            children="Product Sales by Price",
-            style={
-                "font-size": "30px",
-                "textAlign": "center",
-                "display": "flex",
-                "margin-left": "50px",
-                "margin-top": "20px",
-            },
-        ),
-        dcc.Graph(
-            id="price-quantity",
-            figure=viz().price_quantity(price_quant_df),
-            style={"margin-left": "50px", "margin-top": "20px"},
-        ),
-        html.Br(),
-        ############################## GRAPH & TABLE - OPTIMAL PRICE ##############################
+        ########################## GRAPH - OPTIMAL PRICE #########################
         # DESCRIPTIONS
         html.H1(
-            children="Optimal Pricing Point for Top Products",
+            children="Predictive Optimal Pricing",
             style={
                 "font-size": "30px",
                 "textAlign": "center",
@@ -158,7 +141,7 @@ app.layout = html.Div(
             style={"margin-left": "50px", "margin-top": "10px"},
         ),
         html.Div(
-            children="- Blue points: maximum revenues at 2.5% percentile and 97.5% percentile.",
+            children="- Gold points: maximum revenues at 2.5% percentile and 97.5% percentile.",
             style={
                 "margin-left": "50px",
             },
@@ -182,8 +165,38 @@ app.layout = html.Div(
                 ),
             ]
         ),
-    ]
-)
+       ################################ EDA SCATTER ###############################
+        html.H1(
+            children="Descriptive Product Sales by Price",
+            style={
+                "font-size": "30px",
+                "textAlign": "center",
+                "display": "flex",
+                "margin-left": "50px",
+                "margin-top": "20px",
+            },
+        ),
+        dcc.Graph(
+            id="price-quantity",
+            figure=viz().price_quantity(price_quant_df),
+            style={"margin-left": "50px", "margin-top": "20px"},
+        ),
+        html.Br(),        
+        ################################ FOOTNOTE #################################
+        html.Div(
+            [
+                html.Span("made with ♥️ |"),
+                html.Span(html.I(" @aqxiao")),
+                html.P("github.com/angie-xiao")  
+            ],
+            style={
+                "font-size": "0.8em",
+                "color": "#ac274f", 
+                "textAlign": "center",
+                "background-color": "#f3f3f3"
+            }
+        )
+])
 
 print(
     "\n",

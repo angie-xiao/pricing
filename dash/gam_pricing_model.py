@@ -36,9 +36,8 @@ import plotly.graph_objects as go
 from plotly.tools import mpl_to_plotly as ggplotly
 import dash_bootstrap_components as dbc
 from dash_bootstrap_templates import load_figure_template
- 
-# import plotly.io as pio
 
+# import plotly.io as pio
 
 
 class output_key_dfs:
@@ -54,7 +53,7 @@ class output_key_dfs:
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
-    
+
     def data_engineer(self):
         """
         Execute following steps:
@@ -320,27 +319,31 @@ class output_key_dfs:
 
         return d
 
-
     def initial_dfs(self):
-        '''
+        """
         return a dictionary of dfs needed to get modeling steps started
-        '''
-        price_quant_df = output_key_dfs(self.pricing_df, self.product_df,10).price_quant()    # key df #1
-        d = output_key_dfs(self.pricing_df, self.product_df,10).optimization()                # modeling + optimization
-        best50 = d['best50']                                                               # key df #2
-        all_gam_results = d['all_gam_results']            
+        """
+        price_quant_df = output_key_dfs(
+            self.pricing_df, self.product_df, 10
+        ).price_quant()  # key df #1
+        d = output_key_dfs(
+            self.pricing_df, self.product_df, 10
+        ).optimization()  # modeling + optimization
+        best50 = d["best50"]  # key df #2
+        all_gam_results = d["all_gam_results"]
 
         dct = {
-            'price_quant_df':price_quant_df,
-            'best50':best50,
-            'all_gam_results':all_gam_results
+            "price_quant_df": price_quant_df,
+            "best50": best50,
+            "all_gam_results": all_gam_results,
         }
 
         return dct
-    
+
+
 class viz:
-    def __init__(self, template='lux'):
-        ''' '''
+    def __init__(self, template="lux"):
+        """ """
         templates = [
             "bootstrap",
             "minty",
@@ -350,7 +353,7 @@ class viz:
             "cyborg",
             "darkly",
             "vapor",
-            "lux"
+            "lux",
         ]
         load_figure_template(templates)
 
@@ -377,9 +380,9 @@ class viz:
                 width=1200,
                 height=600,
                 trendline="lowess",  # used when the relationship is curved
-                trendline_color_override="blue",
+                trendline_color_override="#CD9C20",
                 title="Product Sales: Price vs Shipped Units",
-                template=self.template
+                template=self.template,
             )
             .update_traces(marker=dict(size=7))
             .update_layout(legend_title_text="Product", yaxis_range=[0, None])
@@ -401,8 +404,10 @@ class viz:
 
         # map color to product
         product_lst = all_gam_results["product"].unique()
+
+        # color
         pltly_qual = px.colors.qualitative.Dark24  # color palette
-        pltly_qual.extend(px.colors.qualitative.Light24)
+        pltly_qual.extend(px.colors.qualitative.Vivid)
         colors = random.sample(pltly_qual, len(product_lst))
 
         color_dct = dict()
@@ -417,6 +422,22 @@ class viz:
 
         for group_name, group_df in all_gam_results.groupby("product"):
 
+            best_50 = group_df[
+                group_df["revenue_pred_0.5"] == group_df["revenue_pred_0.5"].max()
+            ].reset_index(drop=True)
+            best_025 = group_df[
+                group_df["revenue_pred_0.025"] == group_df["revenue_pred_0.025"].max()
+            ].reset_index(drop=True)
+            best_975 = group_df[
+                group_df["revenue_pred_0.975"] == group_df["revenue_pred_0.975"].max()
+            ].reset_index(drop=True)
+
+            best_025.rename(columns={"revenue_pred_0.025": "rev"}, inplace=True)
+            best_975.rename(columns={"revenue_pred_0.975": "rev"}, inplace=True)
+            ci_95 = pd.concat([best_025, best_975], axis=0)
+
+            rev_actual_name = f"Revenue Actual - {group_name}"
+
             # error band
             fig.add_trace(
                 go.Scatter(
@@ -428,10 +449,11 @@ class viz:
                         ::-1
                     ],  # upper, then lower reversed
                     fill="toself",
-                    fillcolor="rgba(0,100,80,0.2)",
-                    line=dict(color="rgba(255,255,255,0)"),
+                    fillcolor="#cbcbcb",
+                    line=dict(color="#cbcbcb"),
                     legendgroup=group_name,
                     showlegend=False,
+                    opacity=0.4,
                 )
             )
 
@@ -439,11 +461,34 @@ class viz:
             fig.add_trace(
                 go.Scatter(
                     x=group_df["asp"],
-                    y=group_df["revenue_pred_0.5"],
+                    y=group_df["revenue_actual"],
                     mode="markers",
-                    name=group_name,  # Name for the legend
-                    marker=dict(color=color_dct[group_name], size=10),
-                    legendgroup=group_name,
+                    name=rev_actual_name,  # Name for the legend
+                    marker=dict(symbol="x", color=color_dct[group_name], size=10),
+                    # legendgroup=group_name,
+                    opacity=0.5,
+                )
+            )
+
+            # Adding the 50th pct points (optimal)
+            fig.add_trace(
+                go.Scatter(
+                    x=best_50["asp"],
+                    y=best_50["revenue_pred_0.5"],
+                    mode="markers",
+                    marker=dict(color="#ac1212", size=18),
+                    name="Optimal Price",
+                )
+            )
+
+            # Adding CI 95 points
+            fig.add_trace(
+                go.Scatter(
+                    x=ci_95["asp"],
+                    y=ci_95["rev"],
+                    mode="markers",
+                    marker=dict(color="#d2b48c", size=18),
+                    name="Confidence Interval 95%",
                 )
             )
 
@@ -452,7 +497,7 @@ class viz:
             title="BAU GAM Results",
             width=1200,
             height=650,
-            template=self.template
+            template=self.template,
         )
 
         return fig

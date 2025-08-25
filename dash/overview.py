@@ -150,7 +150,7 @@ def layout(products):
                 justify="center",
             ),
             html.Hr(className="my-4"),
-            # Main: left (graph) / right (sticky explainer)
+            # Main: left (pred graph) / right (sticky explainer)
             dbc.Row(
                 [
                     dbc.Col(
@@ -234,28 +234,26 @@ def layout(products):
                 ],
                 className="g-3 mb-4",
             ),
-            # dbc.Row(
-            #     [
-            #         dbc.Col(
-            #             [
-            #                 dcc.Loading(
-            #                     type="circle",
-            #                     children=dcc.Graph(
-            #                         id="snapshot_spark",  # <-- present in layout now
-            #                         style={"height": "420px"},
-            #                         config={"displaylogo": False},
-            #                     ),
-            #                 )
-            #             ],
-            #             md=10,
-            #             xs=12,
-            #             className="mx-auto",
-            #         )
-            #     ],
-            #     className="mb-4",
-            # ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
+            # footnote
+            html.Div(
+                [
+                    html.Span("made with ♥️ | "),
+                    html.Span(html.I("@aqxiao")),
+                    html.P("github.com/angie-xiao"),
+                ],
+                className="text-center py-3",
+                style={
+                    "font-size": "0.8em",
+                    "color": "#ac274f",
+                    "textAlign": "center",
+                    "background-color": "#f3f3f3",
+                    "margin": "40px auto 0 auto",  # <-- top margin added (40px); auto keeps centered
+                    "borderRadius": "6px",
+                    # "width":"100%"
+                },
+            ),
         ],
         fluid=True,
     )
@@ -313,9 +311,6 @@ def register_callbacks(
         except Exception:
             elast_val = str(elast.iloc[0]) if len(elast) else "—"
 
-        # # Descriptive figure
-        # spark = viz.price_quantity(filt_pricing) if len(filt_pricing) else {}
-        
         # pred figure
         filt = all_gam_results[all_gam_results["product"] == product]
         pred_graph = viz.gam_results(filt) if len(filt) else {}

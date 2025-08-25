@@ -37,7 +37,7 @@ def layout(products):
                 justify="center",
             ),
             html.Hr(className="my-4"),
-            # Descriptive graph below (with loader)
+            # Descriptive graph (with loader)
             dbc.Row(
                 [
                     dbc.Col(
@@ -46,20 +46,41 @@ def layout(products):
                                 type="circle",
                                 children=dcc.Graph(
                                     id="snapshot_spark",  # <-- present in layout now
-                                    style={"height": "420px"},
+                                    style={
+                                        "marginTop": "8px",
+                                        "height": "600px",
+                                    },  # taller graph
                                     config={"displaylogo": False},
                                 ),
                             )
                         ],
-                        md=10,
+                        md=8,
                         xs=12,
-                        className="mx-auto",
+                        className="mb-3",
                     )
                 ],
                 className="mb-4",
             ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
+            # footnote            
+            html.Div(
+                [
+                    html.Span("made with ♥️ | "),
+                    html.Span(html.I("@aqxiao")),
+                    html.P("github.com/angie-xiao"),
+                ],
+                className="text-center py-3",
+                style={
+                    "font-size": "0.8em",
+                    "color": "#ac274f",
+                    "textAlign": "center",
+                    "background-color": "#f3f3f3",
+                    "margin": "40px auto 0 auto",  # <-- top margin added (40px); auto keeps centered
+                    "borderRadius": "6px",
+                    # "width":"100%"
+                },
+            ),
         ],
         fluid=True,
     )

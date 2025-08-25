@@ -2,6 +2,7 @@
 
 # make a graph for elasticity to give the user a better sense in terms of distribution among their products
 # rec price & curr price
+# take outliers into account
 
 
 import os
@@ -14,7 +15,7 @@ from datetime import datetime
 import dash_bootstrap_components as dbc
 
 # scripts from app
-from gam_pricing_model import output_key_dfs, viz
+from built_in_logic import output_key_dfs, viz
 from navbar import get_navbar
 from home import Homepage
 import overview, descriptive

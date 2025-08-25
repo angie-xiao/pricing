@@ -226,7 +226,7 @@ def methodology_section():
     return dbc.Container(
         [
             html.Div(id="method"),
-            html.H3("2) Methodology — explained simply", style=ACCENT),
+            html.H3("3) Methodology - explained simply", style=ACCENT),
             # Four step cards in one row
             dbc.Row(
                 [
@@ -377,7 +377,7 @@ def methodology_section():
 def definitions_section():
     return dbc.Container(
         [
-            html.H3("3) Important Definitions", style=ACCENT),
+            html.H3("4) Important Definitions", style=ACCENT),
             dbc.Row(
                 [
                     # rec price

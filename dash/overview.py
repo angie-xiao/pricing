@@ -6,7 +6,7 @@ import dash_bootstrap_components as dbc
 def layout(products):
     return dbc.Container(
         [
-            html.H2("Overview", className="mt-3", style={"textAlign": "center"}),
+            html.H2("Overview", className="mt-3", style={"textAlign": "center", "padding": "20px 0",}),
             # Row: Dropdown (col 1) + 3 KPI cards (cols 2-4)
             dbc.Row(
                 [
@@ -21,7 +21,7 @@ def layout(products):
                                 id="product_dropdown_snap",
                                 options=[{"label": p, "value": p} for p in products],
                                 value=products[0] if products else None,
-                                style={"width": "80%", "margin-left": "20px"},
+                                style={"width": "80%", "margin-left": "20px", },
                             ),
                         ],
                         width=3,
@@ -59,7 +59,7 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#f3f0f0"},
+                            style={"backgroundColor": "#f3f0f0", "padding": "20px 0",},
                         ),
                         width=3,
                         className="kpi-card",
@@ -97,7 +97,7 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#F5E8D8"},
+                            style={"backgroundColor": "#F5E8D8", "padding": "20px 0",},
                         ),
                         width=3,
                         className="kpi-card",
@@ -135,7 +135,7 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#f3f0f0"},
+                            style={"backgroundColor": "#f3f0f0", "padding": "20px 0",},
                         ),
                         width=3,
                         className="kpi-card",
@@ -153,6 +153,27 @@ def layout(products):
             # Main: left (pred graph) / right (sticky explainer)
             dbc.Row(
                 [
+                html.H2(
+                        "Revenue Prediction with GAM",
+                        style={
+                            # "padding": "20px 0",
+                            "color": "#DAA520",
+                            "margin-left": "50px",
+                            "margin-right": "30px",
+                            "margin-bottom": "0px",
+                            "font-size":"20px"
+                        },
+                    ),
+                    html.Span(
+                        "Price-Revenue Scenarios: Conservative, Expected, and Optimistic Projections",
+                        style={
+                            "color": "#5f6b7a",
+                            "margin-left": "50px",
+                            # "margin-top": "-5px",    # pull subtitle up
+                            "display": "block"       # ensures margin-top works
+                        },
+                    ),
+                    
                     dbc.Col(
                         [
                             dcc.Loading(

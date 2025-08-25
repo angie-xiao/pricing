@@ -1,3 +1,4 @@
+# overview
 from dash import html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 
@@ -149,7 +150,7 @@ def layout(products):
                 justify="center",
             ),
             html.Hr(className="my-4"),
-            # Descriptive graph below (with loader)
+            # Main: left (graph) / right (sticky explainer)
             dbc.Row(
                 [
                     dbc.Col(
@@ -157,19 +158,102 @@ def layout(products):
                             dcc.Loading(
                                 type="circle",
                                 children=dcc.Graph(
-                                    id="snapshot_spark",  # <-- present in layout now
-                                    style={"height": "420px"},
+                                    id="gam_results_pred",
+                                    style={
+                                        "marginTop": "8px",
+                                        "height": "600px",
+                                    },  # taller graph
                                     config={"displaylogo": False},
                                 ),
                             )
                         ],
-                        md=10,
+                        md=8,
                         xs=12,
-                        className="mx-auto",
-                    )
+                        className="mb-3",
+                    ),
+                    dbc.Col(
+                        [
+                            dbc.Card(
+                                dbc.CardBody(
+                                    [
+                                        html.H6(
+                                            "How to read this",
+                                            className="mb-2 fw-bold text-uppercase",
+                                        ),
+                                        html.Ul(
+                                            [
+                                                html.Li(
+                                                    [
+                                                        html.B("Goal: "),
+                                                        "Pick the price where expected (mean) revenue is highest.",
+                                                    ]
+                                                ),
+                                                html.Li(
+                                                    [
+                                                        html.B("How: "),
+                                                        "Learn price & demand relationship from historical data ",
+                                                        html.I("('x' markers)."),
+                                                    ]
+                                                ),
+                                                html.Li(
+                                                    [
+                                                        html.B("Range: "),
+                                                        "Conservative → optimistic scenarios shown by the band ",
+                                                        html.I("(P2.5-P97.5)."),
+                                                    ]
+                                                ),
+                                                html.Li(
+                                                    [
+                                                        html.B("Recommended price: "),
+                                                        "Peak of the P50 curve ",
+                                                        html.I("(red dot)."),
+                                                    ]
+                                                ),
+                                                html.Li(
+                                                    [
+                                                        html.B("Robustness: "),
+                                                        "Strongest when peaks of P2.5, P50, & P97.5 align.",
+                                                    ]
+                                                ),
+                                            ],
+                                            className="predictive-explainer-list",
+                                        ),
+                                    ]
+                                ),
+                                className="shadow-sm predictive-explainer",
+                                style={
+                                    "margin-top": "100px",
+                                    "margin-right": "20px",
+                                },  # center inside the col
+                            )
+                        ],
+                        md=4,
+                        xs=12,
+                        className="explainer-col",
+                    ),
                 ],
-                className="mb-4",
+                className="g-3 mb-4",
             ),
+            # dbc.Row(
+            #     [
+            #         dbc.Col(
+            #             [
+            #                 dcc.Loading(
+            #                     type="circle",
+            #                     children=dcc.Graph(
+            #                         id="snapshot_spark",  # <-- present in layout now
+            #                         style={"height": "420px"},
+            #                         config={"displaylogo": False},
+            #                     ),
+            #                 )
+            #             ],
+            #             md=10,
+            #             xs=12,
+            #             className="mx-auto",
+            #         )
+            #     ],
+            #     className="mb-4",
+            # ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
         ],
@@ -183,6 +267,7 @@ def register_callbacks(
     best50_optimal_pricing_df,
     curr_price_df,
     elasticity_df,
+    all_gam_results,
     viz_cls,
 ):
     viz = viz_cls()
@@ -194,7 +279,7 @@ def register_callbacks(
         Output("card_asp_snap", "children"),
         Output("card_title_elasticity_snap", "children"),
         Output("elasticity_ratio_snap", "children"),
-        Output("snapshot_spark", "figure"),
+        Output("gam_results_pred", "figure"),
         Input("product_dropdown_snap", "value"),  # <-- fixed id here too
     )
     def update_snapshot(product):
@@ -228,8 +313,13 @@ def register_callbacks(
         except Exception:
             elast_val = str(elast.iloc[0]) if len(elast) else "—"
 
-        # Descriptive figure
-        spark = viz.price_quantity(filt_pricing) if len(filt_pricing) else {}
+        # # Descriptive figure
+        # spark = viz.price_quantity(filt_pricing) if len(filt_pricing) else {}
+        
+        # pred figure
+        filt = all_gam_results[all_gam_results["product"] == product]
+        pred_graph = viz.gam_results(filt) if len(filt) else {}
+
 
         return (
             title_curr,
@@ -238,5 +328,7 @@ def register_callbacks(
             asp_val,
             title_elast,
             elast_val,
-            spark,
+            # spark,
+            pred_graph
         )
+

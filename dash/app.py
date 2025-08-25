@@ -1,3 +1,5 @@
+# app
+
 # make a graph for elasticity to give the user a better sense in terms of distribution among their products
 # rec price & curr price
 
@@ -15,7 +17,7 @@ import dash_bootstrap_components as dbc
 from gam_pricing_model import output_key_dfs, viz
 from navbar import get_navbar
 from home import Homepage
-import overview, predictive
+import overview, descriptive
 
 
 warnings.filterwarnings("ignore")
@@ -118,7 +120,8 @@ app.validation_layout = html.Div(
         get_navbar(),
         Homepage(),
         overview.layout(products),
-        predictive.layout(products),
+        # predictive.layout(products),
+        descriptive.layout(products),
         html.Div(id="page-content"),
     ]
 )
@@ -146,8 +149,13 @@ def route(path):
         return Homepage()
     if path == "/overview":
         return overview.layout(products)
-    if path == "/predictive":
-        return predictive.layout(products)
+    
+    if path == "/descriptive":
+        return descriptive.layout(products)
+    
+    # if path == "/predictive":
+    #     return predictive.layout(products)
+    
     if path == "/faq":
         return html.Div("FAQ page TBD", className="p-4")
     return html.Div("404 - Not found", className="p-4")
@@ -155,9 +163,10 @@ def route(path):
 
 # Register per-page callbacks (after app is created)
 overview.register_callbacks(
-    app, price_quant_df, best50_optimal_pricing_df, curr_price_df, elasticity_df, viz
+    app, price_quant_df, best50_optimal_pricing_df, curr_price_df, elasticity_df, all_gam_results, viz
 )
-predictive.register_callbacks(app, all_gam_results, viz)
+# predictive.register_callbacks(app, all_gam_results, viz)
+descriptive.register_callbacks(app, price_quant_df, viz)
 
 
 print(

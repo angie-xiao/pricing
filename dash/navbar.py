@@ -11,20 +11,28 @@ def get_navbar():
             ),
             dbc.NavItem(
                 dcc.Link(
-                    "overview",
+                    "Overview",
                     href="/overview",
                     className="nav-link",
                     id="nav-overview",
                 )
-            ),
+            ),             
             dbc.NavItem(
                 dcc.Link(
-                    "Predictive",
-                    href="/predictive",
+                    "Descriptive",
+                    href="/descriptive",
                     className="nav-link",
-                    id="nav-predictive",
+                    id="nav-descriptive",
                 )
-            ),
+            ), 
+            # dbc.NavItem(
+            #     dcc.Link(
+            #         "Predictive",
+            #         href="/predictive",
+            #         className="nav-link",
+            #         id="nav-predictive",
+            #     )
+            # ),
             dbc.NavItem(
                 dcc.Link("FAQ", href="/faq", className="nav-link", id="nav-faq")
             ),

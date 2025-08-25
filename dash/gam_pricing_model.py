@@ -566,13 +566,15 @@ class viz:
             )
 
         fig.update_layout(
-            yaxis_type="log",
-            title="BAU GAM Results",
-            width=1200,
-            height=650,
-            template=self.template,
+            legend=dict(
+                orientation="h",        # horizontal
+                yanchor="bottom",
+                y=1.05,                 # above the chart
+                xanchor="left",
+                x=0
+            ),
+            margin=dict(r=20)           # small right margin
         )
-
         return fig
 
     def elasticity(self, asp_product_topsellers):

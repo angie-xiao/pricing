@@ -43,6 +43,7 @@ def get_navbar():
             fluid=True,
         ),
         color="light",
-        light=True,
+        # light=True,   # mac
+        dark=False,     # windows
         className="shadow-sm",
     )

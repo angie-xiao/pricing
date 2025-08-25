@@ -1,3 +1,7 @@
+# make a graph for elasticity to give the user a better sense in terms of distribution among their products
+# rec price & curr price
+
+
 import os
 import warnings
 from dash import Dash, html, dash_table, dcc, Input, Output, callback
@@ -175,7 +179,8 @@ https://dash.plotly.com/tutorial
 https://medium.com/@wolfganghuang/advanced-dashboards-with-plotly-dash-things-to-consider-before-you-start-9754ac91fd10
 
 # activate pyvenv
-pyenv shell pricing-venv
+ ../.venv/Scripts/activate   # windows
+pyenv shell pricing-venv    # mac
 
 # in terminal:
 cd dash

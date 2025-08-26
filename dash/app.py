@@ -188,10 +188,18 @@ ref:
 https://dash.plotly.com/tutorial
 https://medium.com/@wolfganghuang/advanced-dashboards-with-plotly-dash-things-to-consider-before-you-start-9754ac91fd10
 
+
+# ----------- dev -----------
 # activate pyvenv
  ../.venv/Scripts/activate   # windows
-pyenv shell pricing-venv    # mac
+source ./venv/bin/activate   # mac
 
+# run script
+py app.py   # windows
+python3 app.py
+
+
+----------- user -----------
 # in terminal:
 cd dash
 

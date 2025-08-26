@@ -7,7 +7,7 @@ def layout(products):
     return dbc.Container(
         [
             html.H2("Descriptive Analyses", className="mt-3", style={"textAlign": "center"}),
-            # Row: Dropdown (col 1) + 3 KPI cards (cols 2-4)
+            # Row: Dropdown (col 1)
             dbc.Row(
                 [
                     # Col 1: Dropdown

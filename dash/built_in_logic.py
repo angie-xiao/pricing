@@ -592,7 +592,8 @@ class viz:
                 height=600,
             )
             .update_xaxes(title_text="Elasticity")
-            .update_yaxes(title_text="Count")
+            .update_yaxes(title_text="Product Count")
         )
 
         return fig
+    

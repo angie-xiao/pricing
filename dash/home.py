@@ -81,7 +81,7 @@ def problem_objective_section():
                                 },
                             ),
                             html.P(
-                                "The objective of this product is to provide a clear, evidence-based recommended price"
+                                "The objective of this product is to provide a clear, evidence-based recommended price "
                                 "that maximizes expected revenue while keeping assumptions transparent.",
                                 style={
                                     "color": "#5f6b7a",
@@ -110,19 +110,19 @@ def problem_objective_section():
                                         ]
                                     ),
                                 ],
-                                className="mt-2",
+                                className="md-7",
                                 style={
                                     "border": "1px solid #e9eef5",
                                     "borderRadius": "14px",
                                     "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
                                     "margin-left": "100px",
                                     "margin-right": "150px",
-                                    "margin-bottom": "50px",
-                                    "padding": "14px 0",
+                                    'width':"50%",
+                                    "margin-bottom":"50px"
                                 },
                             ),
                         ],
-                        md=7,
+                        # md=7,
                     )
                 ]
             )
@@ -142,14 +142,14 @@ def abstract_section():
                             html.H3(
                                 "2) What to Expect",
                                 style={
-                                    "padding": "10px 0",
+                                    "padding": "20px 0",
                                     "color": "#DAA520",
                                     "margin-left": "50px",
                                     "margin-right": "30px",
                                 },
                             ),
                             html.P(
-                                "Provide your data in the right folder - the app will do the rest.",
+                                "Provide your data in the right folder - the app will do the rest:",
                                 style={
                                     "color": "#5f6b7a",
                                     "margin-left": "100px",
@@ -183,13 +183,14 @@ def abstract_section():
                                         ]
                                     ),
                                 ],
-                                className="mt-2",
+                                className="md-7",
                                 style={
                                     "border": "1px solid #e9eef5",
                                     "borderRadius": "14px",
                                     "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
                                     "margin-left": "100px",
                                     "margin-right": "150px",
+                                    'width':"50%"
                                 },
                             ),
                             dbc.Row(
@@ -198,7 +199,7 @@ def abstract_section():
                                         dbc.Alert(
                                             [
                                                 html.Strong("💡 In short: "),
-                                                "this is your one-step, automated pricing insights from raw data to decision-ready outputs.",
+                                                "this is your one-stop automated pricing insights tool from raw data to decision-ready outputs.",
                                             ],
                                             color="light",
                                         ),
@@ -209,10 +210,11 @@ def abstract_section():
                                 style={
                                     "margin-left": "100px",
                                     "padding": "14px 0",
+                                    "width":"55%"
                                 },
                             ),
                         ],
-                        md=7,
+                        # md=7,
                     )
                 ]
             )
@@ -366,6 +368,7 @@ def methodology_section():
                 style={
                     "margin-left": "100px",
                     "padding": "14px 0",
+                    "width":"60%"
                 },
             ),
         ],

@@ -389,15 +389,18 @@ def definitions_section():
                             [
                                 dbc.CardBody(
                                     [
-                                        html.H5("Recommended Price (P50)"),
+                                        html.H5("Recommended Price"),
                                         html.P(
-                                            "The price point where the model expects revenue to be highest on average, given the data.",
+                                            "The price point on the central curve where the model "
+                                            "expects revenue to be highest on average.", 
                                             style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
+                                                    "color": "#5f6b7a",
+                                                    "margin-left": "10px",
+                                                    "margin-right": "10px",
+                                                    "margin-top": "20px"
+                                                },
                                         ),
+                                        html.Br() # placeholder
                                     ]
                                 )
                             ],
@@ -417,9 +420,11 @@ def definitions_section():
                             [
                                 dbc.CardBody(
                                     [
-                                        html.H5("Alternative Recs (P2.5 & P97.5)"),
+                                        html.H5("Alternative Scenarios"),
                                         html.P(
-                                            "Conservative & optimistic scenarios around the rec. price that could also be good options.",
+                                            "Conservative and optimistic cases that show how revenue "
+                                            "could shift if demand reacts differently to price changes.",
+
                                             style={
                                                 "color": "#5f6b7a",
                                                 "margin-left": "10px",
@@ -447,7 +452,9 @@ def definitions_section():
                                     [
                                         html.H5("Robustness"),
                                         html.P(
-                                            "Rec. is the most robust when p2.5, p50, and p97.5 align around the same peak.",
+                                            "The recommendation is strongest when the central, "
+                                            "conservative, and optimistic curves all peak around "
+                                            "the same price point.",
                                             style={
                                                 "color": "#5f6b7a",
                                                 "margin-left": "10px",
@@ -475,7 +482,9 @@ def definitions_section():
                                     [
                                         html.H5("Elasticity"),
                                         html.P(
-                                            "How sensitive demand is to price changes, showing whether customers react strongly or weakly to adjustments.",
+                                            "How sensitive customer demand is to price changes — "
+                                            "whether shoppers react strongly or only slightly "
+                                            "when prices move.",
                                             style={
                                                 "color": "#5f6b7a",
                                                 "margin-left": "10px",

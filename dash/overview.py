@@ -6,7 +6,14 @@ import dash_bootstrap_components as dbc
 def layout(products):
     return dbc.Container(
         [
-            html.H2("Overview", className="mt-3", style={"textAlign": "center", "padding": "20px 0",}),
+            html.H2(
+                "Overview",
+                className="mt-3",
+                style={
+                    "textAlign": "center",
+                    "padding": "20px 0",
+                },
+            ),
             # Row: Dropdown (col 1) + 3 KPI cards (cols 2-4)
             dbc.Row(
                 [
@@ -21,7 +28,10 @@ def layout(products):
                                 id="product_dropdown_snap",
                                 options=[{"label": p, "value": p} for p in products],
                                 value=products[0] if products else None,
-                                style={"width": "80%", "margin-left": "20px", },
+                                style={
+                                    "width": "80%",
+                                    "margin-left": "20px",
+                                },
                             ),
                         ],
                         width=3,
@@ -59,7 +69,10 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#f3f0f0", "padding": "20px 0",},
+                            style={
+                                "backgroundColor": "#f3f0f0",
+                                "padding": "20px 0",
+                            },
                         ),
                         width=3,
                         className="kpi-card",
@@ -97,7 +110,10 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#F5E8D8", "padding": "20px 0",},
+                            style={
+                                "backgroundColor": "#F5E8D8",
+                                "padding": "20px 0",
+                            },
                         ),
                         width=3,
                         className="kpi-card",
@@ -135,7 +151,10 @@ def layout(products):
                                     ),
                                 ]
                             ),
-                            style={"backgroundColor": "#f3f0f0", "padding": "20px 0",},
+                            style={
+                                "backgroundColor": "#f3f0f0",
+                                "padding": "20px 0",
+                            },
                         ),
                         width=3,
                         className="kpi-card",
@@ -153,7 +172,7 @@ def layout(products):
             # Main: left (pred graph) / right (sticky explainer)
             dbc.Row(
                 [
-                html.H2(
+                    html.H2(
                         "Revenue Prediction with GAM",
                         style={
                             # "padding": "20px 0",
@@ -161,7 +180,7 @@ def layout(products):
                             "margin-left": "50px",
                             "margin-right": "30px",
                             "margin-bottom": "0px",
-                            "font-size":"20px"
+                            "font-size": "20px",
                         },
                     ),
                     html.Span(
@@ -170,10 +189,10 @@ def layout(products):
                             "color": "#5f6b7a",
                             "margin-left": "50px",
                             # "margin-top": "-5px",    # pull subtitle up
-                            "display": "block"       # ensures margin-top works
+                            "display": "block",  # ensures margin-top works
                         },
                     ),
-                    
+                    # pred graph
                     dbc.Col(
                         [
                             dcc.Loading(
@@ -192,6 +211,7 @@ def layout(products):
                         xs=12,
                         className="mb-3",
                     ),
+                    # sticky note
                     dbc.Col(
                         [
                             dbc.Card(
@@ -255,6 +275,48 @@ def layout(products):
                 ],
                 className="g-3 mb-4",
             ),
+            # elasticity histogram
+            dbc.Col(
+                [
+                    # header
+                    html.H2(
+                        "Elasticity Histogram",
+                        style={
+                            # "padding": "20px 0",
+                            "color": "#DAA520",
+                            "margin-left": "50px",
+                            "margin-right": "30px",
+                            "margin-bottom": "0px",
+                            "font-size": "20px",
+                        },
+                    ),
+                    html.Span(
+                        "Elasticity = pct change in demand / qty change in price ",
+                        style={
+                            "color": "#5f6b7a",
+                            "margin-left": "50px",
+                            # "margin-top": "-5px",    # pull subtitle up
+                            "display": "block",  # ensures margin-top works
+                        },
+                    ),
+                    # graph
+                    dcc.Loading(
+                        type="circle",
+                        children=dcc.Graph(
+                            id="elast_dist",
+                            style={
+                                "marginTop": "8px",
+                                "height": "600px",
+                                "width": "70%",
+                            },  # taller graph
+                            config={"displaylogo": False},
+                        ),
+                    ),
+                ],
+                md=8,
+                xs=12,
+                className="mb-3",
+            ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
             # footnote
@@ -299,6 +361,7 @@ def register_callbacks(
         Output("card_title_elasticity_snap", "children"),
         Output("elasticity_ratio_snap", "children"),
         Output("gam_results_pred", "figure"),
+        Output("elast_dist", "figure"),
         Input("product_dropdown_snap", "value"),  # <-- fixed id here too
     )
     def update_snapshot(product):
@@ -307,9 +370,13 @@ def register_callbacks(
 
         # Filter data
         filt_pricing = price_quant_df[price_quant_df["product"] == product]
+        filt_elasticity_df = elasticity_df.copy()  # don't filter
+        # filt_elasticity_df = elasticity_df[elasticity_df["product"] == product]
         filt_opt = best50_optimal_pricing_df[
             best50_optimal_pricing_df["product"] == product
         ]
+
+        # --------------------- KPI CARDS ---------------------
         curr = curr_price_df[curr_price_df["product"] == product]["current_price"]
         elast = elasticity_df[elasticity_df["product"] == product]["ratio"]
 
@@ -332,10 +399,15 @@ def register_callbacks(
         except Exception:
             elast_val = str(elast.iloc[0]) if len(elast) else "—"
 
+        # --------------------- PRED GRAPH ---------------------
         # pred figure
         filt = all_gam_results[all_gam_results["product"] == product]
         pred_graph = viz.gam_results(filt) if len(filt) else {}
 
+        # ------------------- ELASTICITY DIST -------------------
+        elast_dist_graph = (
+            viz.elast_dist(filt_elasticity_df) if len(filt_elasticity_df) else {}
+        )
 
         return (
             title_curr,
@@ -345,6 +417,6 @@ def register_callbacks(
             title_elast,
             elast_val,
             # spark,
-            pred_graph
+            pred_graph,
+            elast_dist_graph,
         )
-

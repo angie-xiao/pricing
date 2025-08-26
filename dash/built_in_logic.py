@@ -451,6 +451,8 @@ class viz:
 
     def gam_results(self, all_gam_results):
         """
+        predictive graphing
+
         params
             df: pricing df
             tags: product df
@@ -567,69 +569,30 @@ class viz:
 
         fig.update_layout(
             legend=dict(
-                orientation="h",        # horizontal
+                orientation="h",  # horizontal
                 yanchor="bottom",
-                y=1.05,                 # above the chart
+                y=1.05,  # above the chart
                 xanchor="left",
-                x=0
+                x=0,
             ),
-            margin=dict(r=20)           # small right margin
+            margin=dict(r=20),  # small right margin
         )
         return fig
 
-    def elasticity(self, asp_product_topsellers):
+    def elast_dist(self, elast_df):
         """
         actually need to calculate for discount here
         """
+
         fig = (
-            px.scatter(
-                asp_product_topsellers,
-                x="asp",
-                y="shipped_units",
-                facet_col="product",
-                category_orders={
-                    # "product": [
-                    #     'Unscented 6.5','Unscented 28.0', 'Unscented 40.0',
-                    #     'Probiotic 16.0', 'Probiotic 28.0', 'Probiotic 40.0',
-                    #     'Extra Strength 16.0','Extra Strength 28.0', 'Extra Strength 40.0',
-                    # ]
-                },
-                # facet_col_spacing=0.1,
-                facet_row_spacing=0.15,
-                facet_col_wrap=3,
-                # # color='current_discount_percent',
-                color_continuous_scale=px.colors.sequential.Oryel,
-                trendline="lowess",
-                title="Elasticiy Analysis",
+            px.histogram(
+                elast_df,
+                x="ratio",
                 width=1200,
                 height=600,
-                template="plotly",
-                log_y=True,
             )
-            .update_traces(marker=dict(size=7))
-            .update_layout(legend_title_text="Product", title_font=dict(size=16))
-            .update_xaxes(
-                title_text="Price", title_font=dict(size=10), tickfont=dict(size=10)
-            )
-            .update_yaxes(
-                title_text="Shipped Units",
-                title_font=dict(size=10),
-                tickfont=dict(size=10),
-            )
+            .update_xaxes(title_text="Elasticity")
+            .update_yaxes(title_text="Count")
         )
-
-        fig.update_layout(xaxis=dict(type="category"))
-
-        for annotation in fig["layout"]["annotations"]:
-            annotation["font"] = dict(size=10)
-
-        fig.for_each_yaxis(
-            lambda yaxis: yaxis.update(showticklabels=True)
-        )  # show ticks
-        fig.for_each_xaxis(
-            lambda xaxis: xaxis.update(showticklabels=True)
-        )  # show ticks
-        fig.update_yaxes(matches=None)  # don't share y axis
-        fig.update_xaxes(matches=None)  # don't share x axis
 
         return fig

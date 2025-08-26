@@ -1,7 +1,7 @@
 # app
 
 # make a graph for elasticity to give the user a better sense in terms of distribution among their products
-# rec price & curr price
+# top opps for asins w greatest gaps bw rec price & curr price
 # take outliers into account
 
 

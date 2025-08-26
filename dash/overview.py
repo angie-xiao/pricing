@@ -383,7 +383,7 @@ def register_callbacks(
         Output("gam_results_pred", "figure"),
         Output("elast_dist", "figure"),
         Output("elast_table", "data"),            
-        Input("product_dropdown_snap", "value"),  # 
+        Input("product_dropdown_snap", "value"),
     )
     def overview(product):
         if not product:

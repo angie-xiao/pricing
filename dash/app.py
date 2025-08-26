@@ -18,7 +18,7 @@ import dash_bootstrap_components as dbc
 from built_in_logic import output_key_dfs, viz
 from navbar import get_navbar
 from home import Homepage
-import overview, descriptive
+import overview, descriptive, opps
 
 
 warnings.filterwarnings("ignore")
@@ -65,7 +65,21 @@ class get_dfs:
             self.product_df["tag"] + " " + self.product_df["weight"].astype(str)
         )
         curr_price_df = tmp_curr_price[["product", "current_price"]]
+        
+        # opportunities
+        curr_opt_df = pd.merge(
+            curr_price_df, best50[['product', 'asp', 'revenue_pred_0.5', 'revenue_actual']], how='left',
+            left_on='product', right_on='product'
+        )
+        curr_opt_df['price_gap'] = curr_opt_df['asp'] - curr_opt_df['current_price']
+        curr_opt_df['rev_gap'] = curr_opt_df['revenue_pred_0.5'] - curr_opt_df['revenue_actual']
+        curr_opt_df['price_gap'] = round(curr_opt_df['price_gap'], 2)
+        curr_opt_df['rev_gap'] = round(curr_opt_df['rev_gap'], 2)
+        curr_opt_df.sort_values(by='rev_gap', ascending=False, inplace=True)
+        curr_opt_df.rename(columns={'asp':'rec_price'},inplace=True)
+        curr_opt_df = curr_opt_df[['product', 'rev_gap', 'price_gap', 'rec_price', 'current_price', 'revenue_pred_0.5', 'revenue_actual']]
 
+        # elasticity
         elasticity_df = (
             output_key_dfs(self.pricing_df, self.product_df, 10)
             .elasticity()
@@ -84,6 +98,7 @@ class get_dfs:
             "asp_product_topsellers": asp_product_topsellers,
             "elasticity_df": elasticity_df,
             "curr_price_df": curr_price_df,
+            'curr_opt_df':curr_opt_df,
         }
 
         return dct_output
@@ -103,7 +118,7 @@ best50_optimal_pricing_df = d["best50_optimal_pricing_df"]
 asp_product_topsellers = d["asp_product_topsellers"]
 elasticity_df = d["elasticity_df"]
 curr_price_df = d["curr_price_df"]
-
+curr_opt_df = d['curr_opt_df']
 
 ################################# INITIATE DASH ##################################
 
@@ -121,8 +136,8 @@ app.validation_layout = html.Div(
         get_navbar(),
         Homepage(),
         overview.layout(products),
-        # predictive.layout(products),
         descriptive.layout(products),
+        opps.layout(curr_opt_df),
         html.Div(id="page-content"),
     ]
 )
@@ -154,8 +169,8 @@ def route(path):
     if path == "/descriptive":
         return descriptive.layout(products)
     
-    # if path == "/predictive":
-    #     return predictive.layout(products)
+    if path == "/opps":
+        return opps.layout(curr_opt_df)
     
     if path == "/faq":
         return html.Div("FAQ page TBD", className="p-4")
@@ -168,6 +183,8 @@ overview.register_callbacks(
 )
 # predictive.register_callbacks(app, all_gam_results, viz)
 descriptive.register_callbacks(app, price_quant_df, viz)
+opps.register_callbacks(app, curr_opt_df)
+
 
 
 print(
@@ -189,25 +206,18 @@ https://dash.plotly.com/tutorial
 https://medium.com/@wolfganghuang/advanced-dashboards-with-plotly-dash-things-to-consider-before-you-start-9754ac91fd10
 
 
+# in terminal:
+
 # ----------- dev -----------
 # activate pyvenv
- ../.venv/Scripts/activate   # windows
-source ./venv/bin/activate   # mac
-
-# run script
-py app.py   # windows
-python3 app.py
-
+ ../.venv/Scripts/activate              # windows
+source ./.pricing-venv/bin/activate     # mac
 
 ----------- user -----------
-# in terminal:
+# run script
 cd dash
-
-
-# call the app
-py app.py # winddows
-python3 app.py  # mac
-
+py app.py                               # windows
+python3 app.py                          # mac
 
 host:
 http://127.0.0.1:8050/

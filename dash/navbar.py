@@ -25,14 +25,14 @@ def get_navbar():
                     id="nav-descriptive",
                 )
             ), 
-            # dbc.NavItem(
-            #     dcc.Link(
-            #         "Predictive",
-            #         href="/predictive",
-            #         className="nav-link",
-            #         id="nav-predictive",
-            #     )
-            # ),
+            dbc.NavItem(
+                dcc.Link(
+                    "Opportunities",
+                    href="/opps",
+                    className="nav-link",
+                    id="nav-opps",
+                )
+            ),
             dbc.NavItem(
                 dcc.Link("FAQ", href="/faq", className="nav-link", id="nav-faq")
             ),

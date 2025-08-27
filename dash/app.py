@@ -114,13 +114,13 @@ https://medium.com/@wolfganghuang/advanced-dashboards-with-plotly-dash-things-to
 # in terminal:
 
 # ----------- dev -----------
+cd dash
+
 # activate pyvenv
- ../.venv/Scripts/activate              # windows
+../.venv/Scripts/activate               # windows
 source ./.pricing-venv/bin/activate     # mac
 
------------ user -----------
 # run script
-cd dash
 py app.py                               # windows
 python3 app.py                          # mac
 

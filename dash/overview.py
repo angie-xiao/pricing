@@ -64,20 +64,23 @@ def layout(products_lookup: pd.DataFrame):
             # Predictive graph + mini scenario table + explainer
             dbc.Row(
                 [
+                    # pred graph
                     dbc.Col(
                         dcc.Loading(
                             type="circle",
                             children=dcc.Graph(
                                 id="gam_results_pred",
-                                style={"marginTop": "8px", "height": "560px"},
+                                style={"height": "560px", "padding":'10px'},
                                 config={"displaylogo": False},
                             ),
                         ),
                         md=8, xs=12, className="mb-3"
                     ),
+                    # sceario summary & sticky note
                     dbc.Col(
                         [
-                            html.H6("Scenario Summary", className="mb-2", style={"textAlign": "center"}),
+                            
+                            html.H6("Scenario Summary", className="mb-2", style={"textAlign": "center",  "marginTop":"100px"}),
                             dash_table.DataTable(
                                 id="scenario_table",
                                 columns=[
@@ -86,10 +89,12 @@ def layout(products_lookup: pd.DataFrame):
                                     {"name": "Revenue", "id": "revenue"},
                                 ],
                                 data=[],
-                                style_table={"border": "none"},
+                                style_table={"border": "none", 'marginTop':'20px', "marginBottom": "12px"},
                                 style_cell={"textAlign": "center", "border": "none", "fontSize": "14px", "padding": "6px"},
-                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6"},
+                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6", "marginTop":"550px"},
                             ),
+                            
+                            # sticky note
                             dbc.Card(
                                 dbc.CardBody(
                                     [
@@ -105,8 +110,11 @@ def layout(products_lookup: pd.DataFrame):
                                     ]
                                 ),
                                 className="shadow-sm",
-                                style={"marginTop": "16px"},
-                            ),
+                                style={"marginTop": "50px"},
+                            ),                            
+                                                       
+
+
                         ],
                         md=4, xs=12
                     ),
@@ -117,41 +125,41 @@ def layout(products_lookup: pd.DataFrame):
             html.Hr(className="my-4"),
 
             # Elasticity section: dist + ranked table
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.H4("Top Products Elasticity", style={"color": "#DAA520"}),
-                            html.Span("Elasticity = % change in demand / % change in price",
-                                      style={"color": "#5f6b7a", "display": "block", "marginBottom": "6px"}),
-                            dcc.Loading(
-                                type="circle",
-                                children=dcc.Graph(id="elast_dist", style={"height": "420px"},
-                                                   config={"displaylogo": False})
-                            ),
-                        ],
-                        md=7, xs=12, className="mb-3"
-                    ),
-                    dbc.Col(
-                        dash_table.DataTable(
-                            id="elast_table",
-                            columns=[
-                                {"name": "Rank", "id": "rank"},
-                                {"name": "Product", "id": "product"},
-                                {"name": "Elasticity", "id": "ratio", "type": "numeric"},
-                            ],
-                            data=[],
-                            page_size=10,
-                            sort_action="native",
-                            style_table={"height": "420px", "overflowY": "auto", "border": "none"},
-                            style_cell={"padding": "10px", "fontSize": "14px", "border": "none", "textAlign": "center"},
-                            style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6"},
-                        ),
-                        md=5, xs=12
-                    ),
-                ],
-                className="g-3"
-            ),
+            # dbc.Row(
+            #     [
+            #         dbc.Col(
+            #             [
+            #                 html.H4("Top Products Elasticity", style={"color": "#DAA520"}),
+            #                 html.Span("Elasticity = % change in demand / % change in price",
+            #                           style={"color": "#5f6b7a", "display": "block", "marginBottom": "6px"}),
+            #                 dcc.Loading(
+            #                     type="circle",
+            #                     children=dcc.Graph(id="elast_dist", style={"height": "420px"},
+            #                                        config={"displaylogo": False})
+            #                 ),
+            #             ],
+            #             md=7, xs=12, className="mb-3"
+            #         ),
+            #         dbc.Col(
+            #             dash_table.DataTable(
+            #                 id="elast_table",
+            #                 columns=[
+            #                     {"name": "Rank", "id": "rank"},
+            #                     {"name": "Product", "id": "product"},
+            #                     {"name": "Elasticity", "id": "ratio", "type": "numeric"},
+            #                 ],
+            #                 data=[],
+            #                 page_size=10,
+            #                 sort_action="native",
+            #                 style_table={"height": "420px", "overflowY": "auto", "border": "none"},
+            #                 style_cell={"padding": "10px", "fontSize": "14px", "border": "none", "textAlign": "center"},
+            #                 style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6"},
+            #             ),
+            #             md=5, xs=12
+            #         ),
+            #     ],
+            #     className="g-3"
+            # ),
 
             # Portfolio upside chart
             dbc.Row(
@@ -218,8 +226,8 @@ def register_callbacks(app,
         Output("robustness_badge", "children"),
         Output("gam_results_pred", "figure"),
         Output("scenario_table", "data"),
-        Output("elast_dist", "figure"),
-        Output("elast_table", "data"),
+        # Output("elast_dist", "figure"),
+        # Output("elast_table", "data"),
         Output("opportunity_chart", "figure"),
         Output("coverage_note", "children"),
         Input("product_dropdown_snap", "value"),
@@ -279,9 +287,9 @@ def register_callbacks(app,
         # ---------- Robustness badge ----------
         badge = _robustness_badge(filt)
 
-        # ---------- Elasticity visuals (portfolio-level) ----------
-        elast_dist_graph = viz.elast_dist(elasticity_df) if len(elasticity_df) else viz.empty_fig("No elasticity data")
-        elast_table_data = _elasticity_rank_table(elasticity_df)
+        # # ---------- Elasticity visuals (portfolio-level) ----------
+        # elast_dist_graph = viz.elast_dist(elasticity_df) if len(elasticity_df) else viz.empty_fig("No elasticity data")
+        # elast_table_data = _elasticity_rank_table(elasticity_df)
 
         # ---------- Portfolio opportunity chart ----------
         opp_fig = _opportunity_chart(
@@ -301,8 +309,8 @@ def register_callbacks(app,
             badge,
             pred_graph,
             scenario_data,
-            elast_dist_graph,
-            elast_table_data,
+            # elast_dist_graph,
+            # elast_table_data,
             opp_fig,
             coverage,
         )
@@ -476,12 +484,12 @@ def _opportunity_chart(elast_df, best50_df, curr_df, all_gam):
 
     df = df.sort_values("upside", ascending=False).head(12)
     fig = px.bar(
-        df, x="product", y="upside",
+        df, y="product", x="upside",
         hover_data=["elasticity"], height=380,
         title="Upside vs Elasticity (Top Opportunities)"
     )
-    fig.update_yaxes(title_text="Upside (Expected Revenue Δ)", tickprefix="$", separatethousands=True)
-    fig.update_xaxes(title_text="")
+    fig.update_xaxes(title_text="Upside (Expected Revenue Δ)", tickprefix="$", separatethousands=True)
+    fig.update_yaxes(title_text="")
     fig.update_traces(text=df["upside"].map(lambda x: f"${x:,.0f}"),
                       textposition="outside", cliponaxis=False)
     fig.update_layout(margin=dict(l=10, r=10, t=40, b=60),

@@ -31,7 +31,7 @@ d = output_key_dfs.from_csv_folder(
     product_file="products.csv",
     top_n=10,
 )
-products_lookup = d["products_lookup"]
+products_lookup = d["best50_optimal_pricing_df"][['product', 'product_key']].drop_duplicates().reset_index(drop=True)
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.LUX], suppress_callback_exceptions=True)
 server = app.server

@@ -64,13 +64,18 @@ def layout(products_lookup: pd.DataFrame):
             # Predictive graph + mini scenario table + explainer
             dbc.Row(
                 [
+                    # pred graph title
+                    html.H3("Predictive Graph", className="mt-3",
+                        style={"margin-left": "50px", "marginTop": "190px", "color": "#DAA520",}),
                     # pred graph
                     dbc.Col(
                         dcc.Loading(
                             type="circle",
                             children=dcc.Graph(
                                 id="gam_results_pred",
-                                style={"height": "560px", "padding":'10px'},
+                                style={"height": "560px", 
+                                    #    "padding":'10px'
+                                       },
                                 config={"displaylogo": False},
                             ),
                         ),
@@ -80,7 +85,7 @@ def layout(products_lookup: pd.DataFrame):
                     dbc.Col(
                         [
                             
-                            html.H6("Scenario Summary", className="mb-2", style={"textAlign": "center",  "marginTop":"100px"}),
+                            html.H6("Scenario Summary", className="mb-2", style={"textAlign": "center",  "marginTop":"40px"}),
                             dash_table.DataTable(
                                 id="scenario_table",
                                 columns=[
@@ -89,9 +94,9 @@ def layout(products_lookup: pd.DataFrame):
                                     {"name": "Revenue", "id": "revenue"},
                                 ],
                                 data=[],
-                                style_table={"border": "none", 'marginTop':'20px', "marginBottom": "12px"},
+                                style_table={"border": "none",  "marginBottom": "12px"},
                                 style_cell={"textAlign": "center", "border": "none", "fontSize": "14px", "padding": "6px"},
-                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6", "marginTop":"550px"},
+                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6", "marginTop":"400px"},
                             ),
                             
                             # sticky note
@@ -101,19 +106,18 @@ def layout(products_lookup: pd.DataFrame):
                                         html.H6("How to read this", className="mb-2 fw-bold text-uppercase"),
                                         html.Ul(
                                             [
-                                                html.Li([html.B("Goal: "), "Pick the price where the central curve’s expected revenue is highest."]),
+                                                html.Li([html.B("Goal: "), "Pick the price where the central curve's expected revenue is highest."]),
                                                 html.Li([html.B("Range: "), "Conservative and optimistic curves show how outcomes may vary."]),
-                                                html.Li([html.B("Confidence: "), "Stronger when all curves peak around a similar price and there’s lots of nearby data."]),
+                                                html.Li([html.B("Confidence: "), "Stronger when all curves peak around a similar price and there's lots of nearby data."]),
                                             ],
                                             className="predictive-explainer-list",
+                                            
                                         ),
                                     ]
                                 ),
                                 className="shadow-sm",
-                                style={"marginTop": "50px"},
-                            ),                            
-                                                       
-
+                                style={"marginTop": "50px", },
+                            ),                      
 
                         ],
                         md=4, xs=12
@@ -163,11 +167,18 @@ def layout(products_lookup: pd.DataFrame):
 
             # Portfolio upside chart
             dbc.Row(
-                dbc.Col(
-                    dcc.Loading(type="circle",
-                                children=dcc.Graph(id="opportunity_chart", config={"displaylogo": False})),
-                    width=12, className="mt-3"
-                )
+                [
+                    # pred graph title
+                    html.H3("Top Revenue Opportunities", className="mt-3",
+                        style={"margin-left": "50px", "marginTop": "190px", "color": "#DAA520",}
+                    ),
+                    
+                    dbc.Col(
+                        dcc.Loading(type="circle",
+                                    children=dcc.Graph(id="opportunity_chart", config={"displaylogo": False})),
+                        width=12, className="mt-3"
+                    )
+                ]
             ),
 
             # Coverage note
@@ -431,11 +442,16 @@ def _opportunity_chart(elast_df, best50_df, curr_df, all_gam):
                 frame[c] = pd.to_numeric(frame[c], errors="coerce")
 
     # overlap on product_key (not product)
-    prods = sorted(
-        set(all_gam["product_key"])
-        & set(best50_df["product_key"])
-        & set(curr_df["product_key"])
-    )
+    # prods = sorted(
+    #     set(all_gam["product_key"])
+    #     & set(best50_df["product_key"])
+    #     & set(curr_df["product_key"])
+    # )
+    
+    # only use filtered top N prods
+    prods = set(best50_df["product_key"])
+    
+    
     if not prods:
         return _empty("No overlapping products across inputs")
 
@@ -486,7 +502,7 @@ def _opportunity_chart(elast_df, best50_df, curr_df, all_gam):
     fig = px.bar(
         df, y="product", x="upside",
         hover_data=["elasticity"], height=380,
-        title="Upside vs Elasticity (Top Opportunities)"
+        # title="Upside vs Elasticity (Top Opportunities)"
     )
     fig.update_xaxes(title_text="Upside (Expected Revenue Δ)", tickprefix="$", separatethousands=True)
     fig.update_yaxes(title_text="")

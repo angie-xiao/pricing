@@ -390,6 +390,9 @@ class viz:
         self.template = template
 
     def gam_results(self, all_gam_results: pd.DataFrame):
+        '''
+        pred graph
+        '''
         product_lst = all_gam_results["product"].unique()
         pltly_qual = px.colors.qualitative.Dark24
         pltly_qual.extend(px.colors.qualitative.Vivid)
@@ -470,9 +473,12 @@ class viz:
             )
 
         fig.update_layout(
-            legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
-            margin=dict(r=20),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0                
+            ),
+            margin=dict(r=8),
         )
+        
         return fig
 
     def elast_dist(self, elast_df: pd.DataFrame):

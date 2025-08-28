@@ -83,6 +83,7 @@ class output_key_dfs:
 
         df_tags = self.pricing_df.merge(self.product_df, how="left", on="asin")
         df_tags["product"] = df_tags["tag"] + " " + df_tags["weight"].astype(str)
+        df_tags["product"] = df_tags["product"].str.upper()
 
         df_tags["order_date"] = pd.to_datetime(df_tags["order_date"])
         df_tags["week_num"] = df_tags["order_date"].dt.isocalendar().week
@@ -194,6 +195,10 @@ class output_key_dfs:
             .assign(ratio=lambda d: d["pct_change_qty"] / d["pct_change_price"])
         )
         elasticity.sort_values(by="ratio", ascending=False).reset_index(drop=True)
+
+        # + percentile col
+        elasticity['pct'] = elasticity['ratio'].rank(pct=True) * 100
+
         return elasticity
 
     def price_quant(self) -> pd.DataFrame:
@@ -320,7 +325,7 @@ class output_key_dfs:
         ].copy()
 
         # elasticity — do NOT trim here; keep full distribution you computed
-        elasticity_df = self.elasticity()[["product", "ratio"]].copy()
+        elasticity_df = self.elasticity()[["product", "ratio", "pct"]].copy()
         elasticity_df = (
             self._add_key(elasticity_df)
             .sort_values("ratio", ascending=False)
@@ -567,14 +572,14 @@ class viz:
             y="upside",
             hover_data=["elasticity"],
             height=380,
-            title="Upside vs Elasticity (Top Opportunities)",
+            # title="Upside vs Elasticity (Top Opportunities)",
         )
         fig.update_yaxes(
             title_text="Upside (Expected Revenue Δ)",
             tickprefix="$",
             separatethousands=True,
         )
-        fig.update_xaxes(title_text="")
+        # fig.update_xaxes(title_text="")
         fig.update_traces(
             text=df["upside"].map(lambda x: f"${x:,.0f}"),
             textposition="outside",
@@ -584,7 +589,9 @@ class viz:
             margin=dict(l=10, r=10, t=40, b=60),
             uniformtext_minsize=10,
             uniformtext_mode="hide",
+            yaxis={'categoryorder': 'total descending'}
         )
+
         return fig
 
     def empty_fig(self, title="No data"):

@@ -13,7 +13,8 @@ def layout(products_lookup: pd.DataFrame):
     """Pass the DataFrame with columns ['product_key','product']."""
     return dbc.Container(
         [
-            html.H2("Overview", className="mt-3",
+            html.H1("Overview", 
+                    className="display-5",
                     style={"textAlign": "center", "padding": "20px 0"}),
 
             # Product selector (centered)
@@ -47,18 +48,18 @@ def layout(products_lookup: pd.DataFrame):
                 [
                     _kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#f3f0f0"),
                     _kpi_card("card_title_snap", "Recommended Price", "card_asp_snap", bg="#F5E8D8"),
-                    _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0"),
-                    _kpi_card("card_title_upside_snap", "Revenue Upside (vs Current)", "upside_value_snap", bg="#eef8f0"),
+                    _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0", id_subtext="elasticity-subtext"),
+                    _kpi_card("card_title_upside_snap", "Revenue Opportunity", "upside_value_snap", bg="#eef8f0", id_subtext="upside-subtext"),
                 ],
+                className="g-4 align-items-stretch",          # <— key
                 justify="center",
                 align="center",
-                className="g-4",
                 style={"padding": "10px 0 10px"},
             ),
 
             # Confidence / Robustness badge
             dbc.Row(dbc.Col(html.Div(id="robustness_badge",
-                                     style={"textAlign": "center", "paddingTop": "4px"}), width=12)),
+                                     style={"textAlign": "center", "paddingTop": "25px"}), width=12)),
             html.Hr(className="my-4"),
 
             # Predictive graph + mini scenario table + explainer
@@ -116,7 +117,7 @@ def layout(products_lookup: pd.DataFrame):
                                     ]
                                 ),
                                 className="shadow-sm",
-                                style={"marginTop": "50px", },
+                                style={"marginTop": "100px", },
                             ),                      
 
                         ],
@@ -125,6 +126,10 @@ def layout(products_lookup: pd.DataFrame):
                 ],
                 className="g-3 mb-4",
             ),
+
+            # Coverage note
+            dbc.Row(dbc.Col(html.Div(id="coverage_note",
+                                     style={"textAlign": "center", "color": "#5f6b7a", "fontSize": "0.9em", }), width=12)),
 
             html.Hr(className="my-4"),
 
@@ -181,9 +186,6 @@ def layout(products_lookup: pd.DataFrame):
                 ]
             ),
 
-            # Coverage note
-            dbc.Row(dbc.Col(html.Div(id="coverage_note",
-                                     style={"textAlign": "center", "color": "#5f6b7a", "fontSize": "0.9em", "marginTop": "6px"}), width=12)),
             html.Div(style={"height": "16px"}),
 
             # Footer
@@ -195,25 +197,64 @@ def layout(products_lookup: pd.DataFrame):
         fluid=True,
     )
 
-
-def _kpi_card(id_title, title, id_value, bg="#f3f0f0"):
+# _kpi_card: add id_subtext
+def _kpi_card(id_title, title, id_value, bg="#f3f0f0", id_subtext=None):
     return dbc.Col(
         dbc.Card(
             dbc.CardBody(
                 [
-                    html.Div(id=id_title, className="kpi-title",
-                             style={"color": "#121212", "textAlign": "center", "marginBottom": "10px", "marginTop": "10px"}),
-                    html.H2(title, className="kpi-eyebrow",
-                            style={"color": "#121212", "textAlign": "center", "fontSize": "18px"}),
-                    html.H1(id=id_value, className="kpi-value",
-                            style={"color": "#DAA520", "textAlign": "center"}),
-                ]
+                    html.Div(
+                        id=id_title, className="kpi-title",
+                        style={
+                            "color": "#121212", "textAlign": "center",
+                            "marginBottom": "10px", "marginTop": "10px",
+                            "whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis",
+                        },
+                    ),
+                    # subtle gold accent bar (optional)
+                    html.Div(
+                        style={
+                            "height": "4px", "width": "44px", "margin": "2px auto 8px",
+                            "borderRadius": "999px",
+                            "background": "linear-gradient(90deg,#DAA520,#F0C64C)",
+                            "opacity": 0.9,
+                        }
+                    ),
+                    html.H2(
+                        title, className="kpi-eyebrow",
+                        style={"color": "#121212", "textAlign": "center", "fontSize": "18px", "letterSpacing": ".14em", "fontWeight": 700},
+                    ),
+                    html.H1(
+                        id=id_value, className="kpi-value",
+                        style={"color": "#DAA520", "textAlign": "center", "fontSize": "50px", "fontWeight": 800},
+                    ),
+                    html.Div(
+                        id=id_subtext if id_subtext else f"{id_value}-subtext",
+                        className="kpi-subtext text-muted",
+                        style={"textAlign": "center", "fontSize": "15px", "marginTop": "6px",
+                               "lineHeight": "1.25", "minHeight": "34px"},
+                    ),
+                ],
+                className="d-flex flex-column justify-content-start",
+                style={"gap": "6px", "padding": "22px 18px"},
             ),
-            style={"backgroundColor": bg, "padding": "12px 0"},
+            # Bootstrap-only cosmetics + a touch of inline elevation
+            # Subtle, balanced “card” look
+            className="h-100 shadow-sm border rounded-4",
+            style={
+                "backgroundColor": bg,
+                "padding": "12px 0",
+                "borderColor": "rgba(17,24,39,0.08)",   # soft edge instead of heavy shadow
+                # OPTIONAL: whisper-lift; comment out if you want only Bootstrap's shadow-sm
+                "boxShadow": "0 1px 2px rgba(16,24,40,.03), 0 4px 8px rgba(16,24,40,.04)",
+                # OPTIONAL: very faint header glow; remove if you want pure flat
+                "backgroundImage": "radial-gradient(160% 80% at 50% 0%, rgba(218,165,32,.03), transparent 45%)",
+            },
         ),
         width=3,
         className="kpi-card",
     )
+
 
 
 def register_callbacks(app,
@@ -233,24 +274,45 @@ def register_callbacks(app,
         Output("card_asp_snap", "children"),
         Output("card_title_elasticity_snap", "children"),
         Output("elasticity_ratio_snap", "children"),
+        Output("elasticity-subtext", "children"),    
+        Output("card_title_upside_snap","children"),      
         Output("upside_value_snap", "children"),
+        Output("upside-subtext", "children"),               
         Output("robustness_badge", "children"),
         Output("gam_results_pred", "figure"),
         Output("scenario_table", "data"),
-        # Output("elast_dist", "figure"),
-        # Output("elast_table", "data"),
         Output("opportunity_chart", "figure"),
         Output("coverage_note", "children"),
         Input("product_dropdown_snap", "value"),
     )
-
     def overview(product_key):
-        if not product_key:
-            # Visible placeholders everywhere
-            empty = viz.empty_fig("Select a product")
-            return ("", "—", "", "—", "", "—", "—", "", empty, [], empty, [], empty, "")
+        # Ensure percentile column exists (if you didn't add it upstream)
+        edf = elasticity_df.copy()
+        if "pct" not in edf.columns and "ratio" in edf.columns:
+            edf["pct"] = edf["ratio"].rank(pct=True) * 100
 
-        # Display label
+        # ---- No selection: return exactly 13 placeholders in correct order
+        if not product_key:
+            empty_fig = viz.empty_fig("Select a product")
+            return (
+                "",                 # card_title_curr_price_snap
+                "—",                # curr_price_snap
+                "",                 # card_title_snap
+                "—",                # card_asp_snap
+                "",                 # card_title_elasticity_snap
+                "—",                # elasticity_ratio_snap
+                "",                 # elasticity-subtext   
+                "",                 # card_title_upside_snap
+                "—",                # upside_value_snap
+                "",                 # upside-subtext             
+                "",                 # robustness_badge
+                empty_fig,          # gam_results_pred.figure
+                [],                 # scenario_table.data
+                empty_fig,          # opportunity_chart.figure
+                "",                 # coverage_note.children
+            )
+
+        # ----- Display label
         try:
             display_name = products_lookup.loc[
                 products_lookup["product_key"] == product_key, "product"
@@ -258,14 +320,12 @@ def register_callbacks(app,
         except Exception:
             display_name = product_key
 
-        # ---------- KPI: Current ----------
+        # ----- Current price
         curr = curr_price_df.loc[curr_price_df["product_key"] == product_key, "current_price"]
         curr_price_val = f"${float(curr.iloc[0]):,.2f}" if len(curr) else "—"
 
-        # ---------- KPI: Recommended ----------
-        filt_opt = best50_optimal_pricing_df[
-            best50_optimal_pricing_df["product_key"] == product_key
-        ]
+        # ----- Recommended price
+        filt_opt = best50_optimal_pricing_df[best50_optimal_pricing_df["product_key"] == product_key]
         if len(filt_opt):
             try:
                 asp_val = f"${float(filt_opt['asp'].iloc[0]):,.2f}"
@@ -274,60 +334,92 @@ def register_callbacks(app,
         else:
             asp_val = "—"
 
-        # ---------- KPI: Elasticity (single) ----------
-        elast = elasticity_df.loc[elasticity_df["product_key"] == product_key, "ratio"]
-        elast_val = f"{float(elast.iloc[0]):.2f}" if len(elast) else "—"
+        # ----- Elasticity (value + percentile)
+        row = edf.loc[edf["product_key"] == product_key]
+        if row.empty or pd.isna(row["ratio"].iloc[0]):
+            elast_val, elast_subtext = "—", ""
+        else:
+            elast_val = f"{float(row['ratio'].iloc[0]):.2f}"
+            pct_val = float(row["pct"].iloc[0]) if "pct" in row.columns else np.nan
+            if np.isnan(pct_val):
+                elast_subtext = ""
+            else:
+                pct_round = int(round(pct_val))
+                top_share = max(1, 100 - pct_round)
+                elast_subtext = f"Top ~{top_share}% among selected products"
 
-        # ---------- Prediction Graph ----------
+        # ----- Prediction graph
         filt = all_gam_results[all_gam_results["product_key"] == product_key]
         pred_graph = viz.gam_results(filt) if len(filt) else viz.empty_fig("No model data")
 
-        # ---------- Scenario Mini-table ----------
+        # ----- Scenario summary
         scenario_df = _scenario_table(filt) if len(filt) else pd.DataFrame(
             [{"case": "—", "price": "—", "revenue": "—"}]
         )
         scenario_data = scenario_df.to_dict("records")
 
-        # ---------- Upside vs current ----------
-        upside_text = _upside_vs_current(
+        # ----- Upside (split into value + subtext)
+        upside_val, upside_sub = _upside_vs_current_parts(
             curr_price_df, best50_optimal_pricing_df, product_key, all_gam_results
         )
-        if not upside_text:
-            upside_text = "—"
 
-        # ---------- Robustness badge ----------
+        # ----- Robustness badge
         badge = _robustness_badge(filt)
 
-        # # ---------- Elasticity visuals (portfolio-level) ----------
-        # elast_dist_graph = viz.elast_dist(elasticity_df) if len(elasticity_df) else viz.empty_fig("No elasticity data")
-        # elast_table_data = _elasticity_rank_table(elasticity_df)
-
-        # ---------- Portfolio opportunity chart ----------
-        opp_fig = _opportunity_chart(
-            elasticity_df, best50_optimal_pricing_df, curr_price_df, all_gam_results
-        )
+        # ----- Opportunity chart
+        opp_fig = _opportunity_chart(edf, best50_optimal_pricing_df, curr_price_df, all_gam_results)
         if opp_fig == {}:
             opp_fig = viz.empty_fig("No portfolio opportunities computed")
 
-        # ---------- Coverage note ----------
+        # ----- Coverage note
         coverage = _coverage_note(filt)
 
+        # Return EXACTLY 14 in same order as Outputs
         return (
-            display_name, curr_price_val,
-            display_name, asp_val,
-            display_name, elast_val,
-            upside_text,
-            badge,
-            pred_graph,
-            scenario_data,
-            # elast_dist_graph,
-            # elast_table_data,
-            opp_fig,
-            coverage,
+            display_name,         # 1
+            curr_price_val,       # 2
+            display_name,         # 3
+            asp_val,              # 4
+            display_name,         # 5
+            elast_val,            # 6
+            elast_subtext,        # 7
+            display_name,
+            upside_val,           # 8
+            upside_sub,           # 9  (new)
+            badge,                # 10
+            pred_graph,           # 11
+            scenario_data,        # 12
+            opp_fig,              # 13
+            coverage,             # 14
         )
 
 
+
 # ---------- Helpers (unchanged) ----------
+    
+def update_elasticity_kpi(product_key, elast_data):
+    # if not product_key or not elast_data:
+    #     return no_update, no_update
+
+    df = pd.DataFrame(elast_data)
+    row = df.loc[df["product_key"] == product_key]
+    if row.empty:
+        return "—", ""
+
+    ratio = float(row["ratio"].iloc[0])
+    pct   = float(row["pct"].iloc[0])  # 0–100
+
+    # Format displays
+    value_text = f"{ratio:,.2f}"
+    pct_round  = int(round(pct))
+    # Optional “Top X%” helper (e.g., 90th pct = Top 10%)
+    top_share  = max(1, 100 - pct_round)
+
+    subtext = f"Top ~{top_share}% among selected products"
+
+    return value_text, subtext
+
+
 def _scenario_table(prod_df: pd.DataFrame) -> pd.DataFrame:
     if prod_df.empty:
         return pd.DataFrame(columns=["case", "price", "revenue"])
@@ -365,6 +457,48 @@ def _upside_vs_current(curr_df, best50_df, product_key, all_gam):
         return f"{sign}${abs(delta):,.0f} ({sign}{abs(pct):,.1f}%)"
     except Exception:
         return "—"
+
+def _upside_vs_current_parts(curr_df, best50_df, product_key, all_gam):
+    """
+    Returns (value_text, subtext_text):
+      value_text = signed $ delta
+      subtext_text = signed (% delta) wrapped in parentheses, or "" if N/A
+    """
+    try:
+        cp = curr_df.loc[curr_df["product_key"] == product_key, "current_price"]
+        if cp.empty or pd.isna(cp.iloc[0]):
+            return "—", ""
+        curr_price = float(cp.iloc[0])
+
+        prod = all_gam[
+            (all_gam["product_key"] == product_key)
+            & pd.notna(all_gam["asp"])
+            & pd.notna(all_gam["revenue_pred_0.5"])
+        ]
+        if prod.empty:
+            return "—", ""
+
+        # nearest ASP to current price on expected curve
+        idx = (prod["asp"] - curr_price).abs().idxmin()
+        rev_at_curr = float(prod.loc[idx, "revenue_pred_0.5"])
+
+        best = best50_df[best50_df["product_key"] == product_key]
+        if best.empty or pd.isna(best["revenue_pred_0.5"].iloc[0]):
+            return "—", ""
+
+        rev_at_best = float(best["revenue_pred_0.5"].iloc[0])
+
+        delta = rev_at_best - rev_at_curr
+        sign = "+" if delta >= 0 else "-"
+        value_text = f"{sign}${abs(delta):,.0f}"
+
+        # percent subtext
+        pct = (delta / rev_at_curr * 100) if rev_at_curr else np.nan
+        subtext_text = f"({sign}{abs(pct):,.1f}%)" if pd.notna(pct) else ""
+
+        return value_text, subtext_text
+    except Exception:
+        return "—", ""
 
 
 def _robustness_badge(prod_df: pd.DataFrame):

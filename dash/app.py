@@ -117,8 +117,8 @@ https://medium.com/@wolfganghuang/advanced-dashboards-with-plotly-dash-things-to
 cd dash
 
 # activate pyvenv
-../.venv/Scripts/activate               # windows
-source ./.pricing-venv/bin/activate     # mac
+../.venv/Scripts/activate                # windows
+source ../.pricing-venv/bin/activate     # mac
 
 # run script
 py app.py                               # windows

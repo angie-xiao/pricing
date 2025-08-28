@@ -17,14 +17,14 @@ def get_navbar():
                     id="nav-overview",
                 )
             ),             
-            dbc.NavItem(
-                dcc.Link(
-                    "Descriptive",
-                    href="/descriptive",
-                    className="nav-link",
-                    id="nav-descriptive",
-                )
-            ), 
+            # dbc.NavItem(
+            #     dcc.Link(
+            #         "Descriptive",
+            #         href="/descriptive",
+            #         className="nav-link",
+            #         id="nav-descriptive",
+            #     )
+            # ), 
             dbc.NavItem(
                 dcc.Link(
                     "Opportunities",
@@ -44,7 +44,7 @@ def get_navbar():
     return dbc.Navbar(
         dbc.Container(
             [
-                dbc.NavbarBrand("Optimal Pricing", href="/", className="fw-bold"),
+                dbc.NavbarBrand("Optima", href="/", className="fw-bold"),
                 dbc.NavbarToggler(id="navbar-toggler"),
                 dbc.Collapse(nav, id="navbar-collapse", navbar=True),
             ],

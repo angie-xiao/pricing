@@ -15,7 +15,7 @@ def layout(products_lookup: pd.DataFrame):
         [
             html.H1("Overview", 
                     className="display-5",
-                    style={"textAlign": "center", "padding": "20px 0"}),
+                    style={"textAlign": "center", "padding": "58px 0 8px"}),
 
             # Product selector (centered)
             dbc.Row(

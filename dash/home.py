@@ -46,13 +46,13 @@ def hero_section():
                     dbc.Col(
                         [
                             html.H1(
-                                "Optimal Pricing Identifier",
+                                "Optima",
                                 className="display-5",
                                 style={"textAlign": "center"},
                             ),
                             html.P(
-                                "Data driven recommendations balancing price and volume for sustainable revenue growth.",
-                                style={"textAlign": "center", **MUTED},
+                                'optimal price finder for revenue optimization', 
+                                style={ "textAlign": "center", **MUTED}
                             ),
                         ]
                     )
@@ -72,7 +72,7 @@ def problem_objective_section():
                     dbc.Col(
                         [
                             html.H3(
-                                "1) Problem Statement",
+                                "(1) Problem Statement",
                                 style={
                                     "padding": "10px 0",
                                     "color": "#DAA520",
@@ -140,7 +140,7 @@ def abstract_section():
                     dbc.Col(
                         [
                             html.H3(
-                                "2) What to Expect",
+                                "(2) Solution",
                                 style={
                                     "padding": "20px 0",
                                     "color": "#DAA520",
@@ -228,7 +228,7 @@ def methodology_section():
     return dbc.Container(
         [
             html.Div(id="method"),
-            html.H3("3) Methodology - explained simply", style=ACCENT),
+            html.H3("(3) Methodology", style=ACCENT),
             # Four step cards in one row
             dbc.Row(
                 [
@@ -380,7 +380,7 @@ def methodology_section():
 def definitions_section():
     return dbc.Container(
         [
-            html.H3("4) Important Definitions", style=ACCENT),
+            html.H3("(4) Key Definitions", style=ACCENT),
             dbc.Row(
                 [
                     # rec price
@@ -517,7 +517,7 @@ def definitions_section():
 def suggestions_section():
     return dbc.Container(
         [
-            html.H3("4) Suggestions & FAQs", style=ACCENT),
+            html.H3("(4) Suggestions & FAQs", style=ACCENT),
             dbc.Row(
                 [
                     dbc.Col(

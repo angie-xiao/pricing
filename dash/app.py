@@ -13,7 +13,7 @@ import dash_bootstrap_components as dbc
 from built_in_logic import output_key_dfs, viz
 from navbar import get_navbar
 from home import Homepage
-import overview, descriptive, opps
+import overview, opps
 
 
 warnings.filterwarnings("ignore")
@@ -42,7 +42,7 @@ app.validation_layout = html.Div([
     get_navbar(),
     Homepage(),
     overview.layout(products_lookup),                    # << here
-    descriptive.layout(products_lookup["product"].tolist()),
+    # descriptive.layout(products_lookup["product"].tolist()),
     opps.layout(d["curr_opt_df"]),
     html.Div(id="page-content"),
 ])
@@ -69,8 +69,8 @@ def route(path):
         return Homepage()
     elif path == "/overview":
         return overview.layout(products_lookup)          # << here
-    elif path == "/descriptive":
-        return descriptive.layout(products_lookup["product"].tolist())
+    # elif path == "/descriptive":
+    #     return descriptive.layout(products_lookup["product"].tolist())
     elif path == "/opps":
         return opps.layout(d["curr_opt_df"])
     return html.Div("404 - Not found", className="p-4")
@@ -89,7 +89,7 @@ overview.register_callbacks(
  
 
 # descriptive expects price_quant_df
-descriptive.register_callbacks(app, d["price_quant_df"], viz)
+# descriptive.register_callbacks(app, d["price_quant_df"], viz)
 
 # opps expects the opportunity table df
 opps.register_callbacks(app, d["curr_opt_df"])

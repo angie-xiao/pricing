@@ -26,10 +26,10 @@ def layout(opp_table_df):
             # ---- Content (constrained width) ----
             dbc.Container(
                 [
-                    html.H2(
-                        "Pricing Optimization Opportunities",
-                        className="mt-3",
-                        style={"textAlign": "center", "padding": "30px 0"},
+                    html.H1(
+                        "Top Optimization Opportunities",
+                        className="display-5",
+                        style={"textAlign": "center", "padding": "58px 0 8px"},
                     ),
                     dbc.Row(
                         dbc.Col(

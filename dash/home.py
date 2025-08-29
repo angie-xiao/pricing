@@ -51,7 +51,7 @@ def hero_section():
                                 style={"textAlign": "center"},
                             ),
                             html.P(
-                                'optimal price finder for revenue optimization', 
+                                'optimal price finder for sustainable growth', 
                                 style={ "textAlign": "center", **MUTED}
                             ),
                         ]
@@ -148,49 +148,22 @@ def abstract_section():
                                     "margin-right": "30px",
                                 },
                             ),
-                            html.P(
-                                "Provide your data in the right folder - the app will do the rest:",
+                            html.Span(
+                                "Simply place your data in the designated folder, and the application will take care of the rest: from data engineering, to modeling, and finally generating the final presentation layer. ",
                                 style={
                                     "color": "#5f6b7a",
                                     "margin-left": "100px",
-                                    # "margin-right": "50px",
+                                    "margin-right": "200px",
                                 },
-                            ),
-                            dbc.ListGroup(
-                                [
-                                    dbc.ListGroupItem(
-                                        [
-                                            html.Strong("Data Engineering: "),
-                                            "raw inputs transformed into clean features",
-                                        ]
-                                    ),
-                                    dbc.ListGroupItem(
-                                        [
-                                            html.Strong("Modeling: "),
-                                            "revenue curves fitted, elasticity estimated",
-                                        ]
-                                    ),
-                                    dbc.ListGroupItem(
-                                        [
-                                            html.Strong("Visualization: "),
-                                            "clear price-revenue tradeoffs displayed",
-                                        ]
-                                    ),
-                                    dbc.ListGroupItem(
-                                        [
-                                            html.Strong("Recommendations: "),
-                                            "optimal price point at average (or expected) revenue, plus conservative and optimistic alternatives",
-                                        ]
-                                    ),
-                                ],
-                                className="md-7",
+                            ),                            
+                            html.Span(
+                                html.I(
+                                    "As the user, your role is streamlined: review the interactive graphs and outputs, and focus your attention where it matters most: on making strategic decisions. "
+                                ),
                                 style={
-                                    "border": "1px solid #e9eef5",
-                                    "borderRadius": "14px",
-                                    "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
+                                    "color": "#5f6b7a",
                                     "margin-left": "100px",
-                                    "margin-right": "150px",
-                                    'width':"50%"
+                                    "margin-right": "100px",
                                 },
                             ),
                             dbc.Row(
@@ -199,7 +172,7 @@ def abstract_section():
                                         dbc.Alert(
                                             [
                                                 html.Strong("💡 In short: "),
-                                                "this is your one-stop automated pricing insights tool from raw data to decision-ready outputs.",
+                                                "this is your end-to-end, automated pricing insights engine - transforming raw data into clear, decision-ready outputs.",
                                             ],
                                             color="light",
                                         ),
@@ -208,9 +181,9 @@ def abstract_section():
                                 ],
                                 className="mt-3",
                                 style={
-                                    "margin-left": "100px",
+                                    "margin-left": "80px",
                                     "padding": "14px 0",
-                                    "width":"55%"
+                                    "width":"70%"
                                 },
                             ),
                         ],
@@ -225,151 +198,87 @@ def abstract_section():
 
 
 def methodology_section():
+    CARD_STYLE = {
+        "border": "1px solid #e9eef5",
+        "borderRadius": "14px",
+        "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
+    }
+    P_STYLE = {
+        "color": "#5f6b7a",
+        "marginLeft": "10px",
+        "marginRight": "10px",
+        "marginTop": "10px",
+    }
+
+    def _step(title, desc):
+        return dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [
+                        html.H5(title),
+                        html.P(desc, style=P_STYLE),
+                    ],
+                    className="d-flex flex-column",
+                ),
+                style=CARD_STYLE,
+                className="h-100",
+            ),
+        )
+
     return dbc.Container(
         [
             html.Div(id="method"),
             html.H3("(3) Methodology", style=ACCENT),
-            # Four step cards in one row
+
+            # Responsive grid: 1 col on xs, 2 on md, 3 on xl (so 5 steps => 3 + 2 layout)
             dbc.Row(
                 [
-                    # step 1
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Step 1: You provide sales data"),
-                                        html.P(
-                                            "We use past prices, units, revenue, and context like seasonality and promos.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "100px",
-                                # "margin-right": "30px"
-                            },
-                        ),
-                        md=4,
+                    _step(
+                        "Step 1: 📈 You provide sales data",
+                        "We use past prices, units, revenue, and context like seasonality and promos.",
                     ),
-                    # step 2
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Step 2: Data engineering"),
-                                        html.P(
-                                            "The app's built-in logic transforms raw inputs into clean, model-ready features.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "50px",
-                                "margin-right": "50px",
-                            },
-                        ),
-                        md=4,
+                    _step(
+                        "Step 2: 🔧 Data engineering",
+                        "The app's built-in logic transforms raw inputs into clean, model-ready features.",
                     ),
-                    # step 3
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Step 3: ML model trains"),
-                                        html.P(
-                                            "A flexible curve (GAM) captures how demand changes with price.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                # "margin-left": "50px",
-                                "margin-right": "120px",
-                            },
-                        ),
-                        md=4,
+                    _step(
+                        "Step 3: 🤖 ML model trains",
+                        "A flexible curve (GAM) captures how demand changes with price.",
                     ),
-                    # step 4
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Step 4: We pick the sweet spot"),
-                                        html.P(
-                                            "From the learned curve we choose the price expected to maximize revenue.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "100px",
-                                "margin-top": "30px",
-                                # "margin-right": "120px",
-                                # "padding": "14px 0",
-                            },
-                        ),
-                        md=4,
+                    _step(
+                        "Step 4: ⭐️ Insights revealed",
+                        "We highlight revenue peaks from conservative to optimistic scenarios, along with their overlaps.",
+                    ),
+                    _step(
+                        "Step 5: 🎯 You make the final call",
+                        "With clear scenarios in hand, you decide the path that maximizes value for your business.",
                     ),
                 ],
-                # justify="center",
-                className="g-4 mt-2",
+                className="row-cols-1 row-cols-md-2 row-cols-xl-3 g-4 align-items-stretch mt-2",
+                style={"maxWidth": "1550px", "margin": "0 auto"},
             ),
-            # Why this works row (aligned with same margins as the cards)
+
+            # Why this works — centered, consistent width
             dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Alert(
-                            [
-                                html.Strong("💡 Why this works: "),
-                                "It balances higher margins at higher prices with potentially lower unit sales, and vice-versa.",
-                            ],
-                            color="light",
-                        ),
-                        md=12,
-                    )
-                ],
+                dbc.Col(
+                    dbc.Alert(
+                        [
+                            html.Strong("💡 Why this works: "),
+                            "It balances higher margins at higher prices with potentially lower unit sales, and vice-versa.",
+                        ],
+                        color="light",
+                        className="mb-0",
+                    ),
+                    md=12,
+                ),
                 className="mt-3",
+
                 style={
-                    "margin-left": "100px",
+                    "margin-left": "80px",
                     "padding": "14px 0",
-                    "width":"60%"
+                    "width":"70%"
                 },
+
             ),
         ],
         fluid=True,
@@ -378,135 +287,56 @@ def methodology_section():
 
 
 def definitions_section():
+    CARD_STYLE = {
+        "border": "1px solid #e9eef5",
+        "borderRadius": "14px",
+        "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
+    }
+    P_STYLE = {
+        "color": "#5f6b7a",
+        "marginLeft": "10px",
+        "marginRight": "10px",
+        "marginTop": "10px",
+    }
+
+    def _card(title, text):
+        return dbc.Col(
+            dbc.Card(
+                dbc.CardBody(
+                    [html.H5(title), html.P(text, style=P_STYLE)],
+                    className="d-flex flex-column",
+                ),
+                style=CARD_STYLE,
+                className="h-100",
+            ),
+        )
+
     return dbc.Container(
         [
             html.H3("(4) Key Definitions", style=ACCENT),
+
+            # Same layout rhythm as methodology (row width + gutters + equal heights)
             dbc.Row(
                 [
-                    # rec price
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Recommended Price"),
-                                        html.P(
-                                            "The price point on the central curve where the model "
-                                            "expects revenue to be highest on average.", 
-                                            style={
-                                                    "color": "#5f6b7a",
-                                                    "margin-left": "10px",
-                                                    "margin-right": "10px",
-                                                    "margin-top": "20px"
-                                                },
-                                        ),
-                                        html.Br() # placeholder
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "100px",
-                                # "margin-right": "30px"
-                            },
-                        ),
-                        md=4,
+                    _card(
+                        "Recommended Price",
+                        "The price point on the central curve where the model expects revenue to be highest on average.",
                     ),
-                    # p2.5, p97.5
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Alternative Scenarios"),
-                                        html.P(
-                                            "Conservative and optimistic cases that show how revenue "
-                                            "could shift if demand reacts differently to price changes.",
-
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "50px",
-                                "margin-right": "50px",
-                            },
-                        ),
-                        md=4,
+                    _card(
+                        "Alternative Scenarios",
+                        "Conservative and optimistic cases that show how revenue could shift if demand reacts differently to price changes.",
                     ),
-                    # robustness
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Robustness"),
-                                        html.P(
-                                            "The recommendation is strongest when the central, "
-                                            "conservative, and optimistic curves all peak around "
-                                            "the same price point.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                # "margin-left": "50px",
-                                "margin-right": "120px",
-                            },
-                        ),
-                        md=4,
+                    _card(
+                        "Robustness",
+                        "The recommendation is strongest when the central, conservative, and optimistic curves all peak around the same price point.",
                     ),
-                    # elasticity
-                    dbc.Col(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.H5("Elasticity"),
-                                        html.P(
-                                            "How sensitive customer demand is to price changes — "
-                                            "whether shoppers react strongly or only slightly "
-                                            "when prices move.",
-                                            style={
-                                                "color": "#5f6b7a",
-                                                "margin-left": "10px",
-                                                "margin-right": "10px",
-                                            },
-                                        ),
-                                    ]
-                                )
-                            ],
-                            style={
-                                "border": "1px solid #e9eef5",
-                                "borderRadius": "14px",
-                                "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
-                                "margin-left": "100px",
-                                "margin-top": "30px",
-                                # "margin-right": "120px",
-                                # "padding": "14px 0",
-                            },
-                        ),
-                        md=4,
+                    _card(
+                        "Elasticity",
+                        "How sensitive customer demand is to price changes — whether shoppers react strongly or only slightly when prices move.",
                     ),
-                ]
+                ],
+                className="row-cols-1 row-cols-md-2 row-cols-xl-3 g-4 align-items-stretch mt-2",
+                style={"maxWidth": "1550px", "margin": "0 auto"},
             ),
         ],
         fluid=True,

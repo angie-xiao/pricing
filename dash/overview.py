@@ -523,18 +523,23 @@ def _robustness_badge(prod_df: pd.DataFrame):
     #------------------- 3. Elasticity Score (lower elasticity = higher confidence) -------------------
     # find elasticity at the ASP that gives max P50 revenue
     try:
-        elasticity_at_mid = prod_df.loc[ prod_df["asp"] == p_mid,  "elasticity" ].iloc[0]
+        elasticity_at_mid = prod_df.loc[prod_df["asp"] == p_mid, "elasticity"].iloc[0]
     except Exception:
         elasticity_at_mid = np.nan
 
-    # Cap extreme elasticity values and normalize: low elasticity = good
     if pd.isna(elasticity_at_mid):
         elasticity_score = 0
-    else: # small increase in elasticity --> non-linear penalty
-        capped_elasticity = min(max(elasticity_at_mid, 0), 5)   # cap to [0,5] for outlier handling 
-        elasticity_score = np.exp(-capped_elasticity / 2)       # maps 0 (perfectly inelastic) →1, 2→~0.37, 5 (highly elastic)→~0.08
+    else:
+        # normalize using min-max across all observed elasticities in this product dataframe
+        min_el = prod_df["elasticity"].min()
+        max_el = prod_df["elasticity"].max()
+        if max_el - min_el > 0:
+            # higher elasticity → lower score, invert the scale
+            elasticity_score = 1 - (elasticity_at_mid - min_el) / (max_el - min_el)
+        else:
+            elasticity_score = 1  # all elasticities are the same → full confidence
 
-
+            
     #------------------- 4. Final Score: weight spread and elasticity -------------------
     base_score = 0.4 * spread_score + 0.6 * elasticity_score
 

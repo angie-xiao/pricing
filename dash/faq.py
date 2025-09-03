@@ -19,6 +19,7 @@ def make_faq_table(table_id, rows):
             "width": "100%",
             "overflowX": "auto",
             "border": "none",
+            "tableLayout": "fixed",  # enforce column widths
         },
         style_cell={
             "padding": "12px",
@@ -37,11 +38,12 @@ def make_faq_table(table_id, rows):
             "textAlign": "center",
             "fontSize": "13px",
             "textTransform": "uppercase",
+            "whiteSpace": "normal",  # align header wrapping with cells
         },
         style_cell_conditional=[
-            {"if": {"column_id": "Summary"}, "width": "15%"},
-            {"if": {"column_id": "Business-friendly"}, "width": "25%"},
-            {"if": {"column_id": "Technical nuances"}, "width": "60%"},
+            {"if": {"column_id": "Summary"}, "width": "25%"},
+            {"if": {"column_id": "Business-friendly"}, "width": "35%"},
+            {"if": {"column_id": "Technical nuances"}, "width": "40%"},
         ],
     )
 
@@ -54,33 +56,40 @@ def faq_robustness_section():
                 "recommended price is, based on model agreement, price sensitivity, and evidence depth."
             ),
             "Business-friendly": (
-                "If all forecast scenarios point to about the same price—and we've seen that "
-                "price region enough times—the recommendation is more trustworthy. "
+                "If all forecast scenarios point to about the same price - and we've seen that "
+                "price region enough times - the recommendation is more trustworthy. "
                 "If scenarios disagree, or if we have high price sensitivity, or insufficient data, trust is lower."
             ),
             "Technical nuances": (
                 "• Spread alignment:\n\t"
-                "‣ Identify peak prices at P2.5, P50, & P97.5 predicted revenue.\n\t"
-                "‣ Compute the spread = max(peak) - min(peak).\n\t"
-                "‣ Normalize by ~10% of the median price and apply a penalty \n\t\t→ tighter spreads = higher score.\n\n"
+                "‣ Identify peak prices at P2.5, P50, & P97.5 predicted revenues.\n\t"
+                "‣ Compute spread = max(peak) - min(peak).\n\t"
+                "‣ Normalize by ~10% of the median price; \n\t\t"
+                "‣ Tighter spreads → higher confidence.\n\n"
 
                 "• Data credibility:\n\t"
-                "‣ Count distinct prices observed, not just total rows.\n\t"
-                "‣ Use a saturating scale so duplicates don't inflate the score.\n\n"
+                "‣ Count distinct prices tested, not just total rows.\n\t"
+                "‣ Apply a saturating curve: \n\t\t"
+                "• First few distinct prices increase confidence quickly\n\t\t"
+                "• Then additional prices give diminishing returns\n\t\t"
+                "• Preventing duplicates from inflating the score.\n\n"
 
                 "• Elasticity (price sensitivity):\n\t"
-                "‣ Lower elasticity = higher confidence.\n\t"
-                "‣ Capped and non-linearly scaled to prevent extreme values from skewing the score.\n\n"
-
+                "‣ Lower elasticity → higher confidence.\n\t"
+                "‣ Normalized across the observed range\n\t\t"
+                "• So extreme values are preserved\n\t\t"
+                "• Ensuring truly sensitive pricing lowers the score.\n\n"
 
                 "• Final score blending:\n\t"
-                "‣ Combine 0.6 · elasticity + 0.4 · spread\n\t" 
-                "‣ Scale based on number of distinct prices. \n\t\t"
-                "• More distinct prices increase confidence quickly at first\n\t\t"
-                "• Additional prices give diminishing returns\n\t\t"
-                "• Repeated measurements don't inflate the score\n\t"
-
-                "‣ Labels: \n\t\t• Strong (≥ 0.70), \n\t\t• Medium (≥ 0.45), \n\t\t• Weak (< 0.45)."
+                "‣ Combine 0.6 · elasticity + 0.4 · spread to get a base score.\n\t"
+                "‣ Then adjust based on data credibility:\n\t\t"
+                "  • More distinct prices increase confidence quickly at first,\n\t\t"
+                "  • Additional prices give diminishing returns,\n\t\t"
+                "  • Repeated measurements don't inflate the score.\n\t"
+                "‣ Labels: \n\t\t"
+                "• Strong (≥ 0.70)\n\t\t"
+                "• Medium (≥ 0.45)\n\t\t"
+                "• Weak (< 0.45)."
             ),
         }
     ]
@@ -108,24 +117,22 @@ def faq_mean_vs_actual_section():
     rows = [
         {
             "Summary": (
-                "Seeing actual revenue higher than the model’s expected revenue "
+                "Seeing actual revenue higher than the model's expected revenue "
                 "(mean estimate) is not a failure."
             ),
             "Business-friendly": (
-                "The model gives you the average outcome we’d expect at a price. "
-                "Some real-world results can be higher or lower—that’s normal. "
-                "What matters is whether most results fall inside the model’s "
+                "The model gives you the average outcome we'd expect at a price. "
+                "Some real-world results can be higher or lower - that's normal. "
+                "What matters is whether most results fall inside the model's "
                 "prediction band and whether the chosen price makes sense overall."
             ),
             "Technical nuances": (
                 "• Mean vs realization: \n\t"
                 "‣ The P50 curve is the conditional mean. \n\t"
                 "‣ Individual data points can be above or below it without issue.\n\n"
-
                 "• Smoothing: \n\t"
                 "‣ GAM models smooth noisy data, which can flatten sharp peaks.\n\t"
                 "‣ i.e., some observed values will naturally exceed the mean curve.\n\n"
-
                 "• Evaluation: \n\t"
                 "‣ What matters is intervals—not a single point comparison\n\t"
                 "‣ But the distribution of actuals vs. The prediction."
@@ -170,7 +177,6 @@ def faq_section():
                 className="px-3",
                 style={"maxWidth": "1500px", "margin": "0 auto"},
             ),
-
             # Footer (stretched full width)
             html.Div(
                 [

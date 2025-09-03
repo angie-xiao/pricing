@@ -1,88 +1,193 @@
-"""
-Q: how should i think of rev p50 < rev actual? so our optimization failed?
-A: Short answer: not a failure by itself.
-
-    rev_pred_0.5 is the model's expected (mean) revenue at a price. A single historical revenue_actual point can be higher than the mean and that’s perfectly normal. What matters is whether actuals mostly sit inside your prediction band and whether the chosen price makes sense given coverage and uncertainty.
-
-    Here's how to think about it:
-
-    When rev_actual > rev_pred_0.5 is OK
-
-        - Mean vs realization: P50 here (with ExpectileGAM(expectile=0.5)) approximates the conditional mean, not a ceiling. Realizations can be above (and below) it.
-
-        - Smoothing: GAM smooths noisy data. True peaks can be damped, so some points will exceed the mean curve.
-"""
-
-
 # faq.py
 from dash import html, dash_table
 import dash_bootstrap_components as dbc
 
-ACCENT = {"color": "#DAA520"}  # if you reuse the same accent
+ACCENT = {"color": "#DAA520"}
+LEFT_INDENT_PX = "50px"  # same left margin for title + table
+
+
+def make_faq_table(table_id, rows):
+    return dash_table.DataTable(
+        id=table_id,
+        columns=[
+            {"name": "Summary", "id": "Summary"},
+            {"name": "Business-friendly", "id": "Business-friendly"},
+            {"name": "Technical nuances", "id": "Technical nuances"},
+        ],
+        data=rows,
+        style_table={
+            "width": "100%",
+            "overflowX": "auto",
+            "border": "none",
+        },
+        style_cell={
+            "padding": "12px",
+            "fontSize": "14px",
+            "border": "none",
+            "whiteSpace": "pre-wrap",
+            "textAlign": "left",
+            "lineHeight": "1.35",
+            "fontFamily": "Source Sans Pro, -apple-system, BlinkMacSystemFont, "
+                          "Segoe UI, Roboto, Helvetica Neue, Arial, Noto Sans, sans-serif",
+        },
+        style_header={
+            "fontWeight": 600,
+            "border": "none",
+            "backgroundColor": "#F5EFE7",
+            "textAlign": "center",
+            "fontSize": "13px",
+            "textTransform": "uppercase",
+        },
+        style_cell_conditional=[
+            {"if": {"column_id": "Summary"}, "width": "15%"},
+            {"if": {"column_id": "Business-friendly"}, "width": "25%"},
+            {"if": {"column_id": "Technical nuances"}, "width": "60%"},
+        ],
+    )
+
 
 def faq_robustness_section():
     rows = [
         {
-            "Overview": (
-                "Robustness (Confidence) tells you how statistically trustworthy the "
-                "recommended price is, based on model agreement and evidence depth."
+            "Summary": (
+                "Robustness tells you how statistically trustworthy the "
+                "recommended price is, based on model agreement, price sensitivity, and evidence depth."
             ),
             "Business-friendly": (
-                "If all forecast scenarios point to about the same price—and we’ve seen that "
+                "If all forecast scenarios point to about the same price—and we've seen that "
                 "price region enough times—the recommendation is more trustworthy. "
-                "If scenarios disagree or we lack data around the peak, trust is lower."
+                "If scenarios disagree, or if we have high price sensitivity, or insufficient data, trust is lower."
             ),
             "Technical nuances": (
-                "• **Spread alignment**: find peak ASPs at P2.5/P50/P97.5; compute "
-                "`align_spread = max(peak) − min(peak)`. Normalize by a relative tolerance "
-                "(~10% of P50), then score via a monotone penalty so tighter spreads → higher score.\n"
-                "• **Evidence depth**: use the **number of distinct ASPs** observed (not just rows). "
-                "Map `n_unique(asp)` to [0,1) with a saturating curve (diminishing returns) to avoid "
-                "over-rewarding massive samples at one price.\n"
-                "• **Blend**: final trust score = `0.6 · spread_score + 0.4 · data_score`. "
-                "Labels: Strong (≥ 0.70), Medium (≥ 0.45), Weak (< 0.45).\n"
-                "• **Elasticity is separate**: we show price sensitivity in its own badge so it guides "
-                "business risk appetite without conflating it with statistical trust."
+                "• Spread alignment:\n\t"
+                "‣ Identify peak prices at P2.5, P50, & P97.5 predicted revenue.\n\t"
+                "‣ Compute the spread = max(peak) - min(peak).\n\t"
+                "‣ Normalize by ~10% of the median price and apply a penalty \n\t\t→ tighter spreads = higher score.\n\n"
+
+                "• Data credibility:\n\t"
+                "‣ Count distinct prices observed, not just total rows.\n\t"
+                "‣ Use a saturating scale so duplicates don't inflate the score.\n\n"
+
+                "• Elasticity (price sensitivity):\n\t"
+                "‣ Lower elasticity = higher confidence.\n\t"
+                "‣ Capped and non-linearly scaled to prevent extreme values from skewing the score.\n\n"
+
+
+                "• Final score blending:\n\t"
+                "‣ Combine 0.6 · elasticity + 0.4 · spread\n\t" 
+                "‣ Scale based on number of distinct prices. \n\t\t"
+                "• More distinct prices increase confidence quickly at first\n\t\t"
+                "• Additional prices give diminishing returns\n\t\t"
+                "• Repeated measurements don't inflate the score\n\t"
+
+                "‣ Labels: \n\t\t• Strong (≥ 0.70), \n\t\t• Medium (≥ 0.45), \n\t\t• Weak (< 0.45)."
             ),
         }
     ]
 
-    table = dash_table.DataTable(
-        id="faq-robustness",
-        columns=[
-            {"name": "Overview", "id": "Overview", "presentation": "markdown"},
-            {"name": "Non-technical / Business-friendly", "id": "Business-friendly", "presentation": "markdown"},
-            {"name": "Technical nuances", "id": "Technical nuances", "presentation": "markdown"},
-        ],
-        data=rows,
-        style_table={"overflowX": "auto", "border": "none"},
-        style_cell={
-            "whiteSpace": "pre-wrap",
-            "textAlign": "left",
-            "fontSize": "14px",
-            "lineHeight": "1.35",
-            "padding": "10px",
-            "border": "none",
-        },
-        style_header={
-            "fontWeight": 700,
-            "fontSize": "13px",
-            "textTransform": "uppercase",
-            "backgroundColor": "#f6f6f6",
-            "border": "none",
-        },
-        markdown_options={"html": True},
-    )
-
-    return dbc.Container(
+    return html.Div(
         [
-
-            html.H1("FAQ", className="DISPLAY-5", style={"textAlign": "center", "padding": "58px 0 8px"}),
-            html.H3("Robustness (Confidence)", className="mt-3", style={"margin-left": "50px", "marginTop": "190px", "color": "#DAA520",}),                
-            table,
+            html.H3(
+                "How is the robustness calculated?",
+                className="mt-3",
+                style={
+                    "color": ACCENT["color"],
+                    "marginBottom": "24px",
+                },
+            ),
+            make_faq_table("faq-robustness", rows),
         ],
-        fluid=True,
-        className="py-3",
+        style={
+            "marginLeft": LEFT_INDENT_PX,
+            "marginRight": LEFT_INDENT_PX,
+        },
     )
 
 
+def faq_mean_vs_actual_section():
+    rows = [
+        {
+            "Summary": (
+                "Seeing actual revenue higher than the model’s expected revenue "
+                "(mean estimate) is not a failure."
+            ),
+            "Business-friendly": (
+                "The model gives you the average outcome we’d expect at a price. "
+                "Some real-world results can be higher or lower—that’s normal. "
+                "What matters is whether most results fall inside the model’s "
+                "prediction band and whether the chosen price makes sense overall."
+            ),
+            "Technical nuances": (
+                "• Mean vs realization: \n\t"
+                "‣ The P50 curve is the conditional mean. \n\t"
+                "‣ Individual data points can be above or below it without issue.\n\n"
+
+                "• Smoothing: \n\t"
+                "‣ GAM models smooth noisy data, which can flatten sharp peaks.\n\t"
+                "‣ i.e., some observed values will naturally exceed the mean curve.\n\n"
+
+                "• Evaluation: \n\t"
+                "‣ What matters is intervals—not a single point comparison\n\t"
+                "‣ But the distribution of actuals vs. The prediction."
+            ),
+        }
+    ]
+
+    return html.Div(
+        [
+            html.H3(
+                "What if actual revenue is higher than the model’s estimate?",
+                className="mt-3",
+                style={
+                    "color": ACCENT["color"],
+                    "marginBottom": "24px",
+                },
+            ),
+            make_faq_table("faq-mean-vs-actual", rows),
+        ],
+        style={
+            "marginLeft": LEFT_INDENT_PX,
+            "marginRight": LEFT_INDENT_PX,
+        },
+    )
+
+
+def faq_section():
+    return html.Div(
+        [
+            dbc.Container(
+                [
+                    html.H1(
+                        "FAQ",
+                        className="display-5",
+                        style={"textAlign": "center", "padding": "58px 0 58px"},
+                    ),
+                    faq_mean_vs_actual_section(),
+                    html.Div(style={"height": "32px"}),
+                    faq_robustness_section(),
+                ],
+                fluid=True,
+                className="px-3",
+                style={"maxWidth": "1500px", "margin": "0 auto"},
+            ),
+
+            # Footer (stretched full width)
+            html.Div(
+                [
+                    html.Span("made with ♥️ | "),
+                    html.Span(html.I("@aqxiao")),
+                    html.P("github.com/angie-xiao"),
+                ],
+                className="text-center py-3",
+                style={
+                    "fontSize": "0.8em",
+                    "color": "#ac274f",
+                    "textAlign": "center",
+                    "backgroundColor": "#f3f3f3",
+                    "marginTop": "40px",
+                    "borderRadius": "0",  # remove rounded edges to look like a footer bar
+                    "width": "100%",
+                },
+            ),
+        ]
+    )

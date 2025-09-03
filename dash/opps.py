@@ -27,7 +27,7 @@ def layout(opp_table_df):
             dbc.Container(
                 [
                     html.H1(
-                        "Top Optimization Opportunities",
+                        "Top Opportunities",
                         className="display-5",
                         style={"textAlign": "center", "padding": "58px 0 8px"},
                     ),

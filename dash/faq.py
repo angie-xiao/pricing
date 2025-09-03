@@ -41,8 +41,8 @@ def make_faq_table(table_id, rows):
             "whiteSpace": "normal",  # align header wrapping with cells
         },
         style_cell_conditional=[
-            {"if": {"column_id": "Summary"}, "width": "25%"},
-            {"if": {"column_id": "Business-friendly"}, "width": "35%"},
+            {"if": {"column_id": "Summary"}, "width": "30%"},
+            {"if": {"column_id": "Business-friendly"}, "width": "30%"},
             {"if": {"column_id": "Technical nuances"}, "width": "40%"},
         ],
     )

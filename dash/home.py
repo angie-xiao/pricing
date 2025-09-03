@@ -234,23 +234,23 @@ def methodology_section():
             dbc.Row(
                 [
                     _step(
-                        "Step 1: 📈 You provide sales data",
+                        "Step 1: You provide sales data",
                         "We use past prices, units, revenue, and context like seasonality and promos.",
                     ),
                     _step(
-                        "Step 2: 🔧 Data engineering",
+                        "Step 2: Data engineering",
                         "The app's built-in logic transforms raw inputs into clean, model-ready features.",
                     ),
                     _step(
-                        "Step 3: 🤖 ML model trains",
+                        "Step 3: ML model trains",
                         "A flexible curve (GAM) captures how demand changes with price.",
                     ),
                     _step(
-                        "Step 4: ⭐️ Insights revealed",
+                        "Step 4: Insights revealed",
                         "We highlight revenue peaks from conservative to optimistic scenarios, along with their overlaps.",
                     ),
                     _step(
-                        "Step 5: 🎯 You make the final call",
+                        "Step 5: You make the final call",
                         "With clear scenarios in hand, you decide the path that maximizes value for your business.",
                     ),
                 ],

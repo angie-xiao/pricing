@@ -13,7 +13,7 @@ import dash_bootstrap_components as dbc
 from built_in_logic import output_key_dfs, viz
 from navbar import get_navbar
 from home import Homepage
-import overview, opps
+import overview, opps, faq
 
 
 warnings.filterwarnings("ignore")
@@ -44,6 +44,7 @@ app.validation_layout = html.Div([
     overview.layout(products_lookup),                    # << here
     # descriptive.layout(products_lookup["product"].tolist()),
     opps.layout(d["curr_opt_df"]),
+    faq.faq_robustness_section(),
     html.Div(id="page-content"),
 ])
 
@@ -69,8 +70,8 @@ def route(path):
         return Homepage()
     elif path == "/overview":
         return overview.layout(products_lookup)          # << here
-    # elif path == "/descriptive":
-    #     return descriptive.layout(products_lookup["product"].tolist())
+    elif path == "/faq":
+        return faq.faq_robustness_section()
     elif path == "/opps":
         return opps.layout(d["curr_opt_df"])
     return html.Div("404 - Not found", className="p-4")

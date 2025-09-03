@@ -1,3 +1,5 @@
+# find avg rev, not median
+
 # built_in_logic.py
 
 import os

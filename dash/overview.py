@@ -1,3 +1,6 @@
+# annualize rev opp
+
+
 # overview.py
 from dash import html, dcc, Input, Output, dash_table
 import dash_bootstrap_components as dbc
@@ -197,7 +200,7 @@ def layout(products_lookup: pd.DataFrame):
         fluid=True,
     )
 
-# _kpi_card: add id_subtext
+
 def _kpi_card(id_title, title, id_value, bg="#f3f0f0", id_subtext=None):
     return dbc.Col(
         dbc.Card(
@@ -254,7 +257,6 @@ def _kpi_card(id_title, title, id_value, bg="#f3f0f0", id_subtext=None):
         width=3,
         className="kpi-card",
     )
-
 
 
 def register_callbacks(app,
@@ -335,18 +337,8 @@ def register_callbacks(app,
             asp_val = "—"
 
         # ----- Elasticity (value + percentile)
-        row = edf.loc[edf["product_key"] == product_key]
-        if row.empty or pd.isna(row["ratio"].iloc[0]):
-            elast_val, elast_subtext = "—", ""
-        else:
-            elast_val = f"{float(row['ratio'].iloc[0]):.2f}"
-            pct_val = float(row["pct"].iloc[0]) if "pct" in row.columns else np.nan
-            if np.isnan(pct_val):
-                elast_subtext = ""
-            else:
-                pct_round = int(round(pct_val))
-                top_share = max(1, 100 - pct_round)
-                elast_subtext = f"Top ~{top_share}% among selected products"
+        value_text, elast_subtext = _update_elasticity_kpi(product_key, edf[["product_key","ratio","pct"]].to_dict("records"))
+        elast_val = value_text
 
         # ----- Prediction graph
         filt = all_gam_results[all_gam_results["product_key"] == product_key]
@@ -385,7 +377,7 @@ def register_callbacks(app,
             elast_subtext,        # 7
             display_name,
             upside_val,           # 8
-            upside_sub,           # 9  (new)
+            upside_sub,           # 9
             badge,                # 10
             pred_graph,           # 11
             scenario_data,        # 12
@@ -395,9 +387,10 @@ def register_callbacks(app,
 
 
 
-# ---------- Helpers (unchanged) ----------
+# ---------- Helpers ----------
     
-def update_elasticity_kpi(product_key, elast_data):
+def _update_elasticity_kpi(product_key, elast_data):
+    ''' '''
     # if not product_key or not elast_data:
     #     return no_update, no_update
 
@@ -412,11 +405,16 @@ def update_elasticity_kpi(product_key, elast_data):
     # Format displays
     value_text = f"{ratio:,.2f}"
     pct_round  = int(round(pct))
-    # Optional “Top X%” helper (e.g., 90th pct = Top 10%)
+
+    # “Top X%” helper (e.g., 90th pct = Top 10%)
     top_share  = max(1, 100 - pct_round)
 
-    subtext = f"Top ~{top_share}% among selected products"
+    if pct >= 50: 
+        subtext = f"Top ~{top_share}% most ELASTIC"
 
+    elif pct < 50:
+        subtext = f"Top ~{top_share}% most INELASTIC"
+ 
     return value_text, subtext
 
 
@@ -436,27 +434,6 @@ def _scenario_table(prod_df: pd.DataFrame) -> pd.DataFrame:
             })
     return pd.DataFrame(rows)
 
-
-def _upside_vs_current(curr_df, best50_df, product_key, all_gam):
-    try:
-        curr_price = curr_df.loc[curr_df["product_key"] == product_key, "current_price"].iloc[0]
-        prod = all_gam[all_gam["product_key"] == product_key]
-        if prod.empty:
-            return "—"
-        idx = (prod["asp"] - curr_price).abs().idxmin()
-        rev_at_curr = prod.loc[idx, "revenue_pred_0.5"]
-        best = best50_df[best50_df["product_key"] == product_key]
-        if best.empty:
-            return "—"
-        rev_at_best = best["revenue_pred_0.5"].iloc[0]
-        delta = rev_at_best - rev_at_curr
-        pct = (delta / rev_at_curr * 100) if rev_at_curr else np.nan
-        if pd.isna(pct):
-            return f"{'+' if delta >= 0 else '−'}${abs(delta):,.0f}"
-        sign = "+" if delta >= 0 else "−"
-        return f"{sign}${abs(delta):,.0f} ({sign}{abs(pct):,.1f}%)"
-    except Exception:
-        return "—"
 
 def _upside_vs_current_parts(curr_df, best50_df, product_key, all_gam):
     """
@@ -502,48 +479,94 @@ def _upside_vs_current_parts(curr_df, best50_df, product_key, all_gam):
 
 
 def _robustness_badge(prod_df: pd.DataFrame):
+    """
+    Confidence combines:
+      (1) Spread alignment across scenarios (tighter = better)
+      (2) Elasticity (lower magnitude = better)
+      (3) Data-volume credibility (more distinct ASPs = more believable)
+
+    param
+        prod_df [df]
+    
+    return 
+        dbc.Badge
+    """
+
     if prod_df.empty:
         return ""
+
     def peak_x(col):
         try:
             return prod_df.loc[prod_df[col] == prod_df[col].max(), "asp"].iloc[0]
         except Exception:
             return np.nan
-    p_low = peak_x("revenue_pred_0.025")
-    p_mid = peak_x("revenue_pred_0.5")
-    p_high = peak_x("revenue_pred_0.975")
-    align_spread = np.nanmax([p_low, p_mid, p_high]) - np.nanmin([p_low, p_mid, p_high])
-    if pd.isna(p_mid):
-        density_score = 0
-    else:
-        tol = 0.05 * p_mid
-        density_score = (prod_df["asp"].between(p_mid - tol, p_mid + tol)).mean()
-    spread_score = np.exp(-align_spread / (0.1 * (p_mid if p_mid else 1))) if p_mid else 0
-    score = 0.6 * spread_score + 0.4 * density_score
+
+    # 1. Get peak ASPs at 3 revenue prediction percentiles
+    p_low = peak_x("revenue_pred_0.025")        # worst
+    p_mid = peak_x("revenue_pred_0.5")          # median
+    p_high = peak_x("revenue_pred_0.975")       # best
+
+    #------------------- 2. Spread Score (tighter spread = higher confidence) -------------------
+    # measuring how consistent the model’s recommended prices are across three different forecast scenarios
+    align_spread = np.nanmax([p_low, p_mid, p_high]) - np.nanmin([p_low, p_mid, p_high])  # smaller range = more trust
+
+    # reward tight alignment between scenarios, using 10% of median price as benchmark, punishing exponentially
+    spread_score = np.exp(               
+        -align_spread /                 
+        (
+            0.1 *                       # …relative to 10% of the median price (reasonable tolerance)
+            (p_mid if p_mid else 1)     # fallback to 1 to avoid division by zero
+        )
+    ) if p_mid else 0  # If p_mid is missing, we can’t assess spread confidence → return 0
+
+
+    #------------------- 3. Elasticity Score (lower elasticity = higher confidence) -------------------
+    # find elasticity at the ASP that gives max P50 revenue
+    try:
+        elasticity_at_mid = prod_df.loc[ prod_df["asp"] == p_mid,  "elasticity" ].iloc[0]
+    except Exception:
+        elasticity_at_mid = np.nan
+
+    # Cap extreme elasticity values and normalize: low elasticity = good
+    if pd.isna(elasticity_at_mid):
+        elasticity_score = 0
+    else: # small increase in elasticity --> non-linear penalty
+        capped_elasticity = min(max(elasticity_at_mid, 0), 5)   # cap to [0,5] for outlier handling 
+        elasticity_score = np.exp(-capped_elasticity / 2)       # maps 0 (perfectly inelastic) →1, 2→~0.37, 5 (highly elastic)→~0.08
+
+
+    #------------------- 4. Final Score: weight spread and elasticity -------------------
+    base_score = 0.4 * spread_score + 0.6 * elasticity_score
+
+
+    #------------------- 5) Data-volume credibility (more data = higher credibility) -------------------
+    # Use the number of DISTINCT prices tested — variety matters more than raw row count
+    try:
+        n_points = int(prod_df["asp"].nunique(dropna=True))
+    except Exception:
+        n_points = prod_df.shape[0]
+
+    # Smooth saturating curve in [0,1): rises quickly with first few distinct ASPs, then flattens
+    data_strength = 1.0 - np.exp(-n_points / 6.0)  # ~0.80 by ~10 distinct ASPs
+
+    # Convert to a gentle multiplier in [0.6, 1.0]: never crushes the score when data are light,
+    # but rewards breadth of evidence (distinct price experiments).
+    credibility_multiplier = 0.6 + 0.4 * data_strength
+    
+    final_score = base_score * credibility_multiplier
+
+    # 6. Label logic
     label, color = ("Weak", "danger")
-    if score >= 0.7:
+    if final_score >= 0.7:
         label, color = ("Strong", "success")
-    elif score >= 0.45:
+    elif final_score >= 0.45:
         label, color = ("Medium", "warning")
+
     return dbc.Badge(f"Confidence: {label}", color=color, pill=True, className="px-3 py-2")
 
 
-def _elasticity_rank_table(elasticity_df: pd.DataFrame):
-    if elasticity_df.empty:
-        return []
-    df = elasticity_df[["product", "ratio"]].copy()
-    df["abs_ratio"] = df["ratio"].abs()
-    df = df.sort_values("abs_ratio", ascending=False).drop(columns="abs_ratio").reset_index(drop=True)
-    df["rank"] = df.index + 1
-    try:
-        df["ratio"] = df["ratio"].round(2)
-    except Exception:
-        pass
-    return df[["rank", "product", "ratio"]].to_dict("records")
-
-
 def _opportunity_chart(elast_df, best50_df, curr_df, all_gam):
-
+    """ """
 
     def _empty(title):
         fig = go.Figure()

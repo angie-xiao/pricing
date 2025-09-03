@@ -143,7 +143,7 @@ def faq_mean_vs_actual_section():
     return html.Div(
         [
             html.H3(
-                "What if actual revenue is higher than the model’s estimate?",
+                "What if actual revenue is higher than the model's estimate?",
                 className="mt-3",
                 style={
                     "color": ACCENT["color"],

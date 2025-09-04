@@ -159,6 +159,53 @@ def faq_mean_vs_actual_section():
     )
 
 
+def faq_tuning_section():
+    rows = [
+        {
+            "Summary": (
+                "We auto-tune an ExpectileGAM via grid search after scaling data, "
+                "choosing the best combination of smoothness (lam), spline density, and spline order."
+            ),
+            "Business-friendly": (
+                "We standardize features, try a few reasonable model settings, and keep the one that fits best. "
+                "If the search fails (e.g., edge cases), we fall back to a safe default so you still get a result."
+            ),
+            "Technical nuances": (
+                "• Data scaling:\n\t"
+                "‣ Standardize X with StandardScaler.\n\t"
+                "‣ Standardize y to zero-mean/unit-var (guard y_std=0).\n\n"
+                "• Dynamic terms:\n\t"
+                "‣ Build one spline term per feature: sum(s(i) for i in range(n_features)).\n\n"
+                "• Model family:\n\t"
+                "‣ ExpectileGAM(expectile = user-set, default 0.5) for mean-like fit with asymmetric option.\n\n"
+                "• Hyperparameter grid:\n\t"
+                "‣ lam ∈ {0.01, 0.1, 1, 10, 100} (logspace 1e-2→1e2)\n\t"
+                "‣ n_splines ∈ {5, 10, 20}\n\t"
+                "‣ spline_order ∈ {2, 3}\n\n"
+                "• Selection objective:\n\t"
+                "‣ Use .gridsearch(X_scaled, y_scaled, param_grid) and keep the best model (min GCV).\n\t"
+                "‣ Note: gridsearch is exhaustive (no pruning), so the grid is intentionally small.\n\n"
+                "• Robustness fallback:\n\t"
+                "‣ On exception, fit ExpectileGAM with s(0, n_splines=5) as a minimal, stable default.\n\n"
+                "• Inference convenience:\n\t"
+                "‣ Persist scalers on the model: _scaler_X, _y_mean, _y_std for later inverse-transform."
+            ),
+        }
+    ]
+
+    return html.Div(
+        [
+            html.H3(
+                "How was the model tuned?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
+            make_faq_table("faq-tuning", rows),
+        ],
+        style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
+    )
+
+
 def faq_section():
     return html.Div(
         [
@@ -172,12 +219,13 @@ def faq_section():
                     faq_mean_vs_actual_section(),
                     html.Div(style={"height": "32px"}),
                     faq_robustness_section(),
+                    html.Div(style={"height": "32px"}),
+                    faq_tuning_section(),  # ← add this
                 ],
                 fluid=True,
                 className="px-3",
                 style={"maxWidth": "1500px", "margin": "0 auto"},
             ),
-            # Footer (stretched full width)
             html.Div(
                 [
                     html.Span("made with ♥️ | "),
@@ -191,7 +239,7 @@ def faq_section():
                     "textAlign": "center",
                     "backgroundColor": "#f3f3f3",
                     "marginTop": "40px",
-                    "borderRadius": "0",  # remove rounded edges to look like a footer bar
+                    "borderRadius": "0",
                     "width": "100%",
                 },
             ),

@@ -1,121 +1,96 @@
-# find avg rev, not median
+# --------- find avg rev, not median
+# add RMSE/eval score
 
 # built_in_logic.py
-
 import os
 import random
 import pandas as pd
 import numpy as np
-
+from sklearn.preprocessing import StandardScaler
 from pygam import ExpectileGAM, s
+from sklearn.metrics import mean_squared_error
+from functools import reduce
+import operator as op
+
 import plotly.express as px
 import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
 
 
-class output_key_dfs:
-    """
-    Encapsulates:
-      - data engineering
-      - GAM modeling
-      - optimization outputs
-      - normalized, dashboard-ready frames
-    """
-
-    # ---------- init & utilities ----------
-    def __init__(
-        self, pricing_df: pd.DataFrame, product_df: pd.DataFrame, top_n: int = 10
-    ):
+class DataEngineer:
+    def __init__(self, pricing_df, product_df, top_n=10):
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
 
-    def _key_series(self, s):
-        return (
-            s.astype(str).str.strip().str.replace(r"\s+", " ", regex=True).str.lower()
+    def prepare(self) -> pd.DataFrame:
+        def _clean_cols(df):
+            df = df.copy()
+            df.columns = df.columns.str.strip().str.lower()
+            return df
+
+        self.pricing_df = _clean_cols(self.pricing_df)
+        self.product_df = _clean_cols(self.product_df)
+
+        # auto-detect a join key
+        candidate_keys = ["asin", "sku", "item_sku", "product_id", "parent_asin"]
+        common_keys = [
+            k for k in candidate_keys if k in self.pricing_df and k in self.product_df
+        ]
+        if not common_keys:
+            raise KeyError(
+                f"No common join key. Tried {candidate_keys}. "
+                f"pricing_df cols={list(self.pricing_df.columns)}, "
+                f"product_df cols={list(self.product_df.columns)}"
+            )
+        join_key = common_keys[0]
+        self.pricing_df[join_key] = self.pricing_df[join_key].astype(str).str.strip()
+        self.product_df[join_key] = self.product_df[join_key].astype(str).str.strip()
+
+        df_tags = self.pricing_df.merge(
+            self.product_df, how="left", on=join_key, validate="m:1"
         )
 
-    def _add_key(self, df):
-        if df is None or "product" not in df.columns:
-            return df
-        df = df.copy()
-        df["product_key"] = self._key_series(df["product"])
-        return df
+        # ensure we always have a product_key
+        if "product_key" not in df_tags.columns:
+            # fallback: use the join key as a stable identifier
+            df_tags["product_key"] = df_tags[join_key].astype(str)
 
-    @staticmethod
-    def _normalize_product_col(df: pd.DataFrame, col: str = "product") -> pd.DataFrame:
-        if df is None or col not in df.columns:
-            return df
-        out = df.copy()
-        out[col] = (
-            out[col]
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\s+", " ", regex=True)
-            .str.lower()
-        )
-        return out
+        # required for product label
+        missing = [
+            c
+            for c in [
+                "tag",
+                "weight",
+                "order_date",
+                "shipped_units",
+                "revenue_share_amt",
+            ]
+            if c not in df_tags
+        ]
+        if missing:
+            raise KeyError(f"Missing required columns after merge: {missing}")
 
-    # ---------- file helpers (new) ----------
-    @classmethod
-    def from_csv_folder(
-        cls,
-        base_dir: str,
-        data_folder: str = "data",
-        pricing_file: str = "730d.csv",
-        product_file: str = "products.csv",
-        top_n: int = 10,
-    ) -> dict:
-        """
-        Read CSVs and return the dashboard-ready dictionary (same structure app expects).
-        """
-        data_dir = os.path.join(base_dir, data_folder)
-        pricing_path = os.path.join(data_dir, pricing_file)
-        product_path = os.path.join(data_dir, product_file)
-
-        pricing_df = pd.read_csv(pricing_path)
-        product_df = pd.read_csv(product_path)
-
-        return cls(pricing_df, product_df, top_n=top_n).assemble_dashboard_frames()
-
-    # ---------- core pipeline ----------
-    def data_engineer(self) -> pd.DataFrame:
-        self.pricing_df.columns = [x.lower() for x in self.pricing_df.columns]
-        self.product_df.columns = [x.lower() for x in self.product_df.columns]
-
-        df_tags = self.pricing_df.merge(self.product_df, how="left", on="asin")
-        df_tags["product"] = df_tags["tag"] + " " + df_tags["weight"].astype(str)
-        df_tags["product"] = df_tags["product"].str.upper()
-
+        df_tags["product"] = (
+            df_tags["tag"] + " " + df_tags["weight"].astype(str)
+        ).str.upper()
         df_tags["order_date"] = pd.to_datetime(df_tags["order_date"])
         df_tags["week_num"] = df_tags["order_date"].dt.isocalendar().week
         df_tags["year"] = df_tags["order_date"].dt.year
 
+        # group by using the detected join_key (not hard-coded 'asin')
+        group_dims = [
+            "week_num",
+            "year",
+            join_key,
+            "item_name",
+            "tag",
+            "product",
+            "event_name",
+            "product_key",
+        ]
         weekly_df = (
-            df_tags[
-                [
-                    "week_num",
-                    "year",
-                    "asin",
-                    "item_name",
-                    "tag",
-                    "event_name",
-                    "product",
-                    "shipped_units",
-                    "revenue_share_amt",
-                ]
-            ]
-            .groupby(
-                [
-                    "week_num",
-                    "year",
-                    "asin",
-                    "item_name",
-                    "tag",
-                    "product",
-                    "event_name",
-                ]
-            )
+            df_tags.groupby(group_dims)[["shipped_units", "revenue_share_amt"]]
             .sum()
             .reset_index()
         )
@@ -124,262 +99,267 @@ class output_key_dfs:
         weekly_df = weekly_df[weekly_df["asp"] != 0]
 
         asp_product = weekly_df.copy()
-        asp_product["asp"] = round(asp_product["asp"], 1)
+        asp_product["asp"] = asp_product["asp"].round(1)
 
+        group_cols = ["tag", "product", "product_key", "asp", "event_name"]
         asp_product_df = (
-            asp_product[
-                [
-                    "product",
-                    "asp",
-                    "tag",
-                    "event_name",
-                    "shipped_units",
-                    "revenue_share_amt",
-                ]
-            ]
-            .groupby(["tag", "product", "asp", "event_name"])
+            asp_product.groupby(group_cols)[["shipped_units", "revenue_share_amt"]]
             .sum()
             .reset_index()
         )
-
         asp_product_df = asp_product_df[asp_product_df["shipped_units"] >= 10]
 
-        top_n_product_lst = (
-            asp_product_df[["product", "revenue_share_amt"]]
-            .groupby("product")
+        top_n_products = (
+            asp_product_df.groupby("product")["revenue_share_amt"]
             .sum()
             .reset_index()
-            .sort_values(by=["revenue_share_amt"], ascending=False)["product"][
-                : self.top_n
-            ]
+            .sort_values("revenue_share_amt", ascending=False)["product"]
+            .head(self.top_n)
             .tolist()
         )
 
-        topsellers = asp_product_df[asp_product_df["product"].isin(top_n_product_lst)]
-        topsellers = topsellers[topsellers["event_name"] == "NO DEAL"]
-        return topsellers
+        return asp_product_df[
+            asp_product_df["product"].isin(top_n_products)
+            & (asp_product_df["event_name"] == "NO DEAL")
+        ]
 
-    def elasticity(self) -> pd.DataFrame:
-        topsellers = self.data_engineer()
+
+class ElasticityAnalyzer:
+    @staticmethod
+    def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
         elasticity = (
             topsellers.groupby("product")
             .agg(
-                {
-                    "asp": ["max", "min"],
-                    "shipped_units": ["max", "min"],
-                    "product": "count",
-                }
+                asp_max=("asp", "max"),
+                asp_min=("asp", "min"),
+                shipped_units_max=("shipped_units", "max"),
+                shipped_units_min=("shipped_units", "min"),
+                product_count=("product", "count"),
             )
             .reset_index()
-            .pipe(
-                lambda d: d.set_axis(
-                    [
-                        "product",
-                        "asp_max",
-                        "asp_min",
-                        "shipped_units_max",
-                        "shipped_units_min",
-                        "product_count",
-                    ],
-                    axis=1,
-                )
-            )
-            .assign(
-                pct_change_price=lambda d: (d["asp_max"] - d["asp_min"])
-                / d["asp_min"]
-                * 100,
-                pct_change_qty=lambda d: (
-                    d["shipped_units_max"] - d["shipped_units_min"]
-                )
-                / d["shipped_units_min"]
-                * 100,
-            )
-            .assign(ratio=lambda d: d["pct_change_qty"] / d["pct_change_price"])
         )
-        elasticity.sort_values(by="ratio", ascending=False).reset_index(drop=True)
-
-        # + percentile col
-        elasticity['pct'] = elasticity['ratio'].rank(pct=True) * 100
-
-        return elasticity
-
-    def price_quant(self) -> pd.DataFrame:
-        topsellers = self.data_engineer()
-        return (
-            topsellers[["asp", "shipped_units", "product"]]
-            .groupby(["asp", "product"])
-            .sum()
-            .reset_index()
+        elasticity["pct_change_price"] = (
+            (elasticity["asp_max"] - elasticity["asp_min"])
+            / elasticity["asp_min"]
+            * 100
         )
+        elasticity["pct_change_qty"] = (
+            (elasticity["shipped_units_max"] - elasticity["shipped_units_min"])
+            / elasticity["shipped_units_min"]
+            * 100
+        )
+        elasticity["ratio"] = (
+            elasticity["pct_change_qty"] / elasticity["pct_change_price"]
+        )
+        elasticity["pct"] = elasticity["ratio"].rank(pct=True) * 100
+        return elasticity.sort_values("ratio", ascending=False).reset_index(drop=True)
 
-    def model(self) -> pd.DataFrame:
-        df = self.data_engineer()
-        unique_prod = df["product"].unique()
-        all_gam_results = pd.DataFrame()
 
-        for product in unique_prod:
-            if not product or product != str(product):
-                continue
-            sub = df[df["product"] == product]
+class GAMTuner:
+    def __init__(self, expectile=0.5):
+        self.expectile = expectile
 
-            X = sub[["asp"]]
-            y = sub["shipped_units"]
-            qs = [0.025, 0.5, 0.975]
+    def fit(self, X, y, expectile=None):
+        expt = self.expectile if expectile is None else expectile
+
+        # scale X, y
+        scaler_X = StandardScaler()
+        X_scaled = scaler_X.fit_transform(X)
+        y_mean, y_std = y.mean(), y.std()
+        y_scaled = (y - y_mean) / (y_std if y_std != 0 else 1)
+
+        # build terms safely
+        nfeat = X_scaled.shape[1]
+        terms = s(0) if nfeat == 1 else reduce(op.add, (s(i) for i in range(nfeat)))
+
+        # model + grids
+        gam = ExpectileGAM(terms, expectile=expt)
+        lam_values = np.logspace(-2, 2, 5)  # 0.01, 0.1, 1, 10, 100
+        spline_values = [5, 10, 20]
+        order_values = [2, 3]
+
+        try:
+            gam = gam.gridsearch(
+                X_scaled,
+                y_scaled,
+                lam=lam_values,
+                n_splines=spline_values,
+                spline_order=order_values,
+            )
+        except Exception as e:
+            print(f"Gridsearch failed, falling back: {e}")
+            gam = ExpectileGAM(s(0, n_splines=5), expectile=expt).fit(
+                X_scaled, y_scaled
+            )
+
+        # stash scalers
+        gam._scaler_X = scaler_X
+        gam._y_mean = y_mean
+        gam._y_std = y_std
+        return gam
+
+
+class GAMModeler:
+
+    def __init__(self, topsellers: pd.DataFrame):
+        self.topsellers = topsellers
+
+    def run(self) -> pd.DataFrame:
+        all_results = []
+        for product, sub in self.topsellers.groupby("product"):
+            X, y = sub[["asp"]], sub["shipped_units"]
             out = {}
-            for q in qs:
-                gam = ExpectileGAM(s(0), expectile=q)
-                gam.fit(X, y)
-                out[f"pred_{q}"] = gam.predict(X)
-
-            preds = pd.DataFrame(out, index=X.index)
+            for q in [0.025, 0.5, 0.975]:
+                gam = GAMTuner(expectile=q).fit(X, y)
+                pred = (
+                    gam.predict(gam._scaler_X.transform(X)) * gam._y_std + gam._y_mean
+                )
+                out[f"pred_{q}"] = pred
+            preds = pd.DataFrame(out, index=sub.index)
             results = pd.concat(
                 [sub[["asp", "product", "shipped_units"]], preds], axis=1
             )
-            all_gam_results = pd.concat([all_gam_results, results], axis=0)
+            all_results.append(results)
 
-        # revenues (pred + actual)
-        for col in all_gam_results.columns:
-            if col.startswith("pred_"):
-                all_gam_results["revenue_" + col] = (
-                    all_gam_results["asp"] * all_gam_results[col]
-                )
+        all_gam_results = pd.concat(all_results, axis=0)
+
+        for col in [c for c in all_gam_results if c.startswith("pred_")]:
+            all_gam_results[f"revenue_{col}"] = (
+                all_gam_results["asp"] * all_gam_results[col]
+            )
+
+        rev_cols = [c for c in all_gam_results if c.startswith("revenue_pred_")]
+        all_gam_results["revenue_pred_avg"] = all_gam_results[rev_cols].mean(axis=1)
         all_gam_results["revenue_actual"] = (
             all_gam_results["asp"] * all_gam_results["shipped_units"]
         )
         return all_gam_results
 
-    def optimization(self) -> dict:
-        all_gam_results = self.model()
 
+class Optimizer:
+    """ """
+
+    @staticmethod
+    def run(all_gam_results: pd.DataFrame) -> dict:
         def pick_best(col):
-            return (
-                all_gam_results.groupby("product")
-                .apply(lambda x: x[x[col] == x[col].max()].head(1))
-                .reset_index(level=0, drop=True)
-            )
-
-        best_50 = pick_best("revenue_pred_0.5")
-        best_975 = pick_best("revenue_pred_0.975")
-        best_025 = pick_best("revenue_pred_0.025")
-
-        for df in [best_50, best_975, best_025]:
-            for c in [
-                "pred_0.025",
-                "pred_0.5",
-                "pred_0.975",
-                "revenue_pred_0.025",
-                "revenue_pred_0.5",
-                "revenue_pred_0.975",
-                "revenue_actual",
-            ]:
-                if c in df.columns:
-                    df[c] = df[c].round(2)
+            if col not in all_gam_results:
+                return pd.DataFrame()
+            return all_gam_results.loc[all_gam_results.groupby("product")[col].idxmax()]
 
         return {
-            "best50": best_50,
-            "best975": best_975,
-            "best25": best_025,
+            "best_avg": pick_best("revenue_pred_avg"),
+            "best50": pick_best("revenue_pred_0.5"),
+            "best975": pick_best("revenue_pred_0.975"),
+            "best25": pick_best("revenue_pred_0.025"),
             "all_gam_results": all_gam_results,
         }
 
-    def initial_dfs(self) -> dict:
-        price_quant_df = self.price_quant()
-        d = self.optimization()
-        best50 = d["best50"]
-        all_gam_results = d["all_gam_results"]
 
-        # normalize join keys
-        price_quant_df = self._normalize_product_col(price_quant_df)
-        best50 = self._normalize_product_col(best50)
-        all_gam_results = self._normalize_product_col(all_gam_results)
+class PricingPipeline:
+    def __init__(self, pricing_df, product_df, top_n=10):
+        self.engineer = DataEngineer(pricing_df, product_df, top_n)
 
-        return {
-            "price_quant_df": price_quant_df,
-            "best50": best50,
-            "all_gam_results": all_gam_results,
-        }
+    def _build_curr_price_df(self) -> pd.DataFrame:
+        """Compute current price as latest (by order_date) ASP per product_key."""
+        # reuse same cleaning + join-key detection as DataEngineer
+        pricing = self.engineer.pricing_df.copy()
+        product = self.engineer.product_df.copy()
 
-    # ---------- one call used by app ----------
+        # columns are already lower-cased by DataEngineer.prepare(), but be safe:
+        pricing.columns = pricing.columns.str.strip().str.lower()
+        product.columns = product.columns.str.strip().str.lower()
+
+        candidate_keys = ["asin", "sku", "item_sku", "product_id", "parent_asin"]
+        common_keys = [k for k in candidate_keys if k in pricing and k in product]
+        if not common_keys:
+            # schema-safe empty frame so UI won’t crash
+            return pd.DataFrame(columns=["product_key", "product", "current_price"])
+
+        join_key = common_keys[0]
+        pricing[join_key] = pricing[join_key].astype(str).str.strip()
+        product[join_key] = product[join_key].astype(str).str.strip()
+
+        df = pricing.merge(product, how="left", on=join_key, validate="m:1")
+
+        # ensure fields
+        required = ["order_date", "shipped_units", "revenue_share_amt"]
+        missing = [c for c in required if c not in df]
+        if missing:
+            return pd.DataFrame(columns=["product_key", "product", "current_price"])
+
+        # stable id: use product_key if present, else fallback to join_key
+        if "product_key" not in df.columns:
+            df["product_key"] = df[join_key].astype(str)
+
+        # product label for display
+        if "tag" in df and "weight" in df:
+            df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
+        else:
+            # fallback to product_key as name
+            df["product"] = df["product_key"]
+
+        df["order_date"] = pd.to_datetime(df["order_date"])
+
+        # compute ASP at the raw row level; if you have multiple rows per day/key, group then ASP
+        grp = df.groupby(["product_key", "product", "order_date"], as_index=False)[
+            ["shipped_units", "revenue_share_amt"]
+        ].sum()
+        grp = grp[grp["shipped_units"] > 0]
+        grp["asp"] = grp["revenue_share_amt"] / grp["shipped_units"]
+
+        # pick latest date per product_key
+        grp = grp.sort_values(["product_key", "order_date"])
+        latest = grp.drop_duplicates("product_key", keep="last")
+
+        curr_price_df = latest[["product_key", "product", "asp"]].rename(
+            columns={"asp": "current_price"}
+        )
+        return curr_price_df.reset_index(drop=True)
+
     def assemble_dashboard_frames(self) -> dict:
-        """ """
-        base = self.initial_dfs()
-        price_quant_df = self._add_key(base["price_quant_df"])
-        best50 = self._add_key(base["best50"])
-        all_gam_results = self._add_key(base["all_gam_results"])
+        topsellers = self.engineer.prepare()
+        elasticity_df = ElasticityAnalyzer.compute(topsellers)
+        all_gam_results = GAMModeler(topsellers).run()
+        bests = Optimizer.run(all_gam_results)
 
-        # current price (keep display name; add key)
-        tmp = self.product_df.copy()
-        tmp["product"] = tmp["tag"] + " " + tmp["weight"].astype(str)
-        curr_price_df = tmp[["product", "current_price"]].copy()
-        curr_price_df = self._add_key(curr_price_df)
-
-        # product lookup for UI (display label + key)
-        products_lookup = (
-            curr_price_df[["product_key", "product"]]
-            .drop_duplicates()
-            .sort_values("product")
-            .reset_index(drop=True)
-        )
-
-        # best50 we need for upside
-        best50_optimal_pricing_df = best50[
-            ["product", "product_key", "asp", "revenue_pred_0.5", "revenue_actual"]
-        ].copy()
-
-        # elasticity — do NOT trim here; keep full distribution you computed
-        elasticity_df = self.elasticity()[["product", "ratio", "pct"]].copy()
-        elasticity_df = (
-            self._add_key(elasticity_df)
-            .sort_values("ratio", ascending=False)
-            .reset_index(drop=True)
-        )
-
-        # opportunities table
-        curr_opt_df = curr_price_df.merge(
-            best50_optimal_pricing_df,
-            on=["product_key"],
+        best_avg = bests["best_avg"].merge(
+            topsellers[["product", "product_key"]].drop_duplicates(),
+            on="product",
             how="left",
-            suffixes=("", "_b50"),
         )
-        curr_opt_df["price_gap"] = (
-            curr_opt_df["asp"] - curr_opt_df["current_price"]
-        ).round(2)
-        curr_opt_df["revenue_gap"] = (
-            curr_opt_df["revenue_pred_0.5"] - curr_opt_df["revenue_actual"]
-        ).round(2)
-        curr_opt_df.rename(
-            columns={"asp": "rec_price", "revenue_pred_0.5": "avg_pred_revenue"},
-            inplace=True,
-        )
-        keep_cols = [
-            "product",
-            "product_key",
-            "revenue_gap",
-            "avg_pred_revenue",
-            "revenue_actual",
-            "price_gap",
-            "rec_price",
-            "current_price",
-        ]
-        curr_opt_df = (
-            curr_opt_df[[c for c in keep_cols if c in curr_opt_df.columns]]
-            .sort_values("revenue_gap", ascending=False)
-            .reset_index(drop=True)
-        )
+
+        # >>> NEW: compute current prices from raw data
+        curr_price_df = self._build_curr_price_df()
 
         return {
-            "products_lookup": products_lookup,
-            "price_quant_df": price_quant_df,
-            "best50": best50,
+            "price_quant_df": topsellers.groupby(["asp", "product"])["shipped_units"]
+            .sum()
+            .reset_index(),
+            "best_avg": best_avg,
             "all_gam_results": all_gam_results,
-            "best50_optimal_pricing_df": best50_optimal_pricing_df,
-            "elasticity_df": elasticity_df,
-            "curr_price_df": curr_price_df,
-            "curr_opt_df": curr_opt_df,
+            "best_optimal_pricing_df": best_avg[
+                ["product", "product_key", "asp", "revenue_pred_avg", "revenue_actual"]
+            ],
+            "elasticity_df": elasticity_df[["product", "ratio", "pct"]],
+            "curr_opt_df": best_avg,  # (your placeholder stays)
+            "curr_price_df": curr_price_df,  # >>> now present with 'current_price'
         }
 
+    @classmethod
+    def from_csv_folder(
+        cls,
+        base_dir,
+        data_folder="data",
+        pricing_file="730d.csv",
+        product_file="products.csv",
+        top_n=10,
+    ):
+        """Convenience loader: read pricing + product CSVs and run the pipeline."""
+        pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
+        product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
+        return cls(pricing_df, product_df, top_n).assemble_dashboard_frames()
 
-# ---------- Plot helpers (unchanged from your working version) ----------
+
 class viz:
     def __init__(self, template="lux"):
         templates = [
@@ -397,9 +377,9 @@ class viz:
         self.template = template
 
     def gam_results(self, all_gam_results: pd.DataFrame):
-        '''
+        """
         pred graph
-        '''
+        """
         product_lst = all_gam_results["product"].unique()
         pltly_qual = px.colors.qualitative.Dark24
         pltly_qual.extend(px.colors.qualitative.Vivid)
@@ -480,12 +460,10 @@ class viz:
             )
 
         fig.update_layout(
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0                
-            ),
+            legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
             margin=dict(r=8),
         )
-        
+
         return fig
 
     def elast_dist(self, elast_df: pd.DataFrame):
@@ -591,13 +569,14 @@ class viz:
             margin=dict(l=10, r=10, t=40, b=60),
             uniformtext_minsize=10,
             uniformtext_mode="hide",
-            yaxis={'categoryorder': 'total descending'}
+            yaxis={"categoryorder": "total descending"},
         )
 
         return fig
 
     def empty_fig(self, title="No data"):
         import plotly.graph_objects as go
+
         fig = go.Figure()
         fig.update_layout(
             title=title,
@@ -606,15 +585,7 @@ class viz:
             yaxis=dict(visible=False),
             margin=dict(l=10, r=10, t=60, b=40),
         )
-        fig.add_annotation(text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
+        fig.add_annotation(
+            text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper"
+        )
         return fig
-
-
-# """
-# # in terminal:
-
-# .venv\Scripts\activate.bat
-
-# pip3 install scikit-learn
-# pip3 install plotnine
-# """

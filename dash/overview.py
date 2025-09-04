@@ -130,64 +130,11 @@ def layout(products_lookup: pd.DataFrame):
                 className="g-3 mb-4",
             ),
 
+            html.Hr(className="my-4"),
             # Coverage note
             dbc.Row(dbc.Col(html.Div(id="coverage_note",
                                      style={"textAlign": "center", "color": "#5f6b7a", "fontSize": "0.9em", }), width=12)),
 
-            html.Hr(className="my-4"),
-
-            # Elasticity section: dist + ranked table
-            # dbc.Row(
-            #     [
-            #         dbc.Col(
-            #             [
-            #                 html.H4("Top Products Elasticity", style={"color": "#DAA520"}),
-            #                 html.Span("Elasticity = % change in demand / % change in price",
-            #                           style={"color": "#5f6b7a", "display": "block", "marginBottom": "6px"}),
-            #                 dcc.Loading(
-            #                     type="circle",
-            #                     children=dcc.Graph(id="elast_dist", style={"height": "420px"},
-            #                                        config={"displaylogo": False})
-            #                 ),
-            #             ],
-            #             md=7, xs=12, className="mb-3"
-            #         ),
-            #         dbc.Col(
-            #             dash_table.DataTable(
-            #                 id="elast_table",
-            #                 columns=[
-            #                     {"name": "Rank", "id": "rank"},
-            #                     {"name": "Product", "id": "product"},
-            #                     {"name": "Elasticity", "id": "ratio", "type": "numeric"},
-            #                 ],
-            #                 data=[],
-            #                 page_size=10,
-            #                 sort_action="native",
-            #                 style_table={"height": "420px", "overflowY": "auto", "border": "none"},
-            #                 style_cell={"padding": "10px", "fontSize": "14px", "border": "none", "textAlign": "center"},
-            #                 style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6"},
-            #             ),
-            #             md=5, xs=12
-            #         ),
-            #     ],
-            #     className="g-3"
-            # ),
-
-            # Portfolio upside chart
-            dbc.Row(
-                [
-                    # pred graph title
-                    html.H3("Top Revenue Opportunities", className="mt-3",
-                        style={"margin-left": "50px", "marginTop": "190px", "color": "#DAA520",}
-                    ),
-                    
-                    dbc.Col(
-                        dcc.Loading(type="circle",
-                                    children=dcc.Graph(id="opportunity_chart", config={"displaylogo": False})),
-                        width=12, className="mt-3"
-                    )
-                ]
-            ),
 
             html.Div(style={"height": "16px"}),
 
@@ -283,7 +230,7 @@ def register_callbacks(app,
         Output("robustness_badge", "children"),
         Output("gam_results_pred", "figure"),
         Output("scenario_table", "data"),
-        Output("opportunity_chart", "figure"),
+        # Output("opportunity_chart", "figure"),
         Output("coverage_note", "children"),
         Input("product_dropdown_snap", "value"),
     )
@@ -310,7 +257,7 @@ def register_callbacks(app,
                 "",                 # robustness_badge
                 empty_fig,          # gam_results_pred.figure
                 [],                 # scenario_table.data
-                empty_fig,          # opportunity_chart.figure
+                # empty_fig,          # opportunity_chart.figure
                 "",                 # coverage_note.children
             )
 
@@ -357,12 +304,7 @@ def register_callbacks(app,
 
         # ----- Robustness badge
         badge = _robustness_badge(filt)
-
-        # ----- Opportunity chart
-        opp_fig = _opportunity_chart(edf, best50_optimal_pricing_df, curr_price_df, all_gam_results)
-        if opp_fig == {}:
-            opp_fig = viz.empty_fig("No portfolio opportunities computed")
-
+ 
         # ----- Coverage note
         coverage = _coverage_note(filt)
 
@@ -381,8 +323,7 @@ def register_callbacks(app,
             badge,                # 10
             pred_graph,           # 11
             scenario_data,        # 12
-            opp_fig,              # 13
-            coverage,             # 14
+            coverage,             # 13
         )
 
 
@@ -568,111 +509,6 @@ def _robustness_badge(prod_df: pd.DataFrame):
         label, color = ("Medium", "warning")
 
     return dbc.Badge(f"Confidence: {label}", color=color, pill=True, className="px-3 py-2")
-
-
-def _opportunity_chart(elast_df, best50_df, curr_df, all_gam):
-    """ """
-
-    def _empty(title):
-        fig = go.Figure()
-        fig.update_layout(title=title, xaxis=dict(visible=False), yaxis=dict(visible=False))
-        fig.add_annotation(text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
-        return fig
-
-    # guards
-    for df in [elast_df, best50_df, curr_df, all_gam]:
-        if df is None or getattr(df, "empty", True):
-            return _empty("No data for opportunity chart")
-
-    # must have product_key in all four
-    if not all(("product_key" in df.columns) for df in [elast_df, best50_df, curr_df, all_gam]):
-        return _empty("Missing product_key")
-
-    # must have predictions
-    if "revenue_pred_0.5" not in all_gam.columns or "revenue_pred_0.5" not in best50_df.columns:
-        return _empty("Missing prediction columns")
-
-    # ensure numeric where needed
-    for frame, cols in [
-        (all_gam, ["asp", "revenue_pred_0.5"]),
-        (best50_df, ["revenue_pred_0.5"]),
-        (curr_df, ["current_price"]),
-        (elast_df, ["ratio"]),
-    ]:
-        for c in cols:
-            if c in frame.columns:
-                frame[c] = pd.to_numeric(frame[c], errors="coerce")
-
-    # overlap on product_key (not product)
-    # prods = sorted(
-    #     set(all_gam["product_key"])
-    #     & set(best50_df["product_key"])
-    #     & set(curr_df["product_key"])
-    # )
-    
-    # only use filtered top N prods
-    prods = set(best50_df["product_key"])
-    
-    
-    if not prods:
-        return _empty("No overlapping products across inputs")
-
-    rows = []
-    for pk in prods:
-        try:
-            # current price
-            cp = curr_df.loc[curr_df["product_key"] == pk, "current_price"]
-            if cp.empty or pd.isna(cp.iloc[0]):
-                continue
-            curr_price = float(cp.iloc[0])
-
-            # expected curve for this product
-            prod = all_gam[
-                (all_gam["product_key"] == pk)
-                & pd.notna(all_gam["asp"])
-                & pd.notna(all_gam["revenue_pred_0.5"])
-            ]
-            if prod.empty:
-                continue
-
-            # nearest ASP on expected curve
-            idx = (prod["asp"] - curr_price).abs().idxmin()
-            rev_curr = float(prod.loc[idx, "revenue_pred_0.5"])
-
-            # revenue at recommended price (best50)
-            rec = best50_df.loc[best50_df["product_key"] == pk]
-            if rec.empty or pd.isna(rec["revenue_pred_0.5"].iloc[0]):
-                continue
-            rev_best = float(rec["revenue_pred_0.5"].iloc[0])
-
-            # display label and elasticity (optional)
-            label = curr_df.loc[curr_df["product_key"] == pk, "product"]
-            label = label.iloc[0] if len(label) else pk
-
-            e = elast_df.loc[elast_df["product_key"] == pk, "ratio"]
-            elast_val = float(e.iloc[0]) if len(e) and pd.notna(e.iloc[0]) else np.nan
-
-            rows.append({"product": label, "upside": rev_best - rev_curr, "elasticity": elast_val})
-        except Exception:
-            continue
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return _empty("No computable upside")
-
-    df = df.sort_values("upside", ascending=False).head(12)
-    fig = px.bar(
-        df, y="product", x="upside",
-        hover_data=["elasticity"], height=380,
-        # title="Upside vs Elasticity (Top Opportunities)"
-    )
-    fig.update_xaxes(title_text="Upside (Expected Revenue Δ)", tickprefix="$", separatethousands=True)
-    fig.update_yaxes(title_text="")
-    fig.update_traces(text=df["upside"].map(lambda x: f"${x:,.0f}"),
-                      textposition="outside", cliponaxis=False)
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=60),
-                      uniformtext_minsize=10, uniformtext_mode="hide")
-    return fig
 
 
 def _coverage_note(prod_df: pd.DataFrame) -> str:

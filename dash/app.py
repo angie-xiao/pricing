@@ -1,5 +1,5 @@
 # app.py
-import os
+import os, hashlib, pickle
 import warnings
 from datetime import datetime
 
@@ -16,25 +16,68 @@ import overview, opps, faq
 
 warnings.filterwarnings("ignore")
 
+
 # ---------- load data & build frames ----------
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))  # .../pricing/dash
 PROJECT_BASE = os.path.dirname(BASE_DIR)                # .../pricing
 
-d = PricingPipeline.from_csv_folder(PROJECT_BASE)
-price_quant_df        = d["price_quant_df"]
-best_avg_df           = d["best_avg"]
-all_gam_results       = d["all_gam_results"]
-best_optimal_pricing  = d["best_optimal_pricing_df"]
-elasticity_df         = d["elasticity_df"]
-curr_opt_df           = d["curr_opt_df"]
-curr_price_df         = d["curr_price_df"]
 
-# --- Debug logging for sanity check ---
-print("\n--- Current Price DF ---")
-print("Shape:", curr_price_df.shape)
-print("Columns:", curr_price_df.columns.tolist())
-print(curr_price_df.head().to_string(index=False))
-print("--- End Current Price DF ---\n")
+# ---------- Simple cache helpers ----------
+def _files_sig(paths, top_n=10, version="v1"):
+    parts = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            parts.append(f"{p}:{st.st_mtime_ns}:{st.st_size}")
+        except FileNotFoundError:
+            parts.append(f"{p}:NA")
+    sig_str = "|".join(parts) + f":top{top_n}:{version}"
+    return hashlib.md5(sig_str.encode()).hexdigest()
+
+
+def build_frames_with_cache(base_dir, data_folder="data",
+                            pricing_file="730d.csv",
+                            product_file="products.csv",
+                            top_n=10):
+    cache_dir = os.path.join(base_dir, ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    pricing_path = os.path.join(base_dir, data_folder, pricing_file)
+    product_path = os.path.join(base_dir, data_folder, product_file)
+    sig = _files_sig([pricing_path, product_path], top_n)
+
+    cache_fp = os.path.join(cache_dir, f"frames_{sig}.pkl")
+
+    if os.path.exists(cache_fp):
+        with open(cache_fp, "rb") as f:
+            return pickle.load(f)
+
+    frames = PricingPipeline.from_csv_folder(
+        base_dir, data_folder, pricing_file, product_file, top_n
+    )
+    with open(cache_fp, "wb") as f:
+        pickle.dump(frames, f)
+    return frames
+
+
+# ---------- Load data (cached) ----------
+d = build_frames_with_cache(PROJECT_BASE)
+
+price_quant_df       = d["price_quant_df"]
+best_avg_df          = d["best_avg"]
+all_gam_results      = d["all_gam_results"]
+best_optimal_pricing = d["best_optimal_pricing_df"]
+elasticity_df        = d["elasticity_df"]
+curr_opt_df          = d["curr_opt_df"]
+curr_price_df        = d["curr_price_df"]
+
+
+# # --- Debug logging for sanity check ---
+# print("\n--- Current Price DF ---")
+# print("Shape:", curr_price_df.shape)
+# print("Columns:", curr_price_df.columns.tolist())
+# print(curr_price_df.head().to_string(index=False))
+# print("--- End Current Price DF ---\n")
 
 # product ↔ key lookup for dropdowns / joins
 products_lookup = (
@@ -132,12 +175,23 @@ overview.register_callbacks(
     Viz,   
 )
 
-opps.register_callbacks(app, curr_opt_df)
+
+opps.register_callbacks(
+    app,
+    {
+        "elasticity_df": elasticity_df,
+        "best50_optimal_pricing_df": best50_optimal_pricing,
+        "curr_price_df": curr_price_df,
+        "all_gam_results": all_gam_results,
+    },
+    curr_opt_df,   # <- table data
+)
+
 
 print("\n", "-" * 10, datetime.now().strftime("%H:%M:%S"), " Page Updated " + "-" * 10, "\n")
 
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=True)
 
 """
 ref:

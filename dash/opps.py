@@ -39,11 +39,11 @@ def layout(opp_table_df: pd.DataFrame):
 
             # TABLE TITLE
             html.H3(
-                "Revenue Prediction vs Actual Breakdown",
+                "Table Breakdown",
                 style={
                     "color": "#DAA520",
-                    "marginTop": "100px",    # more space from table
-                    # "marginBottom": GAP_H3_TO_GRAPH,  # tight to graph
+                    "marginTop": "60px",    # more space from table
+                    "marginBottom": "30px",   
                 },
             ),
 
@@ -80,7 +80,7 @@ def layout(opp_table_df: pd.DataFrame):
 
             # CHART TITLE
             html.H3(
-                "Revenue Potential by Product",
+                "Bar Graph",
                 style={
                     "color": "#DAA520",
                     "marginTop": "100px",    # more space from table

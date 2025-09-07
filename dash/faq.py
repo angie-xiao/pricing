@@ -75,6 +75,15 @@ def faq_gam_section():
                 "• Setup:\n"
                 "    ‣ Predictor (X): ASP (average selling price)\n"
                 "    ‣ Response (y): shipped units per product-week\n"
+
+                "    ‣ Preprocessing:\n\t"
+                "    • Standardize X (price): \n\t\t"
+                "    ‣ Put prices on a neutral scale\n\t\t"
+                "    ‣ -> So the curve behaves consistently \n\t"
+                "    • Normalize y (units): \n\t\t"
+                "    ‣ Balance products & guard for y_std = 0\n\t\t"
+                "    • -> So high-volume sellers don't dominate\n\t\t"
+                "    • -> ... and to avoid errors on flat series.\n\n"
                 "    ‣ Fit at q = 0.025, 0.5, 0.975 \n\t"
                 "    → conservative, median, & optimistic curves\n\n"
                 "• Outputs:\n"
@@ -111,25 +120,24 @@ def faq_tuning_section():
                 "If anything goes wrong, the system defaults to a stable backup so predictions are always available."
             ),
             "Technical nuances": (
-                "• Preprocessing:\n"
-                "    ‣ Standardize X (price) - so price stays scale-neutral\n"
-                "    ‣ Normalize y (units) - so big sellers don't dominate\n\n"
                 "• Model terms:\n"
                 "    ‣ One spline term for price only: s(0).\n\n"
                 "• Hyperparameter grid:\n"
-                "    ‣ λ ∈ {0.01, 0.1, 1, 10, 100}\n\t"
-                "    → log-spaced smoothness penalties; wiggly to almost linear.\n"
-                "    ‣ n_splines ∈ {5, 10, 20}\n\t"
-                "    → curve resolution, from coarse to flexible.\n"
-                "    ‣ spline_order ∈ {2, 3}\n\t"
-                "    → quadratic (gentle) vs cubic (sharper bends).\n\n"
+                "    ‣ λ ∈ {0.01, 0.1, 1, 10, 100}\n"
+                "      → log-spaced smoothness penalties, covering very flexible to nearly linear fits.\n"
+                "    ‣ n_splines ∈ {5, 10, 20}\n"
+                "      → curve resolution, from coarse (5) to flexible (20). "
+                "Enough to capture realistic demand curves without overfitting noise — no need for 50+.\n"
+                "    ‣ spline_order ∈ {2, 3}\n"
+                "      → quadratic = gentle U/∩ shapes; cubic = allows S-shapes with inflection. "
+                "These two cover most real-world demand patterns; higher orders risk oscillation and overfitting.\n\n"
                 "• Selection:\n"
                 "    ‣ Use .gridsearch() to minimize GCV.\n"
-                "    ‣ Grid is small to stay fast and interpretable.\n\n"
-                # "• Fallback:\n"
-                # "    ‣ On error, fit ExpectileGAM(s(0, n_splines=5)) as a stable default.\n\n"
-                # "• Post-fit:\n"
-                # "    ‣ Persist scalers (_scaler_X, _y_mean, _y_std) for consistent inverse-transform."
+                "    ‣ Grid kept intentionally small for speed and interpretability.\n\n"
+                "• Fallback:\n"
+                "    ‣ On error, fit ExpectileGAM(s(0, n_splines=5)) as a stable default.\n\n"
+                "• Post-fit:\n"
+                "    ‣ Persist scalers (_scaler_X, _y_mean, _y_std) to inverse-transform predictions back to real units."
             ),
         }
     ]
@@ -146,7 +154,6 @@ def faq_tuning_section():
     )
 
 
-
 def faq_optimal_asp_section():
     rows = [
         {
@@ -155,8 +162,8 @@ def faq_optimal_asp_section():
                 "and selecting the price that maximizes expected revenue."
             ),
             "Business-friendly": (
-                "For each product, we map the entire revenue curve (price × predicted demand). "
-                "The recommended price is where revenue peaks. "
+                "For each product, we map the entire revenue curve (price * predicted demand). "
+                "The recommended price is where revenue peaks. \n\n"
                 "We also show conservative and optimistic alternatives so stakeholders can see the upside and downside."
             ),
             "Technical nuances": (
@@ -194,8 +201,8 @@ def faq_robustness_section():
                 "based on model agreement, price sensitivity, and evidence depth."
             ),
             "Business-friendly": (
-                "If all forecast scenarios point to about the same price—and we've seen that price region enough times—"
-                "the recommendation is more trustworthy. "
+                "If all forecast scenarios point to about the same price - and we've seen that price region enough times - "
+                "the recommendation is more trustworthy. \n\n"
                 "If scenarios disagree, or if we have high price sensitivity, or insufficient data, trust is lower."
             ),
             "Technical nuances": (
@@ -238,7 +245,7 @@ def faq_mean_vs_actual_section():
             ),
             "Business-friendly": (
                 "The model gives you the average outcome we'd expect at a price. "
-                "Some real-world results can be higher or lower—that's normal. "
+                "Some real-world results can be higher or lower - that's normal. \n\n"
                 "What matters is whether most results fall inside the model's prediction band "
                 "and whether the chosen price makes sense overall."
             ),

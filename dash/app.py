@@ -1,38 +1,27 @@
 # app.py
-import os
-import pickle
-import hashlib
-import warnings
-from datetime import datetime
+import os, pickle, hashlib, inspect
 from pathlib import Path
-import inspect
+from datetime import datetime
 
-import pandas as pd
 import numpy as np
-
+import pandas as pd
 from dash import Dash, html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 
 # local modules
-import built_in_logic  # IMPORTANT: importing this is part of code signature
+import built_in_logic
 from built_in_logic import PricingPipeline, viz as Viz
 from navbar import get_navbar
 from home import Homepage
 import overview, opps, faq
 
-warnings.filterwarnings("ignore")
-
 # ---------- paths ----------
-BASE_DIR = os.path.dirname(os.path.realpath(__file__))   # .../pricing/dash
-PROJECT_BASE = os.path.dirname(BASE_DIR)                 # .../pricing
-
+BASE_DIR     = os.path.dirname(os.path.realpath(__file__))   # .../pricing/dash
+PROJECT_BASE = os.path.dirname(BASE_DIR)                     # .../pricing
 
 # ---------- cache helpers ----------
 def _files_sig(paths, top_n=10, version="v1"):
-    """
-    Build a stable signature from file metadata + an extra 'version' string.
-    Pass ABSOLUTE paths. Uses mtime_ns and size so it’s fast even for big CSVs.
-    """
+    """Hash file metadata + 'version' string (fast even for big CSVs)."""
     parts = []
     for p in paths:
         ap = os.path.abspath(p)
@@ -44,12 +33,8 @@ def _files_sig(paths, top_n=10, version="v1"):
     sig_str = "|".join(parts) + f":top{top_n}:ver:{version}"
     return hashlib.sha1(sig_str.encode()).hexdigest()
 
-
 def _code_sig():
-    """
-    Hash the *current* modeling code. If you edit built_in_logic.py,
-    this changes immediately and busts the cache on next run.
-    """
+    """Hash current modeling code to bust cache whenever built_in_logic.py changes."""
     try:
         src = inspect.getsource(built_in_logic)
         return hashlib.sha1(src.encode()).hexdigest()
@@ -60,7 +45,6 @@ def _code_sig():
         except Exception:
             return "nocode"
 
-
 def build_frames_with_cache(
     base_dir,
     data_folder="data",
@@ -70,14 +54,10 @@ def build_frames_with_cache(
 ):
     cache_dir = os.path.join(base_dir, ".cache")
     os.makedirs(cache_dir, exist_ok=True)
-
     pricing_path = os.path.join(base_dir, data_folder, pricing_file)
     product_path = os.path.join(base_dir, data_folder, product_file)
 
-    # include code signature so model edits rebuild frames
     sig = _files_sig([pricing_path, product_path], top_n=top_n, version=_code_sig())
-
-    # Dev kill-switch
     force = os.environ.get("PRICING_FORCE_REBUILD") == "1"
     cache_fp = None if force else os.path.join(cache_dir, f"frames_{sig}.pkl")
 
@@ -95,7 +75,6 @@ def build_frames_with_cache(
 
     return frames
 
-
 # ---------- key normalization ----------
 def make_products_lookup(*dfs):
     """
@@ -108,10 +87,8 @@ def make_products_lookup(*dfs):
         cols = set(df.columns)
         if {"product", "product_key"}.issubset(cols):
             pieces.append(df[["product", "product_key"]].copy())
-
     if not pieces:
         raise KeyError("No source frame had both ['product','product_key'].")
-
     lookup = (
         pd.concat(pieces, ignore_index=True)
         .dropna(subset=["product", "product_key"])
@@ -121,7 +98,6 @@ def make_products_lookup(*dfs):
     )
     return lookup
 
-
 def ensure_product_key(df, lookup):
     """
     Ensure a single 'product_key' column (str) exists by merging-once to lookup and
@@ -129,34 +105,21 @@ def ensure_product_key(df, lookup):
     """
     if df is None or len(df) == 0:
         return df
-
     if "product_key" not in df.columns:
         df = df.merge(lookup, on="product", how="left")
-
-    # coalesce suffixes if they exist from earlier merges
     for c in ("product_key_x", "product_key_y"):
         if c in df.columns:
             if "product_key" not in df.columns:
                 df["product_key"] = df[c]
             else:
                 df["product_key"] = df["product_key"].fillna(df[c])
-
-    # drop any residue
-    df = df.drop(
-        columns=[c for c in ("product_key_x", "product_key_y") if c in df.columns],
-        errors="ignore",
-    )
-
-    # normalize dtype
+    df = df.drop(columns=[c for c in ("product_key_x", "product_key_y") if c in df.columns], errors="ignore")
     if "product_key" in df.columns:
         df["product_key"] = df["product_key"].astype(str)
-
     return df
-
 
 # ---------- Load data (cached) ----------
 frames = build_frames_with_cache(PROJECT_BASE)
-
 price_quant_df       = frames["price_quant_df"]
 best_avg_df          = frames["best_avg"]
 all_gam_results      = frames["all_gam_results"]
@@ -164,62 +127,49 @@ best_optimal_pricing = frames["best_optimal_pricing_df"]
 elasticity_df        = frames["elasticity_df"]
 curr_opt_df          = frames["curr_opt_df"]
 curr_price_df        = frames["curr_price_df"]
+opps_summary         = frames["opps_summary"]
+meta                 = frames["meta"]  # {data_start, data_end, days_covered, annual_factor}
 
-# --- Build a robust lookup, using whatever already has both product + product_key
-products_lookup = make_products_lookup(best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results)
+# --- Build lookups ---
+# Full lookup for merges (keeps keys intact)
+lookup_all = make_products_lookup(best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results)
 
-# --- Ensure 'product_key' ONCE (no double-merge later) ---
-all_gam_results      = ensure_product_key(all_gam_results,      products_lookup)
-elasticity_df        = ensure_product_key(elasticity_df,        products_lookup)
-best_optimal_pricing = ensure_product_key(best_optimal_pricing, products_lookup)
-best_avg_df          = ensure_product_key(best_avg_df,          products_lookup)
-curr_opt_df          = ensure_product_key(curr_opt_df,          products_lookup)
-curr_price_df        = ensure_product_key(curr_price_df,        products_lookup)
+# Top-N only lookup for the Overview dropdown (best_optimal_pricing is Top-N by construction)
+dropdown_lookup = (
+    best_optimal_pricing[["product", "product_key"]]
+    .dropna(subset=["product_key"])
+    .drop_duplicates(subset=["product"])
+    .astype({"product_key": str})
+    .reset_index(drop=True)
+)
 
-# Keep only the elasticity columns we need
-if {"product", "product_key", "ratio", "pct"}.issubset(elasticity_df.columns):
-    elasticity_df = elasticity_df[["product", "product_key", "ratio", "pct"]].copy()
-else:
-    # be defensive if pipeline changed
-    needed = ["product", "product_key"]
-    for c in ["ratio", "pct"]:
-        if c in elasticity_df.columns:
-            needed.append(c)
-    elasticity_df = elasticity_df[needed].copy()
+# --- Ensure 'product_key' ONCE (using full lookup) ---
+all_gam_results      = ensure_product_key(all_gam_results,      lookup_all)
+elasticity_df        = ensure_product_key(elasticity_df,        lookup_all)
+best_optimal_pricing = ensure_product_key(best_optimal_pricing, lookup_all)
+best_avg_df          = ensure_product_key(best_avg_df,          lookup_all)
+curr_opt_df          = ensure_product_key(curr_opt_df,          lookup_all)
+curr_price_df        = ensure_product_key(curr_price_df,        lookup_all)
 
-# --- Build true best-50 table directly from P50 curve (has product_key) ---
+# Build best50 from P50 curve (guarantee product_key present)
 if "revenue_pred_0.5" in all_gam_results.columns:
     idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
     best50_optimal_pricing = (
-        all_gam_results.loc[idx, ["product", "product_key", "asp", "revenue_pred_0.5"]]
-        .drop_duplicates(subset=["product"])
+        all_gam_results.loc[idx, ["product", "asp", "revenue_pred_0.5", "pred_0.5"]]
         .reset_index(drop=True)
+        .merge(dropdown_lookup, on="product", how="left")
+        [["product", "product_key", "asp", "revenue_pred_0.5", "pred_0.5"]]
     )
 else:
-    # Fallback: merge from avg table to attach P50 revenue if present
     best50_optimal_pricing = (
         best_optimal_pricing[["product", "product_key", "asp"]]
-        .merge(
-            all_gam_results[["product", "asp", "revenue_pred_0.5"]],
-            on=["product", "asp"],
-            how="left",
-        )
+        .merge(all_gam_results[["product", "asp", "revenue_pred_0.5", "pred_0.5"]],
+               on=["product", "asp"], how="left")
         .drop_duplicates(subset=["product"])
         .reset_index(drop=True)
     )
 
-# --- Debug fingerprints so you can see the model actually changed ---
-# print(
-#     "[frames]",
-#     f"all_gam_results rows={len(all_gam_results)}",
-#     f"prods={all_gam_results['product'].nunique()}",
-#     f"has_p50={'pred_0.5' in all_gam_results.columns}",
-# )
-# print("[frames] all_gam_results cols:", sorted(all_gam_results.columns))
-# print("[frames] best50 cols:", best50_optimal_pricing.columns.tolist())
-# print("[frames] elasticity_df cols:", sorted(elasticity_df.columns))
-
-# ---------- Dash app ----------
+# ---------- app ----------
 app = Dash(
     __name__,
     external_stylesheets=[dbc.themes.LUX],
@@ -227,13 +177,13 @@ app = Dash(
 )
 server = app.server
 
-# STRICT validation layout — register all pages/components that appear via routing
+# STRICT validation layout — include all routes’ components
 app.validation_layout = html.Div(
     [
         dcc.Location(id="url"),
         get_navbar(),
         Homepage(),
-        overview.layout(products_lookup),  # pass lookup df
+        overview.layout(dropdown_lookup),  # pass Top-N only
         opps.layout(curr_opt_df),
         faq.faq_section(),
         html.Div(id="page-content"),
@@ -248,9 +198,7 @@ app.layout = html.Div(
         dcc.Loading(
             id="router-loader",
             type="circle",
-            children=html.Div(
-                id="page-content", style={"minHeight": "65vh", "padding": "12px"}
-            ),
+            children=html.Div(id="page-content", style={"minHeight": "65vh", "padding": "12px"}),
         ),
     ]
 )
@@ -261,28 +209,29 @@ def route(path):
     if path in ["/", "", None]:
         return Homepage()
     elif path == "/overview":
-        return overview.layout(products_lookup)
+        return overview.layout(dropdown_lookup)  # Top-N only
     elif path == "/faq":
         return faq.faq_section()
     elif path == "/opps":
         return opps.layout(curr_opt_df)
     return html.Div("404 - Not found", className="p-4")
 
-
 # ---------- Register callbacks ----------
-# overview.register_callbacks signature:
-# (app, price_quant_df, best_optimal_pricing_df, curr_price_df, elasticity_df, all_gam_results, products_lookup, viz_cls)
+# Signature: (app, price_quant_df, best50_optimal_pricing_df, curr_price_df, elasticity_df,
+#             all_gam_results, products_lookup, meta, viz_cls)
 overview.register_callbacks(
     app,
     price_quant_df,
-    best50_optimal_pricing,  # use P50 table
+    best50_optimal_pricing,
     curr_price_df,
     elasticity_df,
     all_gam_results,
-    products_lookup,
+    dropdown_lookup,   # Top-N mapping used by dropdown + titles
+    meta,
     Viz,
 )
 
+# opps page (unchanged)
 opps.register_callbacks(
     app,
     {
@@ -291,18 +240,10 @@ opps.register_callbacks(
         "curr_price_df": curr_price_df,
         "all_gam_results": all_gam_results,
     },
-    curr_opt_df,  # table data
+    curr_opt_df,
 )
 
-print(
-    "\n",
-    "-" * 10,
-    datetime.now().strftime("%H:%M:%S"),
-    " Page Updated " + "-" * 10,
-    "\n",
-)
+print("\n", "-" * 10, datetime.now().strftime("%H:%M:%S"), " Page Updated " + "-" * 10, "\n")
 
 if __name__ == "__main__":
-    # Dev: force rebuild with
-    #   PRICING_FORCE_REBUILD=1 python app.py
     app.run(debug=True)

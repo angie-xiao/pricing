@@ -59,8 +59,8 @@ def layout(products_lookup: pd.DataFrame):
                     _kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#f3f0f0"),
                     _kpi_card("card_title_snap", "Recommended Price", "card_asp_snap", bg="#F5E8D8"),
                     _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0", id_subtext="elasticity-subtext"),
-                    _kpi_card("card_title_units_opp_ann", "Annualized Potential Units Sold", "units_opp_ann_value", bg="#eef8f0"),
-                    _kpi_card("card_title_rev_best_ann", "Annualized Potential Revenue", "rev_best_ann_value", bg="#eef8f0"),
+                    _kpi_card("card_title_units_opp_ann", "Annualized Units Sold Opportunity", "units_opp_ann_value", bg="#eef8f0"),
+                    _kpi_card("card_title_rev_best_ann", "Annualized Revenue Opportunity", "rev_best_ann_value", bg="#eef8f0"),
                     _kpi_card("card_title_fit_snap", "Model Fit (Daily Revenue)", "fit_value_snap", bg="#eef2fa", id_subtext="fit-subtext"),
                 ],
                 className="g-4 align-items-stretch",
@@ -80,22 +80,24 @@ def layout(products_lookup: pd.DataFrame):
                         className="mt-3",
                         style={"margin-left": "50px", "marginTop": "190px", "color": "#DAA520"},
                     ),
-                    # graph
-                    dbc.Col(
-                        dcc.Loading(
-                            type="circle",
-                            children=dcc.Graph(
-                                id="gam_results_pred",
-                                style={"height": "560px"},
-                                config={"displaylogo": False},
-                            ),
-                        ),
-                        md=8, xs=12, className="mb-3",
-                    ),
-                    
+                    # graph and coverage note
                     dbc.Col(
                         [
-                            # scenario table
+                            dcc.Loading(
+                                type="circle",
+                                children=dcc.Graph(
+                                    id="gam_results_pred",
+                                    style={"height": "560px"},
+                                    config={"displaylogo": False},
+                                ),
+                            ),
+                        ],
+                        md=8, xs=12, className="mb-0",  # Changed mb-3 to mb-0
+                    ),
+                    
+                    # scenario table and reading notes
+                    dbc.Col(
+                        [
                             html.H6("Scenario Summary", className="mb-2", style={"textAlign": "center", "marginTop": "40px"}),
                             dash_table.DataTable(
                                 id="scenario_table",
@@ -107,23 +109,20 @@ def layout(products_lookup: pd.DataFrame):
                                 data=[],
                                 style_table={"border": "none", "marginBottom": "12px"},
                                 style_cell={"textAlign": "center", "border": "none", "fontSize": "14px", "padding": "6px"},
-                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6", "marginTop": "400px"},
+                                style_header={"fontWeight": 600, "border": "none", "backgroundColor": "#f6f6f6"},
                             ),
-                            # reading notes
                             dbc.Card(
-                                dbc.CardBody(
-                                    [
-                                        html.H6("How to read this", className="mb-2 fw-bold text-uppercase"),
-                                        html.Ul(
-                                            [
-                                                html.Li([html.B("Goal: "), "Pick the price where the central curve's expected revenue is highest."]),
-                                                html.Li([html.B("Range: "), "Conservative and optimistic curves show how outcomes may vary."]),
-                                                html.Li([html.B("Confidence: "), "Stronger when all curves peak around a similar price and there's lots of nearby data."]),
-                                            ],
-                                            className="predictive-explainer-list",
-                                        ),
-                                    ]
-                                ),
+                                dbc.CardBody([
+                                    html.H6("How to read this", className="mb-2 fw-bold text-uppercase"),
+                                    html.Ul(
+                                        [
+                                            html.Li([html.B("Goal: "), "Pick the price where the central curve's expected revenue is highest."]),
+                                            html.Li([html.B("Range: "), "Conservative and optimistic curves show how outcomes may vary."]),
+                                            html.Li([html.B("Confidence: "), "Stronger when all curves peak around a similar price and there's lots of nearby data."]),
+                                        ],
+                                        className="predictive-explainer-list",
+                                    ),
+                                ]),
                                 className="shadow-sm",
                                 style={"marginTop": "70px"},
                             ),
@@ -131,26 +130,33 @@ def layout(products_lookup: pd.DataFrame):
                         md=4, xs=12,
                     ),
                 ],
-                className="g-3 mb-4",
+                className="g-3 mb-2",  # Reduced bottom margin
             ),
 
-            html.Div(style={"height": "16px"}),
-
-            # Coverage note
-            dbc.Row(
-                dbc.Col(
-                    html.Span(html.I(id="coverage_note")),
-                    width=12,
-                    style={"textAlign": "center", "color": "#5f6b7a", "fontSize": "0.9em"},
-                )
+            # Line and coverage note (moved outside the main row)
+            # html.Hr(className="mt-0 mb-2"),  # Added explicit margin classes
+            html.Div(
+                html.Span(html.I(id="coverage_note")),
+                style={
+                    "textAlign": "center",
+                    "color": "#5f6b7a",
+                    "fontSize": "0.9em",
+                    "marginBottom": "50px",  # Reduced from default
+                }
             ),
 
             # Footer
             html.Div(
                 [html.Span("made with ♥️ | "), html.Span(html.I("@aqxiao")), html.P("github.com/angie-xiao")],
                 className="text-center py-3",
-                style={"fontSize": "0.8em", "color": "#ac274f", "textAlign": "center",
-                       "backgroundColor": "#f3f3f3", "margin": "40px auto 0 auto", "borderRadius": "6px"},
+                style={
+                    "fontSize": "0.8em",
+                    "color": "#ac274f",
+                    "textAlign": "center",
+                    "backgroundColor": "#f3f3f3",
+                    "margin": "20px auto 0 auto",  # Reduced top margin
+                    "borderRadius": "6px"
+                },
             ),
         ],
         fluid=True,

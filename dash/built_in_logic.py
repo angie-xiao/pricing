@@ -1,11 +1,4 @@
-# pred graph - now p50, p975 are way too high
-# curr price = 0
-# annualized comparisons for shipped units & rev
-
-# outliers
-# shouldn't get tooo too much weight. for ex., while $80 asp might be valuable/rare, the fact that there's only been 1 purchase is not helpful
-# need to take this into account & make it proportional too. maybe CVR???
-
+# show axes names on pred graph
 
 # --------- built_in_logic.py (RMSE-focused; Top-N only; adds annualized opps & data range) ---------
 import os, random

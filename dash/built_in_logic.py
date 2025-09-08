@@ -26,6 +26,7 @@ class DataEngineer:
         self.top_n = top_n
 
     def prepare(self) -> pd.DataFrame:
+        
         def _clean_cols(df):
             df = df.copy()
             df.columns = df.columns.str.strip().str.lower()
@@ -34,36 +35,23 @@ class DataEngineer:
         self.pricing_df = _clean_cols(self.pricing_df)
         self.product_df = _clean_cols(self.product_df)
 
-        candidate_keys = ["asin", "sku", "item_sku", "product_id", "parent_asin"]
-        common_keys = [k for k in candidate_keys if k in self.pricing_df and k in self.product_df]
-        if not common_keys:
-            raise KeyError(
-                f"No common join key. Tried {candidate_keys}. "
-                f"pricing_df cols={list(self.pricing_df.columns)}, "
-                f"product_df cols={list(self.product_df.columns)}"
-            )
-        join_key = common_keys[0]
-
-        self.pricing_df[join_key] = self.pricing_df[join_key].astype(str).str.strip()
-        self.product_df[join_key] = self.product_df[join_key].astype(str).str.strip()
-
-        df = self.pricing_df.merge(self.product_df, how="left", on=join_key, validate="m:1")
+        df = self.pricing_df.merge(self.product_df, how="left", on="asin")
 
         # stable identifiers / labels
         if "product_key" not in df.columns:
-            df["product_key"] = df[join_key].astype(str)
+            df["product_key"] = df["asin"].astype(str)
 
-        reqs = ["tag", "weight", "order_date", "shipped_units", "revenue_share_amt", "event_name"]
-        miss = [c for c in reqs if c not in df]
-        if miss:
-            raise KeyError(f"Missing required column(s): {miss}")
+        # reqs = ["tag", "weight", "order_date", "shipped_units", "revenue_share_amt"]
+        # miss = [c for c in reqs if c not in df]
+        # if miss:
+        #     raise KeyError(f"Missing required column(s): {miss}")
 
         df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
         # ---- daily aggregation per product_key, then derive ASP ----
         daily = (
-            df.groupby(["product_key", "product", "event_name", "order_date"], as_index=False)[
+            df.groupby(["product_key", "product", "order_date"])[
                 ["shipped_units", "revenue_share_amt"]
             ]
             .sum()
@@ -71,15 +59,18 @@ class DataEngineer:
         daily = daily[daily["shipped_units"] > 0]
         daily["asp"] = daily["revenue_share_amt"] / daily["shipped_units"]
         daily = daily[daily["asp"] > 0]
-        daily["asp"] = daily["asp"].round(2)
+        daily["asp"] = daily["asp"].round(1)
+        daily.reset_index(inplace=True)
 
-        # ---- product × ASP table with total units, revenue, and days_sold ----
+        # ---- product × ASP table with daily rates and totals ----
         asp_product_df = (
-            daily.groupby(["product_key", "product", "event_name", "asp"])
+            daily.groupby(["product_key", "product", "asp"])
             .agg(
-                shipped_units=("shipped_units", "sum"),
+                shipped_units=("shipped_units", "sum"),  # keep total units
                 revenue_share_amt=("revenue_share_amt", "sum"),
-                days_sold=("order_date", "nunique"),
+                days_sold=("order_date", "count"),
+                daily_units=("shipped_units", lambda x: x.sum() / pd.Series(x.index).count()),  # add daily rate
+                daily_rev=("revenue_share_amt", lambda x: x.sum() / pd.Series(x.index).count())  # add daily rate
             )
             .reset_index()
         )
@@ -95,8 +86,8 @@ class DataEngineer:
         )
 
         filtered = asp_product_df[
-            (asp_product_df["product"].isin(top_n_products)) &
-            (asp_product_df["event_name"] == "NO DEAL")
+            (asp_product_df["product"].isin(top_n_products)) 
+            # & (asp_product_df["event_name"] == "NO DEAL")
         ].copy()
 
         # Normalize dtype for downstream joins
@@ -182,68 +173,79 @@ class GAMModeler:
         self.gamma_time = float(gamma_time)
         self.tail_strength = float(tail_strength)
         self.tail_p = float(tail_p)
-
+        
     def _make_weights(self, sub: pd.DataFrame) -> np.ndarray:
-        units = np.clip(sub["shipped_units"].values.astype(float), 1.0, None)
-        w = np.sqrt(units)
+        """Weights based on daily revenue and days_sold for confidence in the data point"""
+        # Base weights from daily revenue (more weight to high-revenue price points)
+        daily_rev = np.clip(sub["daily_rev"].values.astype(float), 1.0, None)
+        w = np.sqrt(daily_rev)
 
+        # Time decay (more weight to price points with more days of data)
         days = np.clip(sub["days_sold"].values.astype(float), 1.0, None)
         d_med = np.median(days) if np.median(days) > 0 else 1.0
         w_time = np.exp(-self.gamma_time * (days / d_med))
         w *= w_time
 
-        asp = sub["asp"].values.astype(float)
-        mu = float(np.mean(asp))
-        sd = float(np.std(asp)) if np.std(asp) != 0 else 1.0
-        z = (asp - mu) / sd
+        # Price range weighting (more weight to prices with more data)
         if self.tail_strength > 0:
-            w *= (1.0 + self.tail_strength * np.power(np.abs(z), self.tail_p))
+            asp = sub["asp"].values.astype(float)
+            q25, q75 = np.percentile(asp, [25, 75])
+            iqr = q75 - q25 if q75 > q25 else 1.0
+            
+            # Calculate distance from median in terms of IQR
+            rel_dist = np.abs(asp - np.median(asp)) / iqr
+            
+            # Apply tail strength but cap the maximum weight multiplier
+            w *= (1.0 + self.tail_strength * np.minimum(rel_dist, 2.0)**self.tail_p)
+
+        # Normalize weights 
+        w = w / np.mean(w) if w.size > 0 else w
         return w
 
     def run(self) -> pd.DataFrame:
         all_results = []
         for product, sub in self.topsellers.groupby("product"):
             sub = sub.sort_values("asp").reset_index(drop=True)
+            
+            # Features: price and days_sold
             X = sub[["asp", "days_sold"]].to_numpy(dtype=float)
-            y = sub["shipped_units"].to_numpy(dtype=float)
-            weights = self._make_weights(sub)
+            # Target: daily revenue
+            y = sub["daily_rev"].to_numpy(dtype=float)
+            
+            # Weights based on daily revenue and days_sold
+            weights = self._make_weights(sub)  
 
             out = {}
             for q in [0.025, 0.5, 0.975]:
                 gam = GAMTuner(expectile=q).fit(X, y, sample_weight=weights)
-                y_pred = gam.predict(gam._scaler_X.transform(X))  # in unit space
-                out[f"pred_{q}"] = y_pred
+                y_pred = gam.predict(gam._scaler_X.transform(X))
+                # Add prefix 'revenue_' since these are revenue predictions
+                out[f"revenue_pred_{q}"] = y_pred
 
             preds = pd.DataFrame(out, index=sub.index)
-
-            # simple level calibration on P50 (align scale)
-            try:
-                p50 = preds["pred_0.5"].values
-                denom = float(np.sum(p50 * p50))
-                alpha = (float(np.sum(y * p50)) / denom) if denom > 0 else 1.0
-                for k in list(out.keys()):
-                    preds[k] = preds[k] * alpha
-            except Exception:
-                pass
-
+            
+            # Add raw predictions without revenue prefix for compatibility
+            for q in [0.025, 0.5, 0.975]:
+                preds[f"pred_{q}"] = preds[f"revenue_pred_{q}"]
+            
             results = pd.concat(
-                [sub[["asp", "days_sold", "product", "product_key", "shipped_units"]].reset_index(drop=True),
-                 preds.reset_index(drop=True)],
+                [sub[["asp", "days_sold", "product", "product_key", "shipped_units", "daily_units", "daily_rev"]].reset_index(drop=True),
+                preds.reset_index(drop=True)],
                 axis=1
             )
             all_results.append(results)
 
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
 
-        # revenue transforms
-        for col in [c for c in all_gam_results.columns if c.startswith("pred_")]:
-            all_gam_results[f"revenue_{col}"] = all_gam_results["asp"] * all_gam_results[col]
+        # Add revenue_pred_avg
         rev_cols = [c for c in all_gam_results.columns if c.startswith("revenue_pred_")]
         all_gam_results["revenue_pred_avg"] = all_gam_results[rev_cols].mean(axis=1)
-        all_gam_results["revenue_actual"] = all_gam_results["asp"] * all_gam_results["shipped_units"]
+        
+        # Set revenue_actual
+        all_gam_results["revenue_actual"] = all_gam_results["daily_rev"]
 
-        # ensure dtype
         all_gam_results["product_key"] = all_gam_results["product_key"].astype(str)
+        
         return all_gam_results
 
 
@@ -444,6 +446,8 @@ class viz:
         self.template = template
 
     def gam_results(self, all_gam_results: pd.DataFrame):
+        
+        ''' '''
         product_lst = all_gam_results["product"].unique()
         pltly_qual = px.colors.qualitative.Dark24
         pltly_qual.extend(px.colors.qualitative.Vivid)
@@ -549,3 +553,13 @@ class viz:
                           margin=dict(l=10, r=10, t=60, b=40))
         fig.add_annotation(text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
         return fig
+
+
+
+if __name__ == "__main__":
+    pricing_df, product_df = pd.read_csv('data/730d.csv'), pd.read_csv('data/products.csv')
+    
+    # DataEngineer(pricing_df, product_df, top_n=10).prepare()
+    
+    GAMModeler(
+        DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()

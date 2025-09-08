@@ -250,31 +250,47 @@ def _format_date(dt):
     except Exception:
         return "—"
 
+
 def _model_fit_units(prod_df: pd.DataFrame):
     """
-    Return (value_text, subtext) for model accuracy on shipped units (P50).
-    Aggregates to one row per ASP for stable eval; shows 1 decimal place.
+    Return (value_text, subtext) for model accuracy on daily revenue (P50).
+    Shows typical error in dollars per day.
     """
     if prod_df is None or prod_df.empty:
         return "—", ""
-    need = {"shipped_units", "pred_0.5", "asp"}
+    
+    # Check for required columns
+    need = {"daily_rev", "revenue_pred_0.5", "asp"}
     if not need.issubset(prod_df.columns):
         return "—", ""
-    df = prod_df[["asp", "shipped_units", "pred_0.5"]].dropna()
+        
+    # Get clean data
+    df = prod_df[["asp", "daily_rev", "revenue_pred_0.5"]].dropna()
     if df.empty:
         return "—", ""
+        
+    # Aggregate by price point for stable evaluation
     df = df.groupby("asp", as_index=False).agg(
-        shipped_units=("shipped_units", "sum"),
-        pred_0_5=("pred_0.5", "mean"),
+        daily_rev=("daily_rev", "mean"),
+        pred_rev=("revenue_pred_0.5", "mean")
     )
-    y_true = df["shipped_units"].to_numpy(float)
-    y_pred = df["pred_0_5"].to_numpy(float)
+    
+    y_true = df["daily_rev"].to_numpy(float)
+    y_pred = df["pred_rev"].to_numpy(float)
+    
     if y_true.size == 0:
         return "—", ""
-    rmse_val = mean_squared_error(y_true, y_pred, squared=False)
-    avg_units = float(np.mean(y_true)) if y_true.size else np.nan
-    pct_err = (rmse_val / avg_units * 100.0) if avg_units else np.nan
-    return f"±{rmse_val:,.1f}", (f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else "")
+        
+    # Calculate RMSE in dollars
+    rmse_val = np.sqrt(mean_squared_error(y_true, y_pred))
+    
+    # Calculate percentage error
+    avg_rev = float(np.mean(y_true)) if y_true.size else np.nan
+    pct_err = (rmse_val / avg_rev * 100.0) if avg_rev else np.nan
+    
+    # Format output with dollar sign since we're measuring revenue
+    return f"±${rmse_val:,.0f}", (f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else "")
+
 
 def _update_elasticity_kpi_by_product(product_name: str, elast_df: pd.DataFrame):
     try:
@@ -318,33 +334,46 @@ def _annualized_kpis_signed(product_key, best50_df, curr_price_df, all_gam, annu
     """
     Returns formatted strings:
       +Annualized Δ Units  and  +$Annualized Potential Revenue
+    Based on daily revenue predictions.
     """
     try:
+        # Get best price point predictions
         best = best50_df[best50_df["product_key"] == product_key]
         if best.empty:
             return "—", "—"
-        units_best = float(best.get("pred_0.5", np.nan).iloc[0]) if "pred_0.5" in best else np.nan
-        rev_best   = float(best.get("revenue_pred_0.5", np.nan).iloc[0]) if "revenue_pred_0.5" in best else np.nan
+            
+        # Get daily values at best price
+        daily_units_best = float(best.get("pred_0.5", np.nan).iloc[0]) if "pred_0.5" in best else np.nan
+        daily_rev_best = float(best.get("revenue_pred_0.5", np.nan).iloc[0]) if "revenue_pred_0.5" in best else np.nan
 
+        # Get current price
         cp = curr_price_df.loc[curr_price_df["product_key"] == product_key, "current_price"]
         curr_price = float(cp.iloc[0]) if len(cp) else np.nan
 
+        # Get predictions at current price
         prod = all_gam[
             (all_gam["product_key"] == product_key)
             & pd.notna(all_gam["asp"])
             & pd.notna(all_gam["pred_0.5"])
         ]
+        
         if prod.empty:
-            du_ann = np.nan
+            daily_units_diff = np.nan
         else:
             idx = (prod["asp"] - curr_price).abs().idxmin() if pd.notna(curr_price) else None
-            units_curr = float(prod.loc[idx, "pred_0.5"]) if idx is not None else np.nan
-            du = (units_best - units_curr) if (pd.notna(units_best) and pd.notna(units_curr)) else np.nan
-            du_ann = du * float(annual_factor) if pd.notna(du) else np.nan
+            if idx is not None:
+                daily_units_curr = float(prod.loc[idx, "pred_0.5"])
+                daily_units_diff = daily_units_best - daily_units_curr
+            else:
+                daily_units_diff = np.nan
 
-        rev_best_ann = rev_best * float(annual_factor) if pd.notna(rev_best) else np.nan
-        return _format_signed_units(du_ann), _format_signed_money(rev_best_ann)
-    except Exception:
+        # Annualize the differences
+        units_diff_annual = daily_units_diff * 365.0 if pd.notna(daily_units_diff) else np.nan
+        rev_best_annual = daily_rev_best * 365.0 if pd.notna(daily_rev_best) else np.nan
+
+        return _format_signed_units(units_diff_annual), _format_signed_money(rev_best_annual)
+    except Exception as e:
+        print(f"Error in annualized KPIs: {e}")
         return "—", "—"
 
 def _robustness_badge(prod_df):

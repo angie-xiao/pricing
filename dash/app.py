@@ -85,38 +85,19 @@ def make_products_lookup(*dfs):
         if df is None or len(df) == 0:
             continue
         cols = set(df.columns)
-        if {"product", "product_key"}.issubset(cols):
-            pieces.append(df[["product", "product_key"]].copy())
+        if {"product", "asin"}.issubset(cols):
+            pieces.append(df[["product", "asin"]].copy())
     if not pieces:
-        raise KeyError("No source frame had both ['product','product_key'].")
+        raise KeyError("No source frame had both ['product','asin'].")
     lookup = (
         pd.concat(pieces, ignore_index=True)
-        .dropna(subset=["product", "product_key"])
-        .astype({"product_key": str})
+        .dropna(subset=["product", "asin"])
+        .astype({"asin": str})
         .drop_duplicates()
         .reset_index(drop=True)
     )
     return lookup
 
-def ensure_product_key(df, lookup):
-    """
-    Ensure a single 'product_key' column (str) exists by merging-once to lookup and
-    coalescing any suffixes from prior merges.
-    """
-    if df is None or len(df) == 0:
-        return df
-    if "product_key" not in df.columns:
-        df = df.merge(lookup, on="product", how="left")
-    for c in ("product_key_x", "product_key_y"):
-        if c in df.columns:
-            if "product_key" not in df.columns:
-                df["product_key"] = df[c]
-            else:
-                df["product_key"] = df["product_key"].fillna(df[c])
-    df = df.drop(columns=[c for c in ("product_key_x", "product_key_y") if c in df.columns], errors="ignore")
-    if "product_key" in df.columns:
-        df["product_key"] = df["product_key"].astype(str)
-    return df
 
 # ---------- Load data (cached) ----------
 frames = build_frames_with_cache(PROJECT_BASE)
@@ -136,33 +117,26 @@ lookup_all = make_products_lookup(best_optimal_pricing, best_avg_df, curr_price_
 
 # Top-N only lookup for the Overview dropdown (best_optimal_pricing is Top-N by construction)
 dropdown_lookup = (
-    best_optimal_pricing[["product", "product_key"]]
-    .dropna(subset=["product_key"])
+    best_optimal_pricing[["product", "asin"]]
+    .dropna(subset=["asin"])
     .drop_duplicates(subset=["product"])
-    .astype({"product_key": str})
+    .astype({"asin": str})
     .reset_index(drop=True)
 )
+ 
 
-# --- Ensure 'product_key' ONCE (using full lookup) ---
-all_gam_results      = ensure_product_key(all_gam_results,      lookup_all)
-elasticity_df        = ensure_product_key(elasticity_df,        lookup_all)
-best_optimal_pricing = ensure_product_key(best_optimal_pricing, lookup_all)
-best_avg_df          = ensure_product_key(best_avg_df,          lookup_all)
-curr_opt_df          = ensure_product_key(curr_opt_df,          lookup_all)
-curr_price_df        = ensure_product_key(curr_price_df,        lookup_all)
-
-# Build best50 from P50 curve (guarantee product_key present)
+# Build best50 from P50 curve (guarantee asin present)
 if "revenue_pred_0.5" in all_gam_results.columns:
     idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
     best50_optimal_pricing = (
         all_gam_results.loc[idx, ["product", "asp", "revenue_pred_0.5", "pred_0.5"]]
         .reset_index(drop=True)
         .merge(dropdown_lookup, on="product", how="left")
-        [["product", "product_key", "asp", "revenue_pred_0.5", "pred_0.5"]]
+        [["product", "asin", "asp", "revenue_pred_0.5", "pred_0.5"]]
     )
 else:
     best50_optimal_pricing = (
-        best_optimal_pricing[["product", "product_key", "asp"]]
+        best_optimal_pricing[["product", "asin", "asp"]]
         .merge(all_gam_results[["product", "asp", "revenue_pred_0.5", "pred_0.5"]],
                on=["product", "asp"], how="left")
         .drop_duplicates(subset=["product"])

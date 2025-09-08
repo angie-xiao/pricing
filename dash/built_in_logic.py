@@ -37,21 +37,13 @@ class DataEngineer:
 
         df = self.pricing_df.merge(self.product_df, how="left", on="asin")
 
-        # stable identifiers / labels
-        if "product_key" not in df.columns:
-            df["product_key"] = df["asin"].astype(str)
-
-        # reqs = ["tag", "weight", "order_date", "shipped_units", "revenue_share_amt"]
-        # miss = [c for c in reqs if c not in df]
-        # if miss:
-        #     raise KeyError(f"Missing required column(s): {miss}")
 
         df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
         # ---- daily aggregation per product_key, then derive ASP ----
         daily = (
-            df.groupby(["product_key", "product", "order_date"])[
+            df.groupby(["asin", "product", "order_date"])[
                 ["shipped_units", "revenue_share_amt"]
             ]
             .sum()
@@ -64,7 +56,7 @@ class DataEngineer:
 
         # ---- product × ASP table with daily rates and totals ----
         asp_product_df = (
-            daily.groupby(["product_key", "product", "asp"])
+            daily.groupby(["asin", "product", "asp"])
             .agg(
                 shipped_units=("shipped_units", "sum"),  # keep total units
                 revenue_share_amt=("revenue_share_amt", "sum"),
@@ -91,7 +83,7 @@ class DataEngineer:
         ].copy()
 
         # Normalize dtype for downstream joins
-        filtered["product_key"] = filtered["product_key"].astype(str)
+        filtered["asin"] = filtered["asin"].astype(str)
         return filtered
 
 
@@ -229,7 +221,7 @@ class GAMModeler:
                 preds[f"pred_{q}"] = preds[f"revenue_pred_{q}"]
             
             results = pd.concat(
-                [sub[["asp", "days_sold", "product", "product_key", "shipped_units", "daily_units", "daily_rev"]].reset_index(drop=True),
+                [sub[["asp", "days_sold", "product", "asin", "shipped_units", "daily_units", "daily_rev"]].reset_index(drop=True),
                 preds.reset_index(drop=True)],
                 axis=1
             )
@@ -244,7 +236,7 @@ class GAMModeler:
         # Set revenue_actual
         all_gam_results["revenue_actual"] = all_gam_results["daily_rev"]
 
-        all_gam_results["product_key"] = all_gam_results["product_key"].astype(str)
+        all_gam_results["asin"] = all_gam_results["asin"].astype(str)
         
         return all_gam_results
 
@@ -272,49 +264,12 @@ class PricingPipeline:
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
 
     def _build_curr_price_df(self) -> pd.DataFrame:
-        pricing = self.engineer.pricing_df.copy()
+        """ current price df with product tag """
         product = self.engineer.product_df.copy()
-        pricing.columns = pricing.columns.str.strip().str.lower()
-        product.columns = product.columns.str.strip().str.lower()
-
-        candidate_keys = ["asin", "sku", "item_sku", "product_id", "parent_asin"]
-        common_keys = [k for k in candidate_keys if k in pricing and k in product]
-        if not common_keys:
-            return pd.DataFrame(columns=["product_key", "product", "current_price"])
-        join_key = common_keys[0]
-
-        pricing[join_key] = pricing[join_key].astype(str).str.strip()
-        product[join_key] = product[join_key].astype(str).str.strip()
-
-        df = pricing.merge(product, how="left", on=join_key, validate="m:1")
-        required = ["order_date", "shipped_units", "revenue_share_amt"]
-        if any(c not in df for c in required):
-            return pd.DataFrame(columns=["product_key", "product", "current_price"])
-
-        if "product_key" not in df.columns:
-            df["product_key"] = df[join_key].astype(str)
-        if "tag" in df.columns and "weight" in df.columns:
-            df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
-        else:
-            df["product"] = df["product_key"]
-
-        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
-        grp = (
-            df.groupby(["product_key", "product", "order_date"], as_index=False)[
-                ["shipped_units", "revenue_share_amt"]
-            ]
-            .sum()
-        )
-        grp = grp[grp["shipped_units"] > 0]
-        if grp.empty:
-            return pd.DataFrame(columns=["product_key", "product", "current_price"])
-
-        grp["asp"] = grp["revenue_share_amt"] / grp["shipped_units"]
-        grp = grp.sort_values(["product_key", "order_date"])
-        latest = grp.drop_duplicates("product_key", keep="last")
-        out = latest[["product_key", "product", "asp"]].rename(columns={"asp": "current_price"})
-        out["product_key"] = out["product_key"].astype(str)
+        product["product"] = (product["tag"] + " " + product["weight"].astype(str)).str.upper() 
+        out = product[['asin','product','current_price']]
         return out.reset_index(drop=True)
+
 
     @staticmethod
     def _nearest_row_at_price(prod_df: pd.DataFrame, price: float):
@@ -336,8 +291,8 @@ class PricingPipeline:
         bests   = Optimizer.run(all_gam_results)
         best_avg = bests["best_avg"].copy()
 
-        if "product_key" not in best_avg.columns:
-            pk_map = topsellers[["product", "product_key"]].drop_duplicates()
+        if "asin" not in best_avg.columns:
+            pk_map = topsellers[["product", "asin"]].drop_duplicates()
             best_avg = best_avg.merge(pk_map, on="product", how="left")
 
         if "revenue_actual" not in best_avg.columns:
@@ -349,6 +304,9 @@ class PricingPipeline:
 
         # 3) current prices
         curr_price_df = self._build_curr_price_df()
+        # print(f"Current price DataFrame shape: {curr_price_df.shape}")
+        # print("Sample of current prices:")
+        # print(curr_price_df.head())
 
         # 4) data range + annualization factor
         df_dates = self.engineer.pricing_df.copy()
@@ -362,24 +320,24 @@ class PricingPipeline:
         if "revenue_pred_0.5" in all_gam_results.columns:
             idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
             best50 = (
-                all_gam_results.loc[idx, ["product", "product_key", "asp", "pred_0.5", "revenue_pred_0.5"]]
+                all_gam_results.loc[idx, ["product", "asin", "asp", "pred_0.5", "revenue_pred_0.5"]]
                 .drop_duplicates(subset=["product"])
                 .reset_index(drop=True)
             )
         else:
-            best50 = pd.DataFrame(columns=["product","product_key","asp","pred_0.5","revenue_pred_0.5"])
+            best50 = pd.DataFrame(columns=["product","asin","asp","pred_0.5","revenue_pred_0.5"])
 
         # 6) opportunity summary per product (units & revenue, + annualized)
         rows = []
         for _, r in best50.iterrows():
             p = r["product"]
-            pk = str(r["product_key"])
+            pk = str(r["asin"])
             asp_best = float(r["asp"])
             units_best = float(r.get("pred_0.5", np.nan))
             rev_best = float(r.get("revenue_pred_0.5", np.nan))
 
             prod_curve = all_gam_results[(all_gam_results["product"] == p)]
-            cp_ser = curr_price_df.loc[curr_price_df["product_key"] == pk, "current_price"]
+            cp_ser = curr_price_df.loc[curr_price_df["asin"] == pk, "current_price"]
             curr_price = float(cp_ser.iloc[0]) if len(cp_ser) else np.nan
 
             curr_row = self._nearest_row_at_price(prod_curve, curr_price) if pd.notna(curr_price) else None
@@ -393,7 +351,7 @@ class PricingPipeline:
             dr = (rev_best - rev_curr)     if (pd.notna(rev_best) and pd.notna(rev_curr))   else np.nan
 
             rows.append({
-                "product": p, "product_key": pk,
+                "product": p, "asin": pk,
                 "current_price": curr_price, "best_price": asp_best,
                 "units_pred_best": units_best, "units_pred_curr": units_curr,
                 "revenue_pred_best": rev_best, "revenue_pred_curr": rev_curr,
@@ -406,8 +364,8 @@ class PricingPipeline:
 
         # 7) normalize key dtype across frames
         for df in (best_avg, all_gam_results, curr_price_df, topsellers, opps_summary):
-            if "product_key" in df.columns:
-                df["product_key"] = df["product_key"].astype(str)
+            if "asin" in df.columns:
+                df["asin"] = df["asin"].astype(str)
 
         # 8) frames dict
         frames = {
@@ -415,7 +373,7 @@ class PricingPipeline:
             "best_avg": best_avg,
             "all_gam_results": all_gam_results,
             "best_optimal_pricing_df": best_avg[
-                ["product", "product_key", "asp", "revenue_pred_avg", "revenue_actual"]
+                ["product", "asin", "asp", "revenue_pred_avg", "revenue_actual"]
             ].copy(),
             "elasticity_df": elasticity_df[["product", "ratio", "pct"]],
             "curr_opt_df": best_avg,
@@ -561,5 +519,7 @@ if __name__ == "__main__":
     
     # DataEngineer(pricing_df, product_df, top_n=10).prepare()
     
-    GAMModeler(
-        DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+    # GAMModeler(
+    #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+    
+    PricingPipeline(pricing_df, product_df, top_n=10)._build_curr_price_df()

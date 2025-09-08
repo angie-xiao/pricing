@@ -9,7 +9,7 @@ from sklearn.metrics import mean_squared_error
 ACCENT = {"color": "#DAA520"}
 
 def layout(products_lookup: pd.DataFrame):
-    """Pass a Top-N-only DataFrame with columns ['product_key','product'].""" 
+    """Pass a Top-N-only DataFrame with columns ['asin','product'].""" 
     return dbc.Container(
         [
             html.H1(
@@ -32,11 +32,11 @@ def layout(products_lookup: pd.DataFrame):
                         dcc.Dropdown(
                             id="product_dropdown_snap",
                             options=[
-                                {"label": r["product"], "value": r["product_key"]}
+                                {"label": r["product"], "value": r["asin"]}
                                 for _, r in products_lookup.iterrows()
                             ],
                             value=(
-                                products_lookup["product_key"].iloc[0]
+                                products_lookup["asin"].iloc[0]
                                 if len(products_lookup)
                                 else None
                             ),
@@ -61,7 +61,7 @@ def layout(products_lookup: pd.DataFrame):
                     _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0", id_subtext="elasticity-subtext"),
                     _kpi_card("card_title_units_opp_ann", "Annualized Potential Units Sold", "units_opp_ann_value", bg="#eef8f0"),
                     _kpi_card("card_title_rev_best_ann", "Annualized Potential Revenue", "rev_best_ann_value", bg="#eef8f0"),
-                    _kpi_card("card_title_fit_snap", "Model Fit", "fit_value_snap", bg="#eef2fa", id_subtext="fit-subtext"),
+                    _kpi_card("card_title_fit_snap", "Model Fit (Daily Revenue)", "fit_value_snap", bg="#eef2fa", id_subtext="fit-subtext"),
                 ],
                 className="g-4 align-items-stretch",
                 justify="center",
@@ -322,7 +322,7 @@ def _scenario_table(prod_df: pd.DataFrame) -> pd.DataFrame:
             )
     return pd.DataFrame(rows)
 
-def _annualized_kpis_signed(product_key, best50_df, curr_price_df, all_gam, annual_factor):
+def _annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_factor):
     """
     Returns formatted strings:
       +Annualized Δ Units  and  +$Annualized Potential Revenue
@@ -330,7 +330,7 @@ def _annualized_kpis_signed(product_key, best50_df, curr_price_df, all_gam, annu
     """
     try:
         # Get best price point predictions
-        best = best50_df[best50_df["product_key"] == product_key]
+        best = best50_df[best50_df["asin"] == asin]
         if best.empty:
             return "—", "—"
             
@@ -339,12 +339,12 @@ def _annualized_kpis_signed(product_key, best50_df, curr_price_df, all_gam, annu
         daily_rev_best = float(best.get("revenue_pred_0.5", np.nan).iloc[0]) if "revenue_pred_0.5" in best else np.nan
 
         # Get current price
-        cp = curr_price_df.loc[curr_price_df["product_key"] == product_key, "current_price"]
+        cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
         curr_price = float(cp.iloc[0]) if len(cp) else np.nan
 
         # Get predictions at current price
         prod = all_gam[
-            (all_gam["product_key"] == product_key)
+            (all_gam["asin"] == asin)
             & pd.notna(all_gam["asp"])
             & pd.notna(all_gam["pred_0.5"])
         ]
@@ -490,9 +490,9 @@ def register_callbacks(
         Input("product_dropdown_snap", "value"),
     )
     
-    def overview(product_key):
+    def overview(asin):
         # Empty selection -> placeholders
-        if not product_key:
+        if not asin:
             empty_fig = viz.empty_fig("Select a product")
             return (
                 "", "—", "", "", "—", "", "—", "", "—", "",
@@ -503,18 +503,18 @@ def register_callbacks(
         # Resolve display name (optional; we keep titles static)
         try:
             display_name = products_lookup.loc[
-                products_lookup["product_key"] == product_key, "product"
+                products_lookup["asin"] == asin, "product"
             ].iloc[0]
         except Exception:
             display_name = ""
 
         # Current price
-        cp = curr_price_df.loc[curr_price_df["product_key"] == product_key, "current_price"]
+        cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
         curr_price_val = f"${float(cp.iloc[0]):,.2f}" if len(cp) else "—"
 
         # Recommended price (P50 best)
         best_row = best50_optimal_pricing_df.loc[
-            best50_optimal_pricing_df["product_key"] == product_key
+            best50_optimal_pricing_df["asin"] == asin
         ]
         asp_val = f"${float(best_row['asp'].iloc[0]):,.2f}" if len(best_row) else "—"
 
@@ -522,7 +522,7 @@ def register_callbacks(
         elast_val, elast_subtext = _update_elasticity_kpi_by_product(display_name, elasticity_df)
 
         # Product slice for plots/KPIs
-        filt = all_gam_results[all_gam_results["product_key"] == product_key]
+        filt = all_gam_results[all_gam_results["asin"] == asin]
         pred_graph = viz.gam_results(filt) if len(filt) else viz.empty_fig("No model data")
 
         # Scenario summary
@@ -531,7 +531,7 @@ def register_callbacks(
 
         # Annualized KPIs (signed, with + prefixes where applicable)
         du_ann, rev_best_ann = _annualized_kpis_signed(
-            product_key, best50_optimal_pricing_df, curr_price_df, all_gam_results, meta.get("annual_factor", 1.0)
+            asin, best50_optimal_pricing_df, curr_price_df, all_gam_results, meta.get("annual_factor", 1.0)
         )
 
         # Fit (units RMSE)

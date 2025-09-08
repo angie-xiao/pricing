@@ -54,8 +54,8 @@ def layout(products_lookup: pd.DataFrame):
             # KPI row (exact order requested)
             dbc.Row(
                 [
-                    _kpi_card("card_title_start_date", "Date Start", "start_date_value", bg="#f3f0f0"),
-                    _kpi_card("card_title_end_date", "Date End", "end_date_value", bg="#f3f0f0"),
+                    _kpi_card("card_title_date_range", "Number of Days", "date_range_value", bg="#f3f0f0", id_subtext="date-range-subtext"),
+
                     _kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#f3f0f0"),
                     _kpi_card("card_title_snap", "Recommended Price", "card_asp_snap", bg="#F5E8D8"),
                     _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0", id_subtext="elasticity-subtext"),
@@ -67,14 +67,6 @@ def layout(products_lookup: pd.DataFrame):
                 justify="center",
                 align="center",
                 style={"padding": "10px 0 10px"},
-            ),
-
-            # Confidence / Robustness badge
-            dbc.Row(
-                dbc.Col(
-                    html.Div(id="robustness_badge", style={"textAlign": "center", "padding": "25px"}),
-                    width=12,
-                )
             ),
 
             html.Hr(className="my-4"),
@@ -471,13 +463,12 @@ def register_callbacks(
     viz_cls,
 ):
     viz = viz_cls()
-
+    
     @app.callback(
-        # 8 KPI cards (title/value pairs + the one subtext for elasticity and fit)
-        Output("card_title_start_date", "children"),
-        Output("start_date_value", "children"),
-        Output("card_title_end_date", "children"),
-        Output("end_date_value", "children"),
+        # Updated KPI cards outputs
+        Output("card_title_date_range", "children"),
+        Output("date_range_value", "children"),
+        Output("date-range-subtext", "children"),
         Output("card_title_curr_price_snap", "children"),
         Output("curr_price_snap", "children"),
         Output("card_title_snap", "children"),
@@ -493,20 +484,20 @@ def register_callbacks(
         Output("fit_value_snap", "children"),
         Output("fit-subtext", "children"),
         # rest of the page
-        Output("robustness_badge", "children"),
         Output("gam_results_pred", "figure"),
         Output("scenario_table", "data"),
         Output("coverage_note", "children"),
         Input("product_dropdown_snap", "value"),
     )
+    
     def overview(product_key):
         # Empty selection -> placeholders
         if not product_key:
             empty_fig = viz.empty_fig("Select a product")
             return (
-                "", "—", "", "—", "", "—", "", "—", "", "—", "",
+                "", "—", "", "", "—", "", "—", "", "—", "",
                 "", "—", "", "—", "", "—", "",
-                "", empty_fig, [], ""
+                empty_fig, [], ""
             )
 
         # Resolve display name (optional; we keep titles static)
@@ -546,25 +537,35 @@ def register_callbacks(
         # Fit (units RMSE)
         fit_val, fit_sub = _model_fit_units(filt)
 
-        # Robustness & coverage
-        badge = _robustness_badge(filt)
+        # # Robustness & coverage
+        # badge = _robustness_badge(filt)
         coverage = _coverage_note(filt)
 
-        # Date range (from meta)
-        start_txt = _format_date(meta.get("data_start"))
-        end_txt   = _format_date(meta.get("data_end"))
+        # # Date range (from meta)
+        # start_txt = _format_date(meta.get("data_start"))
+        # end_txt   = _format_date(meta.get("data_end"))
 
+        # Date range calculation
+        start_date = pd.to_datetime(meta.get("data_start"))
+        end_date = pd.to_datetime(meta.get("data_end"))
+        if pd.notna(start_date) and pd.notna(end_date):
+            num_days = (end_date - start_date).days + 1
+            date_range_val = f"{num_days:,}"
+            date_range_subtext = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+        else:
+            date_range_val = "—"
+            date_range_subtext = "—"
         return (
-            "", start_txt,                 # Date Start (title text blank)
-            "", end_txt,                   # Date End   (title text blank)
-            "", curr_price_val,            # Current Price
-            "", asp_val,                   # Recommended Price
-            "", elast_val, elast_subtext,  # Elasticity
-            "", du_ann,                    # Annualized Potential Units Sold
-            "", rev_best_ann,              # Annualized Potential Revenue
-            "", fit_val, fit_sub,          # Model Fit
-            badge,                         # robustness
-            pred_graph,                    # graph
-            scenario_data,                 # scenario
-            coverage,                      # coverage
+            "", date_range_val, date_range_subtext,  # Date Range
+            "", curr_price_val,                      # Current Price
+            "", asp_val,                             # Recommended Price
+            "", elast_val, elast_subtext,            # Elasticity
+            "", du_ann,                              # Annualized Potential Units Sold
+            "", rev_best_ann,                        # Annualized Potential Revenue
+            "", fit_val, fit_sub,                    # Model Fit
+            pred_graph,                              # graph
+            scenario_data,                           # scenario
+            coverage,                                # coverage
         )
+
+        

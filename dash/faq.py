@@ -6,7 +6,6 @@ ACCENT = {"color": "#DAA520"}
 LEFT_INDENT_PX = "50px"  # same left margin for title + table
 INDENT = "\u00A0\u00A0\u00A0\u00A0"  # 4 non-breaking spaces
 
-
 def make_faq_table(table_id, rows):
     return dash_table.DataTable(
         id=table_id,
@@ -49,231 +48,244 @@ def make_faq_table(table_id, rows):
         ],
     )
 
-
-def faq_gam_section():
+# 1) End-to-end pipeline (matches DataEngineer + PricingPipeline)
+def faq_pipeline_section():
     rows = [
         {
             "Summary": (
-                "ExpectileGAM - a special case of GAM (Generalized Additive Model). \n\n"
-                "It fits smooth, nonlinear demand curves at different expectiles (2.5%, 50%, 97.5%) "
-                "so we can see conservative, expected, and optimistic scenarios."
+                "We clean and join pricing + product data, aggregate to daily product-ASP level, "
+                "keep Top-N products by revenue, then build price curves and recommended prices. "
+                "We also compute elasticity and annualized opportunity deltas."
             ),
             "Business-friendly": (
-                "A GAM is a way to learn the true shape of the demand curve instead of forcing a straight line. \n\n"
-                "ExpectileGAM goes further by drawing not just one curve, but three: "
-                "a cautious version, a middle version, and an optimistic version. "
-                "This shows us the range of outcomes at different prices, not just the average."
+                "Think of it as a funnel:\n"
+                f"{INDENT}1) Clean & match your sales with product tags/weights\n"
+                f"{INDENT}2) Roll up by day and price (ASP)\n"
+                f"{INDENT}3) Focus on Top-N highest-revenue products so the dashboard stays sharp\n"
+                f"{INDENT}4) Learn demand/revenue curves and pick the best price\n"
+                f"{INDENT}5) Show upside vs current price, including annualized impact"
             ),
             "Technical nuances": (
-                "• GAM basics:\n"
-                "    ‣ y = β0 + f(price) + ε, with f(price) as a smooth spline\n\n"
-                "• Why ExpectileGAM:\n"
-                "    ‣ Minimizes weighted squared error (asymmetric MSE) \n\t"
-                "    • Squared loss is smooth\n\t"
-                "    • Better behaved gradients & more reliable convergence\n"
-                "    ‣ Great for smaller sample sizes or noisy data points (our case)\n\n"
-                "• Setup:\n"
-                "    ‣ Predictor (X): ASP (average selling price)\n"
-                "    ‣ Response (y): shipped units per product-week\n"
-
-                "    ‣ Preprocessing:\n\t"
-                "    • Standardize X (price): \n\t\t"
-                "    ‣ Put prices on a neutral scale\n\t\t"
-                "    ‣ -> So the curve behaves consistently \n\t"
-                "    • Normalize y (units): \n\t\t"
-                "    ‣ Balance products & guard for y_std = 0\n\t\t"
-                "    • -> So high-volume sellers don't dominate\n\t\t"
-                "    • -> ... and to avoid errors on flat series.\n\n"
-                "    ‣ Fit at q = 0.025, 0.5, 0.975 \n\t"
-                "    → conservative, median, & optimistic curves\n\n"
-                "• Outputs:\n"
-                "    ‣ Predicted units at each ASP\n"
-                "    ‣ Convert to revenue = ASP * predicted units\n\n"
-                "• Evaluation:\n"
-                "    ‣ Compare predicted vs. actual revenue\n"
-                "    ‣ RMSE used to monitor fit quality"
+                "• Engineering:\n"
+                f"{INDENT}‣ Daily aggregation per (asin, product, order_date) with shipped_units & revenue_share_amt\n"
+                f"{INDENT}‣ ASP = revenue_share_amt / shipped_units (rounded to 0.1); keep ASP>0 & units>0\n"
+                f"{INDENT}‣ Collapse to (asin, product, asp): totals + days_sold = #daily rows at that ASP,\n"
+                f"{INDENT}  daily_units, daily_rev = totals / #rows\n\n"
+                "• Top-N filter:\n"
+                f"{INDENT}‣ Keep only Top-N products by total revenue_share_amt to avoid over-display\n\n"
+                "• Frames exposed to UI:\n"
+                f"{INDENT}‣ all_gam_results, best_avg/best50/best975/best25, elasticity_df, curr_price_df,\n"
+                f"{INDENT}‣ opps_summary (delta_units/_revenue incl. annualized), meta (data_start/end, days_covered, annual_factor)"
             ),
         }
     ]
     return html.Div(
         [
-            html.H3(
-                "What model did we use?",
-                className="mt-3",
-                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            html.H3("What does the pipeline do end-to-end?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            make_faq_table("faq-pipeline", rows),
+        ],
+        style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
+    )
+
+# 2) Model choice (matches GAMModeler/GAMTuner)
+def faq_gam_section():
+    rows = [
+        {
+            "Summary": (
+                "We use an ExpectileGAM (a smooth, nonlinear model) at three expectiles "
+                "(2.5%, 50%, 97.5%) to learn revenue vs price. "
+                "Features are [ASP, days_sold]; the target is daily revenue."
             ),
+            "Business-friendly": (
+                "Instead of forcing a straight line, we let the data trace a flexible curve. "
+                "And we don’t rely on a single curve — we fit cautious, typical, and optimistic versions "
+                "to visualize downside/upside around the expected outcome."
+            ),
+            "Technical nuances": (
+                "• Targets & features:\n"
+                f"{INDENT}‣ y = daily_rev\n"
+                f"{INDENT}‣ X = [asp, days_sold] (both standardized)\n\n"
+                "• Terms:\n"
+                f"{INDENT}‣ ExpectileGAM with s(0, spline_order=3) + s(1, spline_order=2)\n\n"
+                "• Expectiles:\n"
+                f"{INDENT}‣ q ∈ { {0.025, 0.5, 0.975} } ⇒ conservative / median / optimistic revenue curves\n\n"
+                "• Sample weights (per point):\n"
+                f"{INDENT}‣ sqrt(daily_rev) × exp(-γ_time · days_sold/median_days) × tail_boost\n"
+                f"{INDENT}‣ tail_boost increases weight for price points farther from the median ASP (capped)\n\n"
+                "• Outputs stored:\n"
+                f"{INDENT}‣ revenue_pred_{'{q}'} for q∈{{0.025,0.5,0.975}}, plus revenue_pred_avg (mean across q)\n"
+                f"{INDENT}‣ revenue_actual = daily_rev (for comparison)"
+            ),
+        }
+    ]
+    return html.Div(
+        [
+            html.H3("What model did we use?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
             make_faq_table("faq-gam", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
 
-
+# 3) Tuning (matches GAMTuner grid)
 def faq_tuning_section():
     rows = [
         {
             "Summary": (
-                "We tune the ExpectileGAM with a compact grid search, testing smoothness and spline settings, "
-                "and pick the model with lowest error. If search fails, we fall back to a safe default."
+                "We grid-search smoothness (λ) and spline count (n_splines) with standardized features and "
+                "sample weights. If grid-search errors, we fall back to a safe default fit."
             ),
             "Business-friendly": (
-                "We try a few reasonable model settings and keep whichever explains the data best. "
-                "If anything goes wrong, the system defaults to a stable backup so predictions are always available."
+                "We try a small, sensible set of settings and keep what fits best. "
+                "If anything goes wrong, we still return stable predictions."
             ),
             "Technical nuances": (
-                "• Model terms:\n"
-                "    ‣ One spline term for price only: s(0).\n\n"
+                "• Standardization: X is scaled via StandardScaler.\n\n"
                 "• Hyperparameter grid:\n"
-                "    ‣ λ ∈ {0.01, 0.1, 1, 10, 100}\n"
-                "      → log-spaced smoothness penalties, covering very flexible to nearly linear fits.\n"
-                "    ‣ n_splines ∈ {5, 10, 20}\n"
-                "      → curve resolution, from coarse (5) to flexible (20). "
-                "Enough to capture realistic demand curves without overfitting noise — no need for 50+.\n"
-                "    ‣ spline_order ∈ {2, 3}\n"
-                "      → quadratic = gentle U/∩ shapes; cubic = allows S-shapes with inflection. "
-                "These two cover most real-world demand patterns; higher orders risk oscillation and overfitting.\n\n"
-                "• Selection:\n"
-                "    ‣ Use .gridsearch() to minimize GCV.\n"
-                "    ‣ Grid kept intentionally small for speed and interpretability.\n\n"
-                "• Fallback:\n"
-                "    ‣ On error, fit ExpectileGAM(s(0, n_splines=5)) as a stable default.\n\n"
-                "• Post-fit:\n"
-                "    ‣ Persist scalers (_scaler_X, _y_mean, _y_std) to inverse-transform predictions back to real units."
+                f"{INDENT}‣ λ ∈ logspace(10^-4, 10^3) with 8 points\n"
+                f"{INDENT}‣ n_splines ∈ {{5, 10, 20, 30}}\n\n"
+                "• Terms fixed: s(asp, order=3) + s(days_sold, order=2)\n\n"
+                "• Selection: ExpectileGAM.gridsearch(Xs, y, lam, n_splines, weights)\n\n"
+                "• Fallback: on exception, fit ExpectileGAM with the same terms (no search)"
             ),
         }
     ]
     return html.Div(
         [
-            html.H3(
-                "How was the model tuned?",
-                className="mt-3",
-                style={"color": ACCENT["color"], "marginBottom": "24px"},
-            ),
+            html.H3("How was the model tuned?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
             make_faq_table("faq-tuning", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
 
-
+# 4) Optimal price (matches Optimizer + PricingPipeline.best50/best_avg)
 def faq_optimal_asp_section():
     rows = [
         {
             "Summary": (
-                "The optimal ASP is chosen by simulating revenue across the demand curves "
-                "and selecting the price that maximizes expected revenue."
+                "We compute revenue across the learned curves and recommend the ASP that maximizes "
+                "the average predicted revenue (mean of 2.5/50/97.5 expectiles)."
             ),
             "Business-friendly": (
-                "For each product, we map the entire revenue curve (price * predicted demand). "
-                "The recommended price is where revenue peaks. \n\n"
-                "We also show conservative and optimistic alternatives so stakeholders can see the upside and downside."
+                "For each product, we trace the full revenue curve (price × predicted demand). "
+                "The recommended price is where expected revenue peaks. "
+                "We also surface conservative/median/optimistic peak points for sensitivity."
             ),
             "Technical nuances": (
-                "• Revenue curves:\n"
-                "    ‣ Predict revenues at each ASP from ExpectileGAMs at q=0.025, 0.5, 0.975.\n"
-                "• Aggregation:\n"
-                "    ‣ Take mean of the three → revenue_pred_avg.\n\n"
-                "• Optimizer:\n"
-                "    ‣ Recommended ASP = argmax(revenue_pred_avg).\n"
-                "    ‣ Guardrails: best_025 (conservative), best_50 (median), best_975 (optimistic).\n\n"
-                "• Dashboard:\n"
-                "    ‣ Show best_avg vs. current price to quantify upside.\n"
-                "    ‣ Conservative/optimistic points included for sensitivity context."
+                "• Curves: revenue_pred_q from ExpectileGAM at q ∈ {0.025, 0.5, 0.975}\n"
+                "• Aggregation: revenue_pred_avg = mean(revenue_pred_0.025, 0.5, 0.975)\n"
+                "• Optimizer: best_avg = argmax(revenue_pred_avg) per product\n"
+                "• Guardrails: best25 (q=0.025), best50 (q=0.5), best975 (q=0.975)\n"
+                "• Current vs best: we find the nearest modeled row at the current price to compare expected units/revenue"
             ),
         }
     ]
     return html.Div(
         [
-            html.H3(
-                "How is the optimal ASP recommended?",
-                className="mt-3",
-                style={"color": ACCENT["color"], "marginBottom": "24px"},
-            ),
+            html.H3("How is the optimal ASP recommended?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
             make_faq_table("faq-optimal-asp", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
 
-
-def faq_robustness_section():
+# 5) Elasticity (matches ElasticityAnalyzer)
+def faq_elasticity_section():
     rows = [
         {
             "Summary": (
-                "Robustness tells you how statistically trustworthy the recommended price is, "
-                "based on model agreement, price sensitivity, and evidence depth."
+                "Elasticity here is a quick, UI-only indicator of price sensitivity using "
+                "log-percentage changes between the highest/lowest ASP and units."
             ),
             "Business-friendly": (
-                "If all forecast scenarios point to about the same price - and we've seen that price region enough times - "
-                "the recommendation is more trustworthy. \n\n"
-                "If scenarios disagree, or if we have high price sensitivity, or insufficient data, trust is lower."
+                "It answers: 'When price moves across its observed range, how much do units move?' "
+                "Higher ratios imply stronger demand response to price."
             ),
             "Technical nuances": (
-                "• Spread alignment:\n"
-                "    ‣ Identify peak prices at P2.5, P50, P97.5 predicted revenues.\n"
-                "    ‣ Spread = max(peak) - min(peak).\n"
-                "    ‣ Normalize by ~10% of median price; tighter spreads → higher confidence.\n\n"
-                "• Data credibility:\n"
-                "    ‣ Count distinct ASPs tested, not just total rows.\n"
-                "    ‣ Apply saturating curve: first few prices add confidence quickly, then diminishing returns.\n"
-                "    ‣ Prevent duplicates from inflating score.\n\n"
-                "• Elasticity (price sensitivity):\n"
-                "    ‣ Lower elasticity → higher confidence.\n"
-                "    ‣ Normalized across observed range so extreme values are preserved.\n\n"
-                "• Final score blending:\n"
-                "    ‣ Combine 0.6 * elasticity + 0.4 * spread.\n"
-                "    ‣ Adjust by data credibility curve.\n"
-                "    ‣ Labels: Strong (≥ 0.70), Medium (≥ 0.45), Weak (< 0.45)."
+                "• For each product:\n"
+                f"{INDENT}‣ pct_change_price = 100·[ln(asp_max) − ln(asp_min)]\n"
+                f"{INDENT}‣ pct_change_qty   = 100·[ln(units_max) − ln(units_min)]\n"
+                f"{INDENT}‣ ratio = pct_change_qty / pct_change_price (nan-safe)\n"
+                "• We also provide a percentile rank (pct) of ratio across products for relative comparison.\n"
+                "• Note: this does not come from the GAM; it’s a simple spread-based proxy for the UI."
             ),
         }
     ]
     return html.Div(
         [
-            html.H3(
-                "How is the robustness calculated?",
-                className="mt-3",
-                style={"color": ACCENT["color"], "marginBottom": "24px"},
-            ),
-            make_faq_table("faq-robustness", rows),
+            html.H3("What does 'Elasticity' mean here?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            make_faq_table("faq-elasticity", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
 
+# 6) Annualized opportunity math (matches opps_summary + meta)
+def faq_annualization_section():
+    rows = [
+        {
+            "Summary": (
+                "Upside units/revenue are computed vs current price, then scaled to a yearly view "
+                "based on the actual number of days in your dataset."
+            ),
+            "Business-friendly": (
+                "We compare the model’s best price to your current price to estimate added units and revenue. "
+                "Then we annualize by accounting for the time window of your data so short samples don’t overstate impact."
+            ),
+            "Technical nuances": (
+                "• From best50 (q=0.5) we take best_price, units_pred_best, revenue_pred_best\n"
+                "• At current_price we find the nearest modeled row ⇒ units_pred_curr, revenue_pred_curr\n"
+                "• Deltas:\n"
+                f"{INDENT}‣ delta_units = units_pred_best − units_pred_curr\n"
+                f"{INDENT}‣ delta_revenue = revenue_pred_best − revenue_pred_curr\n"
+                "• Annualization factor:\n"
+                f"{INDENT}‣ days_covered = (data_end − data_start) + 1\n"
+                f"{INDENT}‣ annual_factor = 365 / max(1, days_covered)\n"
+                "• Annualized metrics:\n"
+                f"{INDENT}‣ delta_units_annual = delta_units × annual_factor\n"
+                f"{INDENT}‣ delta_revenue_annual = delta_revenue × annual_factor\n"
+                f"{INDENT}‣ revenue_best_annual = revenue_pred_best × annual_factor"
+            ),
+        }
+    ]
+    return html.Div(
+        [
+            html.H3("How do you compute the annualized opportunities?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            make_faq_table("faq-annualization", rows),
+        ],
+        style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
+    )
 
+# 7) Mean vs actual (kept, but clarified for daily_rev target)
 def faq_mean_vs_actual_section():
     rows = [
         {
             "Summary": (
-                "Seeing actual revenue higher than the model's expected revenue (mean estimate) is not a failure."
+                "Seeing actual revenue higher (or lower) than the model’s expected revenue at a price is normal. "
+                "We care about the band of plausible outcomes, not any single point."
             ),
             "Business-friendly": (
-                "The model gives you the average outcome we'd expect at a price. "
-                "Some real-world results can be higher or lower - that's normal. \n\n"
-                "What matters is whether most results fall inside the model's prediction band "
-                "and whether the chosen price makes sense overall."
+                "The 50% curve is the typical expectation. Real days will bounce above or below it. "
+                "As long as most points sit within the conservative–optimistic band, the model is behaving."
             ),
             "Technical nuances": (
-                "• Mean vs. realization:\n"
-                "    ‣ The P50 curve is the conditional mean.\n"
-                "    ‣ Individual data points may sit above or below it without issue.\n\n"
-                "• Smoothing:\n"
-                "    ‣ GAM models smooth noisy data, which can flatten sharp peaks.\n"
-                "    ‣ Some observed values will exceed the mean curve naturally.\n\n"
-                "• Evaluation:\n"
-                "    ‣ Focus on prediction intervals, not single-point deviations.\n"
-                "    ‣ Distribution of actuals vs. prediction band is what matters."
+                "• Expectile q=0.5 acts like a mean under symmetric squared loss; we also fit q=0.025 and q=0.975\n"
+                "• GAMs smooth noisy data, so sharp spikes can exceed the mean curve\n"
+                "• Evaluate coverage of actuals within the (2.5%–97.5%) band rather than single deviations"
             ),
         }
     ]
     return html.Div(
         [
-            html.H3(
-                "What if actual revenue is higher than the model's estimate?",
-                className="mt-3",
-                style={"color": ACCENT["color"], "marginBottom": "24px"},
-            ),
+            html.H3("What if actual revenue beats the model’s estimate?", className="mt-3",
+                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
             make_faq_table("faq-mean-vs-actual", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
-
 
 def faq_section():
     return html.Div(
@@ -285,16 +297,19 @@ def faq_section():
                         className="display-5",
                         style={"textAlign": "center", "padding": "58px 0 58px"},
                     ),
-
+                    faq_pipeline_section(),
+                    html.Div(style={"height": "32px"}),
                     faq_gam_section(),
                     html.Div(style={"height": "32px"}),
                     faq_tuning_section(),
                     html.Div(style={"height": "32px"}),
                     faq_optimal_asp_section(),
                     html.Div(style={"height": "32px"}),
-                    faq_mean_vs_actual_section(),
+                    faq_elasticity_section(),
                     html.Div(style={"height": "32px"}),
-                    faq_robustness_section(),
+                    faq_annualization_section(),
+                    html.Div(style={"height": "32px"}),
+                    faq_mean_vs_actual_section(),
                     html.Div(style={"height": "32px"}),
                 ],
                 fluid=True,

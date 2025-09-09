@@ -205,7 +205,7 @@ overview.register_callbacks(
     Viz,
 )
 
-# opps page (unchanged)
+# opps page
 opps.register_callbacks(
     app,
     {
@@ -215,6 +215,7 @@ opps.register_callbacks(
         "all_gam_results": all_gam_results,
     },
     curr_opt_df,
+    Viz,   
 )
 
 print("\n", "-" * 10, datetime.now().strftime("%H:%M:%S"), " Page Updated " + "-" * 10, "\n")

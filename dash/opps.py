@@ -1,3 +1,5 @@
+# + for the table add in "number of days an asp was valid"
+
 # opps.py
 
 from dash import html, dcc, Input, Output, dash_table
@@ -133,93 +135,18 @@ def layout(opp_table_df: pd.DataFrame):
     )
 
 
-def _empty(title):
-    fig = go.Figure()
-    fig.update_layout(title=title, xaxis=dict(visible=False), yaxis=dict(visible=False))
-    fig.add_annotation(text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
-    return fig
+# opps.py
 
+def register_callbacks(app, opp_inputs, opp_table_df: pd.DataFrame, viz_cls):
+    v = viz_cls()  # instantiate with default template ("lux")
 
-def _build_opp_chart(elast_df, best50_df, curr_df, all_gam):
-    """ rev chart """
-    for df in [elast_df, best50_df, curr_df, all_gam]:
-        if df is None or getattr(df, "empty", True):
-            return _empty("No data for opportunity chart")
-    if not all(("product_key" in df.columns) for df in [elast_df, best50_df, curr_df, all_gam]):
-        return _empty("Missing product_key")
-    if "revenue_pred_0.5" not in all_gam.columns or "revenue_pred_0.5" not in best50_df.columns:
-        return _empty("Missing prediction columns")
-
-    # ensure numeric
-    for frame, cols in [
-        (all_gam, ["asp", "revenue_pred_0.5"]),
-        (best50_df, ["revenue_pred_0.5"]),
-        (curr_df, ["current_price"]),
-        (elast_df, ["ratio"]),
-    ]:
-        for c in cols:
-            if c in frame.columns:
-                frame[c] = pd.to_numeric(frame[c], errors="coerce")
-
-    prods = set(best50_df["product_key"])
-    if not prods:
-        return _empty("No overlapping products across inputs")
-
-    rows = []
-    for pk in prods:
-        try:
-            cp = curr_df.loc[curr_df["product_key"] == pk, "current_price"]
-            if cp.empty or pd.isna(cp.iloc[0]): 
-                continue
-            curr_price = float(cp.iloc[0])
-
-            prod = all_gam[
-                (all_gam["product_key"] == pk) &
-                pd.notna(all_gam["asp"]) &
-                pd.notna(all_gam["revenue_pred_0.5"])
-            ]
-            if prod.empty:
-                continue
-
-            idx = (prod["asp"] - curr_price).abs().idxmin()
-            rev_curr = float(prod.loc[idx, "revenue_pred_0.5"])
-
-            rec = best50_df.loc[best50_df["product_key"] == pk]
-            if rec.empty or pd.isna(rec["revenue_pred_0.5"].iloc[0]):
-                continue
-            rev_best = float(rec["revenue_pred_0.5"].iloc[0])
-
-            label = curr_df.loc[curr_df["product_key"] == pk, "product"]
-            label = label.iloc[0] if len(label) else pk
-
-            e = elast_df.loc[elast_df["product_key"] == pk, "ratio"]
-            elast_val = float(e.iloc[0]) if len(e) and pd.notna(e.iloc[0]) else None
-
-            rows.append({"product": label, "upside": rev_best - rev_curr, "elasticity": elast_val})
-        except Exception:
-            continue
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return _empty("No computable upside")
-
-    df = df.sort_values("upside", ascending=True).head(12)
-    fig = px.bar(df, y="product", x="upside", hover_data=["elasticity"], height=420)
-    fig.update_xaxes(title_text="Expected Revenue Δ", tickprefix="$", separatethousands=True)
-    fig.update_yaxes(title_text="")
-    fig.update_traces(text=df["upside"].map(lambda x: f"${x:,.0f}"), textposition="outside", cliponaxis=False)
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=60), uniformtext_minsize=10, uniformtext_mode="hide")
-    return fig
-
-
-def register_callbacks(app, opp_inputs, opp_table_df: pd.DataFrame):
     @app.callback(Output("opp_table", "data"), Input("opp_table", "id"), prevent_initial_call=False)
     def _fill_table(_):
         return opp_table_df.to_dict("records")
 
     @app.callback(Output("opportunity_chart", "figure"), Input("opportunity_chart", "id"), prevent_initial_call=False)
     def _fill_chart(_):
-        return _build_opp_chart(
+        return v.opportunity_chart(
             opp_inputs["elasticity_df"],
             opp_inputs["best50_optimal_pricing_df"],
             opp_inputs["curr_price_df"],

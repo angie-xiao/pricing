@@ -34,7 +34,7 @@ class DataEngineer:
         df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
-        # ---- daily aggregation per product_key, then derive ASP ----
+        # ---- daily aggregation per asin, then derive ASP ----
         daily = (
             df.groupby(["asin", "product", "order_date"])[
                 ["shipped_units", "revenue_share_amt"]
@@ -447,6 +447,10 @@ class viz:
             ))
         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
                           margin=dict(r=8))
+        
+        fig.update_xaxes(title_text="Average Selling Price (ASP)", tickprefix="$", separatethousands=True)
+        fig.update_yaxes(title_text="Expected Daily Revenue",      tickprefix="$", separatethousands=True)
+
         return fig
 
     def elast_dist(self, elast_df: pd.DataFrame):
@@ -455,48 +459,111 @@ class viz:
                .update_yaxes(title_text="Product Count"))
         return fig
 
-    def opportunity_chart(elast_df, best50_df, curr_df, all_gam):
-        import plotly.express as px
-        for df in [elast_df, best50_df, curr_df, all_gam]:
+    def opportunity_chart(self, elast_df, best50_df, curr_df, all_gam):
+        """
+        Build the Top-N upside bar chart (Expected Revenue Δ at recommended vs current price).
+        Aligns by product, uses P50 revenue, and annotates with elasticity.
+        """
+        # basic guards
+        for df in (elast_df, best50_df, curr_df, all_gam):
             if df is None or getattr(df, "empty", True):
-                return {}
-        if ("revenue_pred_0.5" not in all_gam.columns) or ("revenue_pred_0.5" not in best50_df.columns):
-            return {}
+                return self.empty_fig("No data for opportunity chart")
+
+        # required columns
+        need_cols = [
+            (all_gam, ["product", "asp", "revenue_pred_0.5"]),
+            (best50_df, ["product", "asp", "revenue_pred_0.5"]),
+            (curr_df, ["product", "current_price"]),
+            (elast_df, ["product", "ratio"]),
+        ]
+        for frame, cols in need_cols:
+            for c in cols:
+                if c not in frame.columns:
+                    return self.empty_fig(f"Missing column: {c}")
+
+        # numeric coercions
+        to_num = [
+            (all_gam, ["asp", "revenue_pred_0.5"]),
+            (best50_df, ["asp", "revenue_pred_0.5"]),
+            (curr_df, ["current_price"]),
+            (elast_df, ["ratio"]),
+        ]
+        for frame, cols in to_num:
+            for c in cols:
+                frame[c] = pd.to_numeric(frame[c], errors="coerce") if c in frame.columns else frame.get(c)
+
         prods = sorted(set(all_gam["product"]) & set(best50_df["product"]) & set(curr_df["product"]))
         if not prods:
-            return {}
+            return self.empty_fig("No overlapping products across inputs")
+
         rows = []
         for p in prods:
             try:
-                curr_price = curr_df.loc[curr_df["product"] == p, "current_price"]
-                if curr_price.empty or pd.isna(curr_price.iloc[0]):
+                cp_ser = curr_df.loc[curr_df["product"] == p, "current_price"]
+                if cp_ser.empty or pd.isna(cp_ser.iloc[0]):
                     continue
-                curr_price = float(curr_price.iloc[0])
-                prod = all_gam[(all_gam["product"] == p) & pd.notna(all_gam["asp"]) & pd.notna(all_gam["revenue_pred_0.5"])]
-                if prod.empty:
+                curr_price = float(cp_ser.iloc[0])
+
+                prod_curve = all_gam[
+                    (all_gam["product"] == p)
+                    & pd.notna(all_gam["asp"])
+                    & pd.notna(all_gam["revenue_pred_0.5"])
+                ]
+                if prod_curve.empty:
                     continue
-                idx = (prod["asp"] - curr_price).abs().idxmin()
-                rev_curr = float(prod.loc[idx, "revenue_pred_0.5"])
+
+                # current revenue ~ nearest modeled ASP
+                idx = (prod_curve["asp"] - curr_price).abs().idxmin()
+                rev_curr = float(prod_curve.loc[idx, "revenue_pred_0.5"])
+
+                # recommended (from best50 rows)
                 rec = best50_df.loc[best50_df["product"] == p]
-                if rec.empty:
+                if rec.empty or pd.isna(rec["revenue_pred_0.5"].iloc[0]):
                     continue
                 rev_best = float(rec["revenue_pred_0.5"].iloc[0])
-                upside = rev_best - rev_curr
+
+                # elasticity (optional)
                 e = elast_df.loc[elast_df["product"] == p, "ratio"]
-                elast_val = float(e.iloc[0]) if len(e) else np.nan
-                rows.append({"product": p, "upside": upside, "elasticity": elast_val})
+                elast_val = float(e.iloc[0]) if len(e) and pd.notna(e.iloc[0]) else None
+
+                rows.append({"product": p, "upside": rev_best - rev_curr, "elasticity": elast_val})
             except Exception:
                 continue
+
         df = pd.DataFrame(rows)
         if df.empty:
-            return {}
-        df = df.sort_values("upside", ascending=False).head(12)
-        fig = px.bar(df, x="product", y="upside", hover_data=["elasticity"], height=380)
-        fig.update_yaxes(title_text="Upside (Expected Revenue Δ)", tickprefix="$", separatethousands=True)
-        fig.update_traces(text=df["upside"].map(lambda x: f"${x:,.0f}"), textposition="outside", cliponaxis=False)
-        fig.update_layout(margin=dict(l=10, r=10, t=40, b=60), uniformtext_minsize=10, uniformtext_mode="hide",
-                          yaxis={"categoryorder": "total descending"})
+            return self.empty_fig("No computable upside")
+
+        # Top N largest upside; horizontal bar for readability
+        df = df.sort_values("upside", ascending=True).tail(12)
+
+        # plotting
+        BEIGE='#EDD4B7'
+        # GOLD = "#DAA520"
+        fig = px.bar(
+            df,
+            y="product",
+            x="upside",
+            hover_data=["elasticity"],
+            height=420,
+            template=self.template,
+            color_discrete_sequence=[BEIGE],  # set bar color
+        )
+        fig.update_xaxes(title_text="Daily Expected Revenue Δ", tickprefix="$", separatethousands=True)
+        fig.update_yaxes(title_text="")
+
+        # keep bars gold even if the template tries to restyle traces
+        fig.update_traces(
+            marker_color=BEIGE,
+            text=df["upside"].map(lambda x: f"${x:,.0f}"),
+            textposition="outside",
+            cliponaxis=False,
+        )
+
+        fig.update_layout(margin=dict(l=10, r=10, t=40, b=60), uniformtext_minsize=10, uniformtext_mode="hide")
         return fig
+
+
 
     def empty_fig(self, title="No data"):
         fig = go.Figure()

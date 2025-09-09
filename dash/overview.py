@@ -54,11 +54,10 @@ def layout(products_lookup: pd.DataFrame):
             # KPI row (exact order requested)
             dbc.Row(
                 [
-                    _kpi_card("card_title_date_range", "Number of Days", "date_range_value", bg="#f3f0f0", id_subtext="date-range-subtext"),
-
-                    _kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#f3f0f0"),
+                    _kpi_card("card_title_date_range", "Number of Days", "date_range_value", bg="#eef2fa", id_subtext="date-range-subtext"),
+                    _kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#eef2fa"),
                     _kpi_card("card_title_snap", "Recommended Price", "card_asp_snap", bg="#F5E8D8"),
-                    _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#f3f0f0", id_subtext="elasticity-subtext"),
+                    _kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#eef2fa", id_subtext="elasticity-subtext"),
                     _kpi_card("card_title_units_opp_ann", "Annualized Units Sold Opportunity", "units_opp_ann_value", bg="#eef8f0"),
                     _kpi_card("card_title_rev_best_ann", "Annualized Revenue Opportunity", "rev_best_ann_value", bg="#eef8f0"),
                     _kpi_card("card_title_fit_snap", "Model Fit (Daily Revenue)", "fit_value_snap", bg="#eef2fa", id_subtext="fit-subtext"),
@@ -68,8 +67,8 @@ def layout(products_lookup: pd.DataFrame):
                 align="center",
                 style={"padding": "10px 0 10px"},
             ),
-
-            html.Hr(className="my-4"),
+            html.Br(),
+            html.Hr(className="my-4", style={"padding":"20px",}),
 
             # Predictive graph + scenario table + explainer
             dbc.Row(

@@ -1,4 +1,6 @@
-data/
+# data
+.csv
+.xlsx
 
 # Virtual environments
 .venv   

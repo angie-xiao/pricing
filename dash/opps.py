@@ -135,8 +135,6 @@ def layout(opp_table_df: pd.DataFrame):
     )
 
 
-# opps.py
-
 def register_callbacks(app, opp_inputs, opp_table_df: pd.DataFrame, viz_cls):
     v = viz_cls()  # instantiate with default template ("lux")
 

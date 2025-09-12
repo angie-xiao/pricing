@@ -574,12 +574,12 @@ class viz:
 
 
 
-if __name__ == "__main__":
-    pricing_df, product_df = pd.read_csv('data/730d.csv'), pd.read_csv('data/products.csv')
+# if __name__ == "__main__":
+#     pricing_df, product_df = pd.read_csv('data/730d.csv'), pd.read_csv('data/products.csv')
     
-    # DataEngineer(pricing_df, product_df, top_n=10).prepare()
+#     # DataEngineer(pricing_df, product_df, top_n=10).prepare()
     
-    # GAMModeler(
-    #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+#     # GAMModeler(
+#     #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
     
-    PricingPipeline(pricing_df, product_df, top_n=10)._build_curr_price_df()
+#     PricingPipeline(pricing_df, product_df, top_n=10)._build_curr_price_df()

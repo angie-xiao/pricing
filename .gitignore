@@ -6,13 +6,10 @@
 *.pricing-venv   
 
 # vscode
-*.vscode
-
-# plotly folder
-*.plotly
+.vscode/
 
 # code space
 *.code-workspace
 
 # cache
-cache/
+.cache/

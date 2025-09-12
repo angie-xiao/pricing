@@ -51,8 +51,8 @@ def hero_section():
                                 style={"textAlign": "center"},
                             ),
                             html.P(
-                                'optimal price finder for sustainable growth', 
-                                style={ "textAlign": "center", **MUTED}
+                                "optimal price finder for sustainable growth",
+                                style={"textAlign": "center", **MUTED},
                             ),
                         ]
                     )
@@ -117,8 +117,8 @@ def problem_objective_section():
                                     "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
                                     "margin-left": "100px",
                                     "margin-right": "150px",
-                                    'width':"50%",
-                                    "margin-bottom":"50px"
+                                    "width": "50%",
+                                    "margin-bottom": "50px",
                                 },
                             ),
                         ],
@@ -155,7 +155,7 @@ def abstract_section():
                                     "margin-left": "100px",
                                     "margin-right": "200px",
                                 },
-                            ),                            
+                            ),
                             html.Span(
                                 html.I(
                                     "As the user, your role is streamlined: review the interactive graphs and outputs, and focus your attention where it matters most: on making strategic decisions. "
@@ -183,7 +183,7 @@ def abstract_section():
                                 style={
                                     "margin-left": "80px",
                                     "padding": "14px 0",
-                                    "width":"70%"
+                                    "width": "70%",
                                 },
                             ),
                         ],
@@ -229,7 +229,6 @@ def methodology_section():
         [
             html.Div(id="method"),
             html.H3("(3) Methodology", style=ACCENT),
-
             # Responsive grid: 1 col on xs, 2 on md, 3 on xl (so 5 steps => 3 + 2 layout)
             dbc.Row(
                 [
@@ -257,7 +256,6 @@ def methodology_section():
                 className="row-cols-1 row-cols-md-2 row-cols-xl-3 g-4 align-items-stretch mt-2",
                 style={"maxWidth": "1550px", "margin": "0 auto"},
             ),
-
             # Why this works — centered, consistent width
             dbc.Row(
                 dbc.Col(
@@ -272,13 +270,7 @@ def methodology_section():
                     md=12,
                 ),
                 className="mt-3",
-
-                style={
-                    "margin-left": "80px",
-                    "padding": "14px 0",
-                    "width":"70%"
-                },
-
+                style={"margin-left": "80px", "padding": "14px 0", "width": "70%"},
             ),
         ],
         fluid=True,
@@ -314,7 +306,6 @@ def definitions_section():
     return dbc.Container(
         [
             html.H3("(4) Key Definitions", style=ACCENT),
-
             # Same layout rhythm as methodology (row width + gutters + equal heights)
             dbc.Row(
                 [

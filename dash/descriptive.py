@@ -6,7 +6,9 @@ import dash_bootstrap_components as dbc
 def layout(products):
     return dbc.Container(
         [
-            html.H2("Descriptive Analyses", className="mt-3", style={"textAlign": "center"}),
+            html.H2(
+                "Descriptive Analyses", className="mt-3", style={"textAlign": "center"}
+            ),
             # Row: Dropdown (col 1)
             dbc.Row(
                 [
@@ -26,7 +28,6 @@ def layout(products):
                         ],
                         width=3,
                     ),
-                    
                 ],
                 style={
                     "margin-left": "20px",
@@ -63,7 +64,7 @@ def layout(products):
             ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
-            # footnote            
+            # footnote
             html.Div(
                 [
                     html.Span("made with ♥️ | "),
@@ -92,15 +93,17 @@ def register_callbacks(
     viz_cls,
 ):
     viz = viz_cls()
-    
+
     @app.callback(
-        Output("snapshot_spark", "figure", ),
-        Input("product_dropdown_snap", "value")
+        Output(
+            "snapshot_spark",
+            "figure",
+        ),
+        Input("product_dropdown_snap", "value"),
     )
     def update_descriptive_snapshot(product):
         if not product:
             return {}
-        
+
         filt_pricing = price_quant_df[price_quant_df["product"] == product]
         return viz.price_quantity(filt_pricing) if len(filt_pricing) else {}
-

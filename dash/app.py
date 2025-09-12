@@ -16,8 +16,9 @@ from home import Homepage
 import overview, opps, faq
 
 # ---------- paths ----------
-BASE_DIR     = os.path.dirname(os.path.realpath(__file__))   # .../pricing/dash
-PROJECT_BASE = os.path.dirname(BASE_DIR)                     # .../pricing
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))  # .../pricing/dash
+PROJECT_BASE = os.path.dirname(BASE_DIR)  # .../pricing
+
 
 # ---------- cache helpers ----------
 def _files_sig(paths, top_n=10, version="v1"):
@@ -33,6 +34,7 @@ def _files_sig(paths, top_n=10, version="v1"):
     sig_str = "|".join(parts) + f":top{top_n}:ver:{version}"
     return hashlib.sha1(sig_str.encode()).hexdigest()
 
+
 def _code_sig():
     """Hash current modeling code to bust cache whenever built_in_logic.py changes."""
     try:
@@ -44,6 +46,7 @@ def _code_sig():
             return hashlib.sha1(p.read_bytes()).hexdigest()
         except Exception:
             return "nocode"
+
 
 def build_frames_with_cache(
     base_dir,
@@ -75,6 +78,7 @@ def build_frames_with_cache(
 
     return frames
 
+
 # ---------- key normalization ----------
 def make_products_lookup(*dfs):
     """
@@ -101,19 +105,21 @@ def make_products_lookup(*dfs):
 
 # ---------- Load data (cached) ----------
 frames = build_frames_with_cache(PROJECT_BASE)
-price_quant_df       = frames["price_quant_df"]
-best_avg_df          = frames["best_avg"]
-all_gam_results      = frames["all_gam_results"]
+price_quant_df = frames["price_quant_df"]
+best_avg_df = frames["best_avg"]
+all_gam_results = frames["all_gam_results"]
 best_optimal_pricing = frames["best_optimal_pricing_df"]
-elasticity_df        = frames["elasticity_df"]
-curr_opt_df          = frames["curr_opt_df"]
-curr_price_df        = frames["curr_price_df"]
-opps_summary         = frames["opps_summary"]
-meta                 = frames["meta"]  # {data_start, data_end, days_covered, annual_factor}
+elasticity_df = frames["elasticity_df"]
+curr_opt_df = frames["curr_opt_df"]
+curr_price_df = frames["curr_price_df"]
+opps_summary = frames["opps_summary"]
+meta = frames["meta"]  # {data_start, data_end, days_covered, annual_factor}
 
 # --- Build lookups ---
 # Full lookup for merges (keeps keys intact)
-lookup_all = make_products_lookup(best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results)
+lookup_all = make_products_lookup(
+    best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results
+)
 
 # Top-N only lookup for the Overview dropdown (best_optimal_pricing is Top-N by construction)
 dropdown_lookup = (
@@ -123,7 +129,7 @@ dropdown_lookup = (
     .astype({"asin": str})
     .reset_index(drop=True)
 )
- 
+
 
 # Build best50 from P50 curve (guarantee asin present)
 if "revenue_pred_0.5" in all_gam_results.columns:
@@ -131,14 +137,18 @@ if "revenue_pred_0.5" in all_gam_results.columns:
     best50_optimal_pricing = (
         all_gam_results.loc[idx, ["product", "asp", "revenue_pred_0.5", "pred_0.5"]]
         .reset_index(drop=True)
-        .merge(dropdown_lookup, on="product", how="left")
-        [["product", "asin", "asp", "revenue_pred_0.5", "pred_0.5"]]
+        .merge(dropdown_lookup, on="product", how="left")[
+            ["product", "asin", "asp", "revenue_pred_0.5", "pred_0.5"]
+        ]
     )
 else:
     best50_optimal_pricing = (
         best_optimal_pricing[["product", "asin", "asp"]]
-        .merge(all_gam_results[["product", "asp", "revenue_pred_0.5", "pred_0.5"]],
-               on=["product", "asp"], how="left")
+        .merge(
+            all_gam_results[["product", "asp", "revenue_pred_0.5", "pred_0.5"]],
+            on=["product", "asp"],
+            how="left",
+        )
         .drop_duplicates(subset=["product"])
         .reset_index(drop=True)
     )
@@ -172,10 +182,13 @@ app.layout = html.Div(
         dcc.Loading(
             id="router-loader",
             type="circle",
-            children=html.Div(id="page-content", style={"minHeight": "65vh", "padding": "12px"}),
+            children=html.Div(
+                id="page-content", style={"minHeight": "65vh", "padding": "12px"}
+            ),
         ),
     ]
 )
+
 
 # ---------- Router ----------
 @app.callback(Output("page-content", "children"), Input("url", "pathname"))
@@ -190,6 +203,7 @@ def route(path):
         return opps.layout(curr_opt_df)
     return html.Div("404 - Not found", className="p-4")
 
+
 # ---------- Register callbacks ----------
 # Signature: (app, price_quant_df, best50_optimal_pricing_df, curr_price_df, elasticity_df,
 #             all_gam_results, products_lookup, meta, viz_cls)
@@ -200,7 +214,7 @@ overview.register_callbacks(
     curr_price_df,
     elasticity_df,
     all_gam_results,
-    dropdown_lookup,   # Top-N mapping used by dropdown + titles
+    dropdown_lookup,  # Top-N mapping used by dropdown + titles
     meta,
     Viz,
 )
@@ -215,17 +229,25 @@ opps.register_callbacks(
         "all_gam_results": all_gam_results,
     },
     curr_opt_df,
-    Viz,   
+    Viz,
 )
 
-print("\n", "-" * 10, datetime.now().strftime("%H:%M:%S"), " Page Updated " + "-" * 10, "\n")
+print(
+    "\n",
+    "-" * 10,
+    datetime.now().strftime("%H:%M:%S"),
+    " Page Updated " + "-" * 10,
+    "\n",
+)
 
 if __name__ == "__main__":
     app.run(debug=True)
 
 
+""" ---------- Instructions to run app.py ----------
+# always pull from Github first 
+git pull origin main
 
-''' ---------- Instructions to run app.py ----------
 # in terminal:
 cd dash
 
@@ -238,4 +260,4 @@ source ../.pricing-venv/bin/activate     # mac
 # run script
 py app.py                               # windows
 python3 app.py                          # mac
-'''
+"""

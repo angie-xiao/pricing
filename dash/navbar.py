@@ -16,7 +16,7 @@ def get_navbar():
                     className="nav-link",
                     id="nav-overview",
                 )
-            ),             
+            ),
             # dbc.NavItem(
             #     dcc.Link(
             #         "Descriptive",
@@ -24,7 +24,7 @@ def get_navbar():
             #         className="nav-link",
             #         id="nav-descriptive",
             #     )
-            # ), 
+            # ),
             dbc.NavItem(
                 dcc.Link(
                     "Opportunities",
@@ -52,6 +52,6 @@ def get_navbar():
         ),
         color="light",
         # light=True,   # mac
-        dark=False,     # windows
+        dark=False,  # windows
         className="shadow-sm",
     )

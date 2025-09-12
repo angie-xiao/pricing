@@ -4,7 +4,8 @@ import dash_bootstrap_components as dbc
 
 ACCENT = {"color": "#DAA520"}
 LEFT_INDENT_PX = "50px"  # same left margin for title + table
-INDENT = "\u00A0\u00A0\u00A0\u00A0"  # 4 non-breaking spaces
+INDENT = "\u00a0\u00a0\u00a0\u00a0"  # 4 non-breaking spaces
+
 
 def make_faq_table(table_id, rows):
     return dash_table.DataTable(
@@ -30,7 +31,7 @@ def make_faq_table(table_id, rows):
             "textAlign": "left",
             "lineHeight": "1.35",
             "fontFamily": "Source Sans Pro, -apple-system, BlinkMacSystemFont, "
-                          "Segoe UI, Roboto, Helvetica Neue, Arial, Noto Sans, sans-serif",
+            "Segoe UI, Roboto, Helvetica Neue, Arial, Noto Sans, sans-serif",
         },
         style_header={
             "fontWeight": 600,
@@ -47,6 +48,7 @@ def make_faq_table(table_id, rows):
             {"if": {"column_id": "Technical nuances"}, "width": "40%"},
         ],
     )
+
 
 # 1) End-to-end pipeline (matches DataEngineer + PricingPipeline)
 def faq_pipeline_section():
@@ -81,12 +83,16 @@ def faq_pipeline_section():
     ]
     return html.Div(
         [
-            html.H3("What does the pipeline do end-to-end?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "What does the pipeline do end-to-end?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-pipeline", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 2) Model choice (matches GAMModeler/GAMTuner)
 def faq_gam_section():
@@ -121,12 +127,16 @@ def faq_gam_section():
     ]
     return html.Div(
         [
-            html.H3("What model did we use?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "What model did we use?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-gam", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 3) Tuning (matches GAMTuner grid)
 def faq_tuning_section():
@@ -153,12 +163,16 @@ def faq_tuning_section():
     ]
     return html.Div(
         [
-            html.H3("How was the model tuned?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "How was the model tuned?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-tuning", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 4) Optimal price (matches Optimizer + PricingPipeline.best50/best_avg)
 def faq_optimal_asp_section():
@@ -184,12 +198,16 @@ def faq_optimal_asp_section():
     ]
     return html.Div(
         [
-            html.H3("How is the optimal ASP recommended?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "How is the optimal ASP recommended?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-optimal-asp", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 5) Elasticity (matches ElasticityAnalyzer)
 def faq_elasticity_section():
@@ -215,12 +233,16 @@ def faq_elasticity_section():
     ]
     return html.Div(
         [
-            html.H3("What does 'Elasticity' mean here?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "What does 'Elasticity' mean here?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-elasticity", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 6) Annualized opportunity math (matches opps_summary + meta)
 def faq_annualization_section():
@@ -252,12 +274,16 @@ def faq_annualization_section():
     ]
     return html.Div(
         [
-            html.H3("How do you compute the annualized opportunities?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "How do you compute the annualized opportunities?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-annualization", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 # 7) Mean vs actual (kept, but clarified for daily_rev target)
 def faq_mean_vs_actual_section():
@@ -280,12 +306,16 @@ def faq_mean_vs_actual_section():
     ]
     return html.Div(
         [
-            html.H3("What if actual revenue beats the model’s estimate?", className="mt-3",
-                    style={"color": ACCENT["color"], "marginBottom": "24px"}),
+            html.H3(
+                "What if actual revenue beats the model’s estimate?",
+                className="mt-3",
+                style={"color": ACCENT["color"], "marginBottom": "24px"},
+            ),
             make_faq_table("faq-mean-vs-actual", rows),
         ],
         style={"marginLeft": LEFT_INDENT_PX, "marginRight": LEFT_INDENT_PX},
     )
+
 
 def faq_section():
     return html.Div(

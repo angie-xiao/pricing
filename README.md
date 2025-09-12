@@ -6,19 +6,19 @@
 
 ## Content Table
 
-- [Dashboard Pricing Dashboard](#dashboard-pricing-dashboard)
-  - [Content Table](#content-table)
-  - [What’s in this repo](#whats-in-this-repo)
-  - [Step 1: Install Python](#step-1-install-python)
-  - [Step 2: Clone from GitHub](#step-2-clone-from-github)
-  - [Step 3: Set up virtual environment \& install necessary libraries](#step-3-set-up-virtual-environment--install-necessary-libraries)
-  - [Step 4: Grab your data](#step-4-grab-your-data)
-    - [Pricing dataset (required):](#pricing-dataset-required)
-    - [Product categorization (required):](#product-categorization-required)
-    - [Internal (Amazon) workflow:](#internal-amazon-workflow)
-  - [Step 5: Put data in the right folder](#step-5-put-data-in-the-right-folder)
-  - [Step 6: Run locally](#step-6-run-locally)
-- [Repo structure (reference)](#repo-structure-reference)
+  - [0. What’s in this repo](#whats-in-this-repo)
+  - [1. Installation Guide](#installation-guide)
+    - [Step 1: Install Python](##step-1-install-python)
+    - [Step 2: Clone from GitHub](##step-2-clone-from-github)
+    - [Step 3: Set up virtual environment \& install necessary libraries](##step-3-set-up-virtual-environment--install-necessary-libraries)
+    - [Step 4: Grab your data](##step-4-grab-your-data)
+      - [Pricing dataset (required):](###pricing-dataset-required)
+      - [Product categorization (required):](#product-categorization-required)
+      - [Internal (Amazon) workflow:](#internal-amazon-workflow)
+    - [Step 5: Put data in the right folder](#step-5-put-data-in-the-right-folder)
+        - [Repo structure (reference)](#repo-structure-reference)
+
+    - [Step 6: Run locally](#step-6-run-locally)
 
 ---
 
@@ -44,21 +44,21 @@ Key libraries used:
 
 ---
 
+# Installation Guide
+
+
 ## Step 1: Install Python
 
 Install **Python 3.11** (recommended):
-
-- **macOS**: `brew install python@3.11` or download from [python.org](https://www.python.org)
 - **Windows**: install from [python.org](https://www.python.org) or Microsoft Store
-- **Linux**: use your package manager or [python.org](https://www.python.org)
+- **macOS**: `brew install python@3.11` or download from [python.org](https://www.python.org)
 
 ---
 
-## Step 2: Clone from GitHub
+## Step 2: Clone from GitHub from terminal
 
 ```bash
 git clone https://github.com/angie-xiao/pricing.git
-cd pricing
 ```
 ---
 
@@ -103,16 +103,24 @@ python -m pip install \
 
 ## Step 4: Grab your data
 
-### Pricing dataset (required):
+### 4.1 Requirements
+#### 4.1.1 Pricing dataset (required):
 * Must include the following fields:
-  * order_date, asin, item_name, shipped_units, revenue_share_amt, asp, event_name (e.g. PBDD/ PD/ BAU etc.)
+  - order_date
+  - asin
+  - item_name
+  - shipped_units
+  - revenue_share_amt
+  - asp
+  - event_name (e.g. PBDD/ PD/ BAU etc.)
 
-### Product categorization (required):
-
+#### 4.1.2 Product categorization (required):
 * Must include:
-  * asin, tag (e.g. Unscented), variation (e.g. 16lb)
+  - asin
+  - tag (product name; e.g. Unscented)
+  - variation (e.g. 16lb)
 
-### Internal (Amazon) workflow:
+### 4.2 Internal (Amazon) workflow:
 * Run the `pricing.sql` script provided
 * Use Turismo or manual download to extract product tags / variation info
 * Categorize if needed
@@ -121,7 +129,7 @@ python -m pip install \
 
 ## Step 5: Put data in the right folder
 
-Make sure your input files are placed under the data/ folder at the project root.
+Make sure your input files are placed under the `data/` folder at the project root.
 
 ```
 pricing/
@@ -132,6 +140,30 @@ pricing/
 ```
 
 If your file names differ, update the file paths in `dash/built_in_logic.py`, `overview.py`, or `opps.py`.
+
+
+### Repo structure (reference)
+``` bash
+pricing/
+├── .cache/                     # optional cache/output
+├── .pricing-venv/              # local virtual environment
+├── .vscode/                    # editor settings
+├── dash/                       # Dash app code
+│   ├── app.py
+│   ├── built_in_logic.py
+│   ├── overview.py
+│   ├── opps.py
+│   ├── faq.py
+│   ├── navbar.py
+│   └── home.py
+├── data/                       # <<< put pricing & product categorization files here
+│   ├── pricing.csv
+│   └── product_categorization.csv
+├── pricing.sql                 # SQL script for Amazon internal use
+├── .gitignore
+├── pricing.code-workspace
+└── README.md
+```
 
 ---
 
@@ -156,27 +188,5 @@ python app.py
 # open http://127.0.0.1:8050 in your browser
 # stop with CTRL+C
 ```
-That's it! You can now access the visual results of this Dash app at http://127.0.0.1:8050 on your browser. 🎉
 
-# Repo structure (reference)
-``` bash
-pricing/
-├── .cache/                     # optional cache/output
-├── .pricing-venv/              # local virtual environment
-├── .vscode/                    # editor settings
-├── dash/                       # Dash app code
-│   ├── app.py
-│   ├── built_in_logic.py
-│   ├── overview.py
-│   ├── opps.py
-│   ├── faq.py
-│   ├── navbar.py
-│   └── home.py
-├── data/                       # <<< put pricing & product categorization files here
-│   ├── pricing.csv
-│   └── product_categorization.csv
-├── pricing.sql                 # sample SQL for Amazon internal use
-├── .gitignore
-├── pricing.code-workspace
-└── README.md
-```
+That's it! You can now access the visual results of this Dash app at http://127.0.0.1:8050 on your browser. 🎉

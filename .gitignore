@@ -1,19 +1,18 @@
 # data
-.csv
-.xlsx
+*.csv
+*.xlsx
 
 # Virtual environments
-.venv   
+*.pricing-venv   
+
+# vscode
+*.vscode
 
 # plotly folder
-.plotly
+*.plotly
 
 # code space
-.code-workspace
+*.code-workspace
 
-# csv file
-.csv
-
-# html files
-.html
-
+# cache
+cache/

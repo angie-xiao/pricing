@@ -145,7 +145,6 @@ If your file names differ, update the file paths in `dash/built_in_logic.py`, `o
 ### Repo structure (reference)
 ``` bash
 pricing/
-├── .cache/                     # optional cache/output
 ├── .pricing-venv/              # local virtual environment
 ├── .vscode/                    # editor settings
 ├── dash/                       # Dash app code
@@ -161,7 +160,6 @@ pricing/
 │   └── product_categorization.csv
 ├── pricing.sql                 # SQL script for Amazon internal use
 ├── .gitignore
-├── pricing.code-workspace
 └── README.md
 ```
 

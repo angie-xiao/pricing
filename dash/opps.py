@@ -17,22 +17,42 @@ GAP_H3_TO_GRAPH = "8px"  # space between chart title and chart
 
 
 def _build_cols(df: pd.DataFrame):
+    """ Build columns for dash DataTable with formatting."""
+    
+    df = df[[
+        'asin', 'product', 'asp', 'days_sold', 
+        'shipped_units', 'daily_units', 'revenue_actual', 'daily_rev',
+         'revenue_pred_0.025', 'revenue_pred_0.5', 'revenue_pred_0.975', 
+         'pred_0.025', 'pred_0.5', 'pred_0.975' 
+    ]]
+    
+    integer_columns = ['days_sold', 'shipped_units', 'daily_units', 'days_asp_valid']
+    money_columns = ['asp', 'revenue_actual', 'daily_rev', 'revenue_pred_0.025', 
+                    'revenue_pred_0.5', 'revenue_pred_0.975', 'pred_0.025', 
+                    'pred_0.5', 'pred_0.975']
+    
     cols = []
     if isinstance(df, pd.DataFrame) and not df.empty:
         for c in df.columns:
-            if pd.api.types.is_numeric_dtype(df[c]):
-                cols.append(
-                    {
-                        "name": c.replace("_", " ").title(),
-                        "id": c,
-                        "type": "numeric",
-                        "format": FormatTemplate.money(2),
-                    }
-                )
+            if c in integer_columns:
+                cols.append({
+                    "name": c.replace("_", " ").title(),
+                    "id": c,
+                    "type": "numeric",
+                    "format": {"specifier": ",d"}  # Format as integer with thousands separator
+                })
+            elif c in money_columns:
+                cols.append({
+                    "name": c.replace("_", " ").title(),
+                    "id": c,
+                    "type": "numeric",
+                    "format": FormatTemplate.money(2)
+                })
             else:
                 cols.append({"name": c.replace("_", " ").title(), "id": c})
     return cols
 
+    
 
 def layout(opp_table_df: pd.DataFrame):
     cols = _build_cols(opp_table_df)

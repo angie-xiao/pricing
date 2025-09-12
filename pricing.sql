@@ -1,6 +1,78 @@
 
+/*************************
+filtering for order:
+- in the last 2 years
+- retail
+- NA; CA
+- not returned/fradulent
+*************************/
+DROP TABLE IF EXISTS daily_aggregate_orders;
+CREATE TEMP TABLE daily_aggregate_orders AS  (
+    select
+        cast(d.order_datetime as date) as order_date,
+        d.asin,
+        maa.item_name,
+        d.our_price,
+        v.company_code,
+        sum(d.shipped_units) as shipped_units
+from andes.booker.D_UNIFIED_CUST_SHIPMENT_ITEMS d
+        INNER JOIN andes.booker.d_mp_asin_attributes maa
+            ON maa.asin = d.asin
+            AND maa.marketplace_id = d.marketplace_id
+            AND maa.region_id = d.region_id
+            AND maa.gl_product_group = d.gl_product_group
+    LEFT JOIN andes.BOOKER.D_MP_ASIN_MANUFACTURER mam
+            ON mam.asin = d.asin
+            AND mam.marketplace_id = 7
+            AND mam.region_id = 1
+        LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
+            ON v.vendor_code = mam.dama_mfg_vendor_code
+where v.company_code = 'BO92F'
+    and maa.gl_product_group=199
+    and d.region_id=1
+    and d.marketplace_id=7
+    and d.is_retail_merchant='Y'
+    and d.order_condition != 6
+    and cast(d.order_datetime as date) = cast('2025-08-17' as date)
+    and d.asin='B0CRMZTZ3H'
+group by 
+    cast(d.order_datetime as date),
+    d.asin,
+    maa.item_name,
+    d.our_price,
+    v.company_code
+);
 
------------------------------------------------------- DEALS ------------------------------------------------------
+
+/*************************
+Calculate daily revenue
+*************************/
+DROP TABLE IF EXISTS daily_order_rev;
+CREATE TEMP TABLE daily_order_rev AS  (
+    select
+        order_date,
+        asin,
+        item_name,
+        company_code,
+        shipped_units,
+        our_price,
+        COALESCE(our_price * shipped_units,0) as revenue
+    from daily_aggregate_orders
+);
+
+
+/*************************
+
+*************************/
+
+
+
+
+
+
+
+
+------------------------------------------------------ EVENTS ------------------------------------------------------
 
 DROP TABLE IF EXISTS raw_events;
 CREATE TEMP TABLE raw_events AS  (
@@ -319,7 +391,7 @@ CREATE TEMP TABLE deal_period_orders AS (
         d.asin,
         b.item_name,
         d.event_name,
-        d.event_duration_days,
+        -- d.event_duration_days,
         b.company_code,
         SUM(b.shipped_units) as shipped_units,
         SUM(b.revenue_share_amt) as revenue_share_amt,
@@ -341,7 +413,7 @@ CREATE TEMP TABLE deal_period_orders AS (
         d.asin,
         b.item_name,
         d.event_name,
-        d.event_duration_days,
+        -- d.event_duration_days,
         b.company_code
 );
 
@@ -354,8 +426,8 @@ CREATE TEMP TABLE non_deal_period_orders AS (
             b.order_date,
             b.asin,
             b.item_name,
-            CAST('NO DEAL' as VARCHAR) as event_name,
-            CAST(0 AS INT) as event_duration_days,
+            CAST('BAU' as VARCHAR) as event_name,
+            -- CAST(0 AS INT) as event_duration_days,
             b.company_code,
             b.shipped_units as shipped_units,
             b.revenue_share_amt as revenue_share_amt
@@ -371,7 +443,7 @@ CREATE TEMP TABLE non_deal_period_orders AS (
         asin,
         item_name,
         event_name,
-        event_duration_days,
+        -- event_duration_days,
         company_code,
         SUM(shipped_units) AS shipped_units,
         SUM(revenue_share_amt) AS revenue_share_amt,
@@ -389,7 +461,7 @@ CREATE TEMP TABLE non_deal_period_orders AS (
         asin,
         item_name,
         event_name,
-        event_duration_days,
+        -- event_duration_days,
         company_code
 );
 

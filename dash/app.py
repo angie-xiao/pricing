@@ -51,7 +51,7 @@ def _code_sig():
 def build_frames_with_cache(
     base_dir,
     data_folder="data",
-    pricing_file="730d.csv",
+    pricing_file="pricing.csv",
     product_file="products.csv",
     top_n=10,
 ):

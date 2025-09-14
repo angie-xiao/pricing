@@ -1,27 +1,4 @@
 /* Step 1: Get base promotion information */
-/*************************
-Deal Categorization
-- Standardized Deal Periods
-    - For each major shopping event (like Prime Day, Black Friday, etc.), the system identifies the most commonly used start and end dates
-    - These standard dates are used when at least 3 deals follow the same pattern
-    - This helps create consistency in reporting and analysis
-
-- Flexible Event Recognition
-    - Some events can float across different dates. 
-    - e.g, Prime Day deals might start in late June or July
-    - The system recognizes these as part of the same event
-
-- "Event Name" field is tagged based on "promotion internal title"
-    - If title does not include event name or corresponding acronym (e.g. PD for Prime Day), promotion is labeled as "Other"
-    - Event type: HVE and tier 1 to 3 events found in this wiki page
-    - Excluding deals whose title containing "OIH" 
-
-- Methodology on how events in overlapping periods are handled
-    - Especially when internal title does not conclusively contain event key words
-    - In a nuthsell, the higher tier an event is, the more we prioritize to tag a promotion as that event
-    - e.g. PD will be prioritized before Flash Sales
-*************************/
-
 DROP TABLE IF EXISTS base_promos;
 CREATE TEMP TABLE base_promos AS (
     SELECT DISTINCT
@@ -137,10 +114,6 @@ CREATE TEMP TABLE promotion_details AS (
 );
 
 /* Step 4: Calculate T4W ASP */
-/*************************
-Use T4W ASP as pre-deal baseline to calculate discount amount, 
-whenever applicable
-*************************/
 DROP TABLE IF EXISTS t4w;
 CREATE TEMP TABLE t4w AS (
     SELECT
@@ -167,13 +140,6 @@ CREATE TEMP TABLE t4w AS (
 
 
 /* Step 5: Get shipments */
-/*************************
-Base Orders Query
-- Includes only retail merchant orders with shipped units > 0 
-- Excludes cancelled or fraudulent orders
-- Filters for last 730 days 
-*************************/
-
 -- First, create filtered shipment table
 DROP TABLE IF EXISTS filtered_shipments;
 CREATE TEMP TABLE filtered_shipments AS (

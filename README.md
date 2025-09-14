@@ -19,13 +19,21 @@
      - [3.1.2 Product Categorization](#312-product-categorization)
    - [3.2 Internal Amazon Workflow](#32-internal-amazon-workflow)
      - [3.2.1 Repo Structure Review](#321-repo-structure-review)
-     - [3.2.2 Acquire Data ](#322-workflow)
+     - [3.2.2 Acquire Data](#322-acquire-data)
 
 4. [Setup & Run Locally](#4-setup--run-locally)
 
-5. [`pricing.sql` Documentation (Amazon Internal)](#5-sql-documentation-amazon-internal)
+5. [`pricing.sql` Documentation (Amazon Internal)](#5-pricingsql-documentation-amazon-internal)
    - [5.1 Script Function Summary](#51-script-function-summary)
    - [5.2 SQL Script Documentation](#52-sql-script-documentation)
+     - [5.2.1 Base Promotion Information](#521-base-promotion-information)
+     - [5.2.2 Deal Categorization Logic](#522-deal-categorization-logic)
+       - Standardized Deal Periods
+       - Flexible Event Recognition
+       - Event Name Tagging
+       - Overlap Resolution
+     - [5.2.3 Pre-Deal Baseline Price Calculation](#523-pre-deal-baseline-price-calculation)
+     - [5.2.4 Final Output](#524-final-output)
 
 
 ## 1. What’s In This Repo
@@ -189,31 +197,51 @@ The script enables analysis of:
 ### 5.2 SQL Script Documentation
 The `pricing.sql` script analyzes promotional deal performance through the following steps:
 
-1. **Base Promotion Information** (`base_promos`)
-   - Filters US marketplace promotions (region_id = 1, marketplace_key = 7)
-   - Captures promotions active in July 2025
+#### 5.2.1. **Base Promotion Information** (`base_promos`)
+   - Captures promotions based on user definition, e.g.
+    - region_id = 1
+    - marketplace = 7
+    - gl = 199
+    - time window = last 2 years
    - Includes only Approved/Scheduled deals
    - Types: Best Deal, Deal of the Day, Lightning Deal, Event Deal
    - Excludes OIH promotions
 
-2. **Event Categorization** (`raw_events`)
-   - Classifies promotions into event tiers:
-     * Tier 1: Prime Day, BSS, PBDD, T5/11/12
-     * Tier 1.5: Back to School, Back to University
-     * Tier 2-3: Black Friday, Cyber Monday, Boxing Week
-     * Other: Uncategorized promotions
+#### 5.2.2 Deal Categorization Logic
+The script implements a sophisticated deal categorization system:
 
-3. **Promotion Prioritization** (`promotion_details`)
-   - Handles multiple promotions per ASIN
-   - Priority order:
-     1. Prime Day, BSS, PBDD, T5/11/12
-     2. Black Friday
-     3. Cyber Monday
-     4. Boxing Week
-     5. NYNY
-     99. Other events
+1. Standardized Deal Periods
+  - Identifies common start/end dates for major events (Prime Day, Black Friday, etc.)
+  - Requires minimum 3 deals with matching patterns to establish standard dates
+  - Ensures consistent reporting and analysis
 
-4. **Baseline Price Calculation** (`t4w`)
+2. Flexible Event Recognition
+  - Accommodates floating date events (e.g., Prime Day in late June or July)
+  - Pattern matching in promotion titles:
+    - Direct event names (e.g., "Prime Day")
+    - Known acronyms (e.g., "PD" for Prime Day)
+    - Date-based validation for seasonal events
+
+3. Event Name Tagging
+  - Based on `promotion_internal_title` field
+  - Hierarchy of event types:
+  - HVE (High Velocity Events)
+    - Tier 1: Prime Day, BSS, PBDD, T5/11/12
+    - Tier 1.5: Back to School, Back to University
+    - Other
+  - Defaults to "OTHER" if no matching pattern
+  - Excludes promotions with "OIH" in title
+
+4. Overlap Resolution
+  - Prioritizes higher tier events when dates overlap
+  - Example priority order:
+    - Prime Day (Tier 1)
+    - Black Friday (Tier 2)
+    - Cyber Monday (Tier 3)
+    - Regular promotions
+
+
+#### 5.2.3. Pre-Deal Baseline Price Calculation (T4W ASP)
    - Calculates 4-week average selling price before promotion
    - Window: 28 days before to 1 day before promotion
    - Filters:
@@ -221,13 +249,8 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
      * New condition items
      * Shipped units only
 
-5. **Performance Measurement** (`all_shipments`)
-   - Captures July 2025 performance metrics
-   - Aggregates:
-     * Total shipped units
-     * Total revenue
 
-6. **Final Output** (`final_output`)
+#### 5.2.4. Final Output
    - Combines all previous steps
    - Key metrics:
      * Product identification (ASIN, item name)

@@ -151,7 +151,7 @@ CREATE TEMP TABLE all_shipments AS (
                 ELSE 0 
             END) as revenue
     FROM andes.booker.d_unified_cust_shipment_items o
-    LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
+        LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
         ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
         AND o.asin = cp.asin
     WHERE o.region_id = 1

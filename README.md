@@ -28,10 +28,6 @@
    - [5.2 SQL Script Documentation](#52-sql-script-documentation)
      - [5.2.1 Base Promotion Information](#521-base-promotion-information)
      - [5.2.2 Deal Categorization Logic](#522-deal-categorization-logic)
-       - Standardized Deal Periods
-       - Flexible Event Recognition
-       - Event Name Tagging
-       - Overlap Resolution
      - [5.2.3 Pre-Deal Baseline Price Calculation](#523-pre-deal-baseline-price-calculation)
      - [5.2.4 Final Output](#524-final-output)
 
@@ -187,14 +183,16 @@ That's it! You can now access the visual results of this Dash app at http://127.
 ## 5. `pricing.sql` documentation (Amazon Internal)
 
 ### 5.1 Script functoin summary
-The script enables analysis of:
-- Deal performance by event type
-- Discount depth impact
-- Sales lift during promotions
-- Revenue impact
-- Promotional strategy effectiveness
+
+  The script enables analysis of:
+  - Deal performance by event type
+  - Discount depth impact
+  - Sales lift during promotions
+  - Revenue impact
+  - Promotional strategy effectiveness
 
 ### 5.2 SQL Script Documentation
+
 The `pricing.sql` script analyzes promotional deal performance through the following steps:
 
 #### 5.2.1. **Base Promotion Information** (`base_promos`)
@@ -208,40 +206,42 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
    - Excludes OIH promotions
 
 #### 5.2.2 Deal Categorization Logic
-The script implements a sophisticated deal categorization system:
 
-1. Standardized Deal Periods
-  - Identifies common start/end dates for major events (Prime Day, Black Friday, etc.)
-  - Requires minimum 3 deals with matching patterns to establish standard dates
-  - Ensures consistent reporting and analysis
+  The script implements a sophisticated deal categorization system:
 
-2. Flexible Event Recognition
-  - Accommodates floating date events (e.g., Prime Day in late June or July)
-  - Pattern matching in promotion titles:
-    - Direct event names (e.g., "Prime Day")
-    - Known acronyms (e.g., "PD" for Prime Day)
-    - Date-based validation for seasonal events
+  1. Standardized Deal Periods
+    - Identifies common start/end dates for major events (Prime Day, Black Friday, etc.)
+    - Requires minimum 3 deals with matching patterns to establish standard dates
+    - Ensures consistent reporting and analysis
 
-3. Event Name Tagging
-  - Based on `promotion_internal_title` field
-  - Hierarchy of event types:
-  - HVE (High Velocity Events)
-    - Tier 1: Prime Day, BSS, PBDD, T5/11/12
-    - Tier 1.5: Back to School, Back to University
-    - Other
-  - Defaults to "OTHER" if no matching pattern
-  - Excludes promotions with "OIH" in title
+  2. Flexible Event Recognition
+    - Accommodates floating date events (e.g., Prime Day in late June or July)
+    - Pattern matching in promotion titles:
+      - Direct event names (e.g., "Prime Day")
+      - Known acronyms (e.g., "PD" for Prime Day)
+      - Date-based validation for seasonal events
 
-4. Overlap Resolution
-  - Prioritizes higher tier events when dates overlap
-  - Example priority order:
-    - Prime Day (Tier 1)
-    - Black Friday (Tier 2)
-    - Cyber Monday (Tier 3)
-    - Regular promotions
+  3. Event Name Tagging
+    - Based on `promotion_internal_title` field
+    - Hierarchy of event types:
+    - HVE (High Velocity Events)
+      - Tier 1: Prime Day, BSS, PBDD, T5/11/12
+      - Tier 1.5: Back to School, Back to University
+      - Other
+    - Defaults to "OTHER" if no matching pattern
+    - Excludes promotions with "OIH" in title
+
+  4. Overlap Resolution
+    - Prioritizes higher tier events when dates overlap
+    - Example priority order:
+      - Prime Day (Tier 1)
+      - Black Friday (Tier 2)
+      - Cyber Monday (Tier 3)
+      - Regular promotions
 
 
 #### 5.2.3. Pre-Deal Baseline Price Calculation (T4W ASP)
+
    - Calculates 4-week average selling price before promotion
    - Window: 28 days before to 1 day before promotion
    - Filters:
@@ -251,6 +251,7 @@ The script implements a sophisticated deal categorization system:
 
 
 #### 5.2.4. Final Output
+
    - Combines all previous steps
    - Key metrics:
      * Product identification (ASIN, item name)

@@ -1,4 +1,27 @@
 /* Step 1: Get base promotion information */
+/*************************
+Deal Categorization
+- Standardized Deal Periods
+    - For each major shopping event (like Prime Day, Black Friday, etc.), the system identifies the most commonly used start and end dates
+    - These standard dates are used when at least 3 deals follow the same pattern
+    - This helps create consistency in reporting and analysis
+
+- Flexible Event Recognition
+    - Some events can float across different dates. 
+    - e.g, Prime Day deals might start in late June or July
+    - The system recognizes these as part of the same event
+
+- "Event Name" field is tagged based on "promotion internal title"
+    - If title does not include event name or corresponding acronym (e.g. PD for Prime Day), promotion is labeled as "Other"
+    - Event type: HVE and tier 1 to 3 events found in this wiki page
+    - Excluding deals whose title containing "OIH" 
+
+- Methodology on how events in overlapping periods are handled
+    - Especially when internal title does not conclusively contain event key words
+    - In a nuthsell, the higher tier an event is, the more we prioritize to tag a promotion as that event
+    - e.g. PD will be prioritized before Flash Sales
+*************************/
+
 DROP TABLE IF EXISTS base_promos;
 CREATE TEMP TABLE base_promos AS (
     SELECT DISTINCT
@@ -15,8 +38,7 @@ CREATE TEMP TABLE base_promos AS (
             AND p.marketplace_key = pa.marketplace_key
     WHERE p.region_id = 1
         AND p.marketplace_key = 7
-        AND p.start_datetime <= TO_DATE('2025-07-31', 'YYYY-MM-DD')
-        AND p.end_datetime >= TO_DATE('2025-07-01', 'YYYY-MM-DD')
+        AND TO_DATE(start_datetime, 'YYYY-MM-DD') <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'
         AND p.approval_status IN ('Approved', 'Scheduled')
         AND p.promotion_type IN ('Best Deal', 'Deal of the Day', 'Lightning Deal', 'Event Deal')
         AND UPPER(p.promotion_internal_title) NOT LIKE '%OIH%'
@@ -27,7 +49,7 @@ DROP TABLE IF EXISTS raw_events;
 CREATE TEMP TABLE raw_events AS (
     SELECT DISTINCT
         bp.asin,
-        bp.promotion_key as customer_shipment_item_id,
+        bp.promotion_key,
         TO_DATE(bp.start_datetime, 'YYYY-MM-DD') as promo_start_date,
         TO_DATE(bp.end_datetime, 'YYYY-MM-DD') as promo_end_date,
         DATE_PART('year', bp.start_datetime) as event_year,
@@ -73,7 +95,7 @@ CREATE TEMP TABLE promotion_details AS (
     WITH event_priority AS (
         SELECT 
             asin,
-            customer_shipment_item_id,
+            promotion_key,
             event_name,
             event_year,
             event_month,
@@ -94,6 +116,7 @@ CREATE TEMP TABLE promotion_details AS (
     )
     SELECT DISTINCT
         asin,
+        promotion_key,
         event_name,
         promo_start_date,
         promo_end_date
@@ -101,6 +124,7 @@ CREATE TEMP TABLE promotion_details AS (
         SELECT 
             asin,
             event_name,
+            promotion_key,
             promo_start_date,
             promo_end_date,
             ROW_NUMBER() OVER (
@@ -113,6 +137,10 @@ CREATE TEMP TABLE promotion_details AS (
 );
 
 /* Step 4: Calculate T4W ASP */
+/*************************
+Use T4W ASP as pre-deal baseline to calculate discount amount, 
+whenever applicable
+*************************/
 DROP TABLE IF EXISTS t4w;
 CREATE TEMP TABLE t4w AS (
     SELECT
@@ -122,10 +150,10 @@ CREATE TEMP TABLE t4w AS (
             NULLIF(SUM(CASE WHEN o.shipped_units IS NOT NULL THEN o.shipped_units ELSE 0 END), 0),
         0) AS t4w_asp
     FROM andes.booker.d_unified_cust_shipment_items o
-    JOIN base_promos bp ON o.asin = bp.asin
-    LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
-        ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
-        AND o.asin = cp.asin
+        JOIN base_promos bp ON o.asin = bp.asin
+        LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
+            ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
+            AND o.asin = cp.asin
     WHERE o.region_id = 1
         AND o.marketplace_id = 7
         AND TO_DATE(o.order_datetime, 'YYYY-MM-DD') 
@@ -138,44 +166,91 @@ CREATE TEMP TABLE t4w AS (
 );
 
 
-/* Step 5: Get all shipments */
-DROP TABLE IF EXISTS all_shipments;
-CREATE TEMP TABLE all_shipments AS (
+/* Step 5: Get shipments */
+/*************************
+Base Orders Query
+- Includes only retail merchant orders with shipped units > 0 
+- Excludes cancelled or fraudulent orders
+- Filters for last 730 days 
+*************************/
+
+-- First, create filtered shipment table
+DROP TABLE IF EXISTS filtered_shipments;
+CREATE TEMP TABLE filtered_shipments AS (
     SELECT 
         o.asin,
-        SUM(o.shipped_units) as shipped_units,
-        SUM(
-            CASE 
-                WHEN cp.revenue_share_amt IS NOT NULL 
-                THEN cp.revenue_share_amt 
-                ELSE 0 
-            END) as revenue
+        o.customer_id,
+        o.customer_shipment_item_id,
+        o.marketplace_id,
+        o.region_id,
+        TO_DATE(o.order_datetime, 'YYYY-MM-DD') as order_date,
+        o.shipped_units
     FROM andes.booker.d_unified_cust_shipment_items o
-        LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
-        ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
-        AND o.asin = cp.asin
     WHERE o.region_id = 1
         AND o.marketplace_id = 7
-        AND TO_DATE(o.order_datetime, 'YYYY-MM-DD') 
-            BETWEEN TO_DATE('2025-07-01', 'YYYY-MM-DD')
-            AND TO_DATE('2025-07-31', 'YYYY-MM-DD')
+        AND o.gl_product_group IN (199)
+        AND o.order_datetime BETWEEN TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'
+            AND TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')
+        AND o.order_condition != 6
         AND o.shipped_units > 0
         AND o.is_retail_merchant = 'Y'
-        AND o.order_condition != 6
-    GROUP BY o.asin
 );
 
+-- Then create the final base_orders table
+DROP TABLE IF EXISTS base_orders;
+CREATE TEMP TABLE base_orders AS (
+    SELECT DISTINCT
+        fs.asin,
+        maa.item_name,
+        fs.customer_id,
+        fs.customer_shipment_item_id,
+        fs.order_date,
+        fs.shipped_units,
+        maa.gl_product_group,
+        maa.brand_name,
+        maa.brand_code,
+        COALESCE(cp.revenue_share_amt, 0) as revenue_share_amt,
+        mam.dama_mfg_vendor_code as vendor_code,
+        v.company_code,
+        v.company_name
+    FROM filtered_shipments fs
+        INNER JOIN andes.booker.d_mp_asin_attributes maa
+            ON maa.asin = fs.asin
+            AND maa.marketplace_id = fs.marketplace_id
+            AND maa.region_id = fs.region_id
+            AND maa.gl_product_group IS NOT NULL
+        LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
+            ON fs.customer_shipment_item_id = cp.customer_shipment_item_id 
+            AND fs.asin = cp.asin
+            AND fs.marketplace_id = cp.marketplace_id
+            AND cp.marketplace_id = 7
+        LEFT JOIN andes.BOOKER.D_MP_ASIN_MANUFACTURER mam
+            ON mam.asin = fs.asin
+            AND mam.marketplace_id = 7
+            AND mam.region_id = 1
+        LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
+            ON v.vendor_code = mam.dama_mfg_vendor_code
+);
 
 /* Step 6: Final output */
 DROP TABLE IF EXISTS final_output;
 CREATE TEMP TABLE final_output AS (
     SELECT 
         bp.asin,
-        maa.item_name,
+        bo.item_name,
+        bo.customer_id,
+        bo.customer_shipment_item_id,
+        bo.order_date,
+        bo.shipped_units,
+        bo.gl_product_group,
+        bo.brand_name,
+        bo.brand_code,
+        bo.revenue_share_amt as revenue,
+        bo.vendor_code,
+        bo.company_code,
+        bo.company_name,
         bp.promotion_pricing_amount as deal_price,
         t.t4w_asp as baseline_price,
-        COALESCE(s.shipped_units, 0) as shipped_units,
-        COALESCE(s.revenue, 0) as revenue,
         COALESCE(pd.event_name, 'BAU') as event,
         (CASE 
             WHEN bp.promotion_pricing_amount IS NOT NULL AND t.t4w_asp > 0 
@@ -187,21 +262,27 @@ CREATE TEMP TABLE final_output AS (
             ON bp.asin = t.asin
         LEFT JOIN promotion_details pd 
             ON bp.asin = pd.asin
-        LEFT JOIN andes.booker.d_mp_asin_attributes maa
-            ON bp.asin = maa.asin
-            AND maa.marketplace_id = 7
-            AND maa.region_id = 1
-        LEFT JOIN all_shipments s
-            ON bp.asin = s.asin
+        LEFT JOIN base_orders bo
+            ON bp.asin = bo.asin
     GROUP BY 
         bp.asin,
-        maa.item_name,
+        bo.item_name,
+        bo.customer_id,
+        bo.customer_shipment_item_id,
+        bo.order_date,
+        bo.shipped_units,
+        bo.gl_product_group,
+        bo.brand_name,
+        bo.brand_code,
+        bo.revenue_share_amt,
+        bo.vendor_code,
+        bo.company_code,
+        bo.company_name,
         bp.promotion_pricing_amount,
         t.t4w_asp,
-        pd.event_name,
-        s.shipped_units,
-        s.revenue
+        pd.event_name
 );
+
 
 
 SELECT * FROM final_output;

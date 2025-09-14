@@ -123,7 +123,8 @@ CREATE TEMP TABLE t4w AS (
             NULLIF(SUM(CASE WHEN o.shipped_units IS NOT NULL THEN o.shipped_units ELSE 0 END), 0),
         0) AS t4w_asp
     FROM andes.booker.d_unified_cust_shipment_items o
-        JOIN base_promos bp ON o.asin = bp.asin
+        INNER JOIN base_promos bp 
+            ON o.asin = bp.asin
         LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
             ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
             AND o.asin = cp.asin
@@ -145,7 +146,6 @@ DROP TABLE IF EXISTS filtered_shipments;
 CREATE TEMP TABLE filtered_shipments AS (
     SELECT 
         o.asin,
-        o.customer_id,
         o.customer_shipment_item_id,
         o.marketplace_id,
         o.region_id,
@@ -168,7 +168,6 @@ CREATE TEMP TABLE base_orders AS (
     SELECT DISTINCT
         fs.asin,
         maa.item_name,
-        fs.customer_id,
         fs.customer_shipment_item_id,
         fs.order_date,
         fs.shipped_units,
@@ -198,14 +197,12 @@ CREATE TEMP TABLE base_orders AS (
             ON v.vendor_code = mam.dama_mfg_vendor_code
 );
 
-/* Step 6: Final output */
-DROP TABLE IF EXISTS final_output;
-CREATE TEMP TABLE final_output AS (
+/* Step 6: Add event info back output */
+DROP TABLE IF EXISTS orders_event;
+CREATE TEMP TABLE orders_event AS (
     SELECT 
         bp.asin,
         bo.item_name,
-        bo.customer_id,
-        bo.customer_shipment_item_id,
         bo.order_date,
         bo.shipped_units,
         bo.gl_product_group,
@@ -216,7 +213,7 @@ CREATE TEMP TABLE final_output AS (
         bo.company_code,
         bo.company_name,
         bp.promotion_pricing_amount as deal_price,
-        t.t4w_asp as baseline_price,
+        t.t4w_asp as pre_deal_price,
         COALESCE(pd.event_name, 'BAU') as event,
         (CASE 
             WHEN bp.promotion_pricing_amount IS NOT NULL AND t.t4w_asp > 0 
@@ -233,8 +230,6 @@ CREATE TEMP TABLE final_output AS (
     GROUP BY 
         bp.asin,
         bo.item_name,
-        bo.customer_id,
-        bo.customer_shipment_item_id,
         bo.order_date,
         bo.shipped_units,
         bo.gl_product_group,
@@ -250,5 +245,42 @@ CREATE TEMP TABLE final_output AS (
 );
 
 
+/* Step 7: Add event info back output */
+DROP TABLE IF EXISTS final_output;
+CREATE TEMP TABLE final_output AS (
+    SELECT 
+        bp.asin,
+        bo.item_name,
+        bo.event,
+        bo.vendor_code,
+        bo.company_code,
+        bo.company_name,
+        bp.price,
+        bo.discount_amt,
+        -- bo.pre_deal_price,
+        -- bo.gl_product_group,
+        -- bo.brand_name,
+        -- bo.brand_code,
+        count(distinct bo.order_date) as days_sold_at_price,
+        sum(bo.shipped_units) as shipped_units,
+        sum(bo.revenue) as revenue
+    FROM orders_event bo
+    GROUP BY 
+        bp.asin,
+        bo.item_name,
+        bo.order_date,
+        bo.shipped_units,
+        -- bo.pre_deal_price,
+        -- bo.gl_product_group,
+        -- bo.brand_name,
+        -- bo.brand_code,
+        bo.revenue,
+        bo.vendor_code,
+        bo.company_code,
+        bo.company_name,
+        bp.deal_price,
+        bo.event,
+        bo.discount_amt
+);
 
 SELECT * FROM final_output;

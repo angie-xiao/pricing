@@ -1,11 +1,11 @@
 /* Step 1: Get base promotion information */
 -- currently filtering for CA Pets
-DROP TABLE IF EXISTS base_promos;
+ DROP TABLE IF EXISTS base_promos;
 CREATE TEMP TABLE base_promos AS (
     SELECT DISTINCT
         p.region_id,
         p.marketplace_key,
-        pa.product_group_key,
+        CAST(pa.product_group_key AS INT) AS product_group_key,
         pa.asin,
         p.promotion_key,
         p.promotion_internal_title,
@@ -19,11 +19,12 @@ CREATE TEMP TABLE base_promos AS (
             AND p.marketplace_key = pa.marketplace_key
     WHERE p.region_id = 1
         AND p.marketplace_key = 7
-        AND TO_DATE(start_datetime, 'YYYY-MM-DD') <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'
+        AND TO_DATE(start_datetime, 'YYYY-MM-DD') >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'  -- Changed from <= to >=
+        AND TO_DATE(start_datetime, 'YYYY-MM-DD') <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')  -- Added end date boundary
         AND p.approval_status IN ('Approved', 'Scheduled')
         AND p.promotion_type IN ('Best Deal', 'Deal of the Day', 'Lightning Deal', 'Event Deal')
         AND UPPER(p.promotion_internal_title) NOT LIKE '%OIH%'
-        AND pa.product_group_key=199  -- Pets
+        AND CAST(pa.product_group_key AS INT) =199
 );
 
 /* Step 2: Create raw events with detailed categorization */
@@ -197,8 +198,8 @@ CREATE TEMP TABLE filtered_shipments AS (
     WHERE o.region_id = 1
         AND o.marketplace_id = 7
         AND o.gl_product_group IN (199)
-        AND o.order_datetime BETWEEN TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'
-            AND TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')
+        AND o.order_datetime >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'  -- Changed to >=
+        AND o.order_datetime <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')  -- Changed BETWEEN to explicit bounds
         AND o.order_condition != 6
         AND o.shipped_units > 0
         AND o.is_retail_merchant = 'Y'
@@ -206,7 +207,7 @@ CREATE TEMP TABLE filtered_shipments AS (
 
 
 -- Then create the final base_orders table
--- currently filtering for Boxiecat (BO92F)
+-- Filtering for Boxiecat @ CA Pets
 DROP TABLE IF EXISTS base_orders;
 CREATE TEMP TABLE base_orders AS (
     SELECT DISTINCT
@@ -290,7 +291,7 @@ CREATE TEMP TABLE orders_event AS (
         bo.company_code,
         bo.company_name,
         bo.price,
-        bp.promotion_pricing_amount
+        bp.promotion_pricing_amount,
         t.t4w_asp,
         pd.event_name
 );
@@ -299,39 +300,42 @@ CREATE TEMP TABLE orders_event AS (
 /* Step 7: Add event info back output */
 DROP TABLE IF EXISTS final_output;
 CREATE TEMP TABLE final_output AS (
-    SELECT 
-        bo.asin,
-        bo.item_name,
-        bo.event,
-        bo.vendor_code,
-        bo.company_code,
-        bo.company_name,
-        bo.price,
-        bo.discount_amt,
-        -- bo.pre_deal_price,
-        -- bo.gl_product_group,
-        -- bo.brand_name,
-        -- bo.brand_code,
-        count(distinct bo.order_date) as days_sold_at_price,
-        sum(bo.shipped_units) as shipped_units,
-        sum(bo.revenue) as revenue
-    FROM orders_event bo
-    GROUP BY 
-        bo.asin,
-        bo.item_name,
-        bo.order_date,
-        bo.shipped_units,
-        -- bo.pre_deal_price,
-        -- bo.gl_product_group,
-        -- bo.brand_name,
-        -- bo.brand_code,
-        bo.revenue,
-        bo.vendor_code,
-        bo.company_code,
-        bo.company_name,
-        bo.price,
-        bo.event,
-        bo.discount_amt
+    with cte as (
+        SELECT 
+            bo.asin,
+            bo.item_name,
+            bo.event,
+            bo.vendor_code,
+            bo.company_code,
+            bo.company_name,
+            bo.price,
+            bo.discount_amt,
+            -- bo.pre_deal_price,
+            -- bo.gl_product_group,
+            -- bo.brand_name,
+            -- bo.brand_code,
+            count(distinct bo.order_date) as days_sold_at_price,
+            sum(bo.shipped_units) as shipped_units,
+            sum(bo.revenue) as revenue
+        FROM orders_event bo
+        GROUP BY 
+            bo.asin,
+            bo.item_name, 
+            -- bo.pre_deal_price,
+            -- bo.gl_product_group,
+            -- bo.brand_name,
+            -- bo.brand_code,
+            bo.revenue,
+            bo.vendor_code,
+            bo.company_code,
+            bo.company_name,
+            bo.price,
+            bo.event,
+            bo.discount_amt
+    )
+    SELECT *
+    FROM cte
+    WHERE days_sold_at_price > 0        
 );
 
 

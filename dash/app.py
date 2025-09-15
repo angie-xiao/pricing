@@ -246,7 +246,8 @@ if __name__ == "__main__":
 
 """ ---------- Instructions to run app.py ----------
 # always pull from Github first 
-git pull origin main
+git pull origin main        # mac
+git pull origin master      # windows
 
 # in terminal:
 cd dash

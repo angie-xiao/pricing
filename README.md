@@ -57,7 +57,8 @@ home.py
 ### 2.1: Install Python
 
 Install **Python 3.11** (recommended):
-- **Windows**: install from [python.org](https://www.python.org) or Microsoft Store
+- **Windows**: install from [python.org](https://www.python.org)
+  - [Amazon Internal] Search for Python & download from **Software Center**
 - **macOS**: `brew install python@3.11` or download from [python.org](https://www.python.org)
 
 

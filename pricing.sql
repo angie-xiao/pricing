@@ -2,6 +2,9 @@
 DROP TABLE IF EXISTS base_promos;
 CREATE TEMP TABLE base_promos AS (
     SELECT DISTINCT
+        p.region_id,
+        p.marketplace_key,
+        pa.product_group_key,
         pa.asin,
         p.promotion_key,
         p.promotion_internal_title,
@@ -25,6 +28,9 @@ CREATE TEMP TABLE base_promos AS (
 DROP TABLE IF EXISTS raw_events;
 CREATE TEMP TABLE raw_events AS (
     SELECT DISTINCT
+        bp.region_id,
+        bp.marketplace_key,
+        bp.product_group_key,
         bp.asin,
         bp.promotion_key,
         TO_DATE(bp.start_datetime, 'YYYY-MM-DD') as promo_start_date,
@@ -71,6 +77,9 @@ DROP TABLE IF EXISTS promotion_details;
 CREATE TEMP TABLE promotion_details AS (
     WITH event_priority AS (
         SELECT 
+            region_id,
+            marketplace_key,
+            product_group_key,
             asin,
             promotion_key,
             event_name,
@@ -92,6 +101,9 @@ CREATE TEMP TABLE promotion_details AS (
         FROM raw_events
     )
     SELECT DISTINCT
+        region_id,
+        marketplace_key,
+        product_group_key,
         asin,
         promotion_key,
         event_name,
@@ -99,6 +111,9 @@ CREATE TEMP TABLE promotion_details AS (
         promo_end_date
     FROM (
         SELECT 
+            region_id,
+            marketplace_key,
+            product_group_key,
             asin,
             event_name,
             promotion_key,
@@ -113,34 +128,55 @@ CREATE TEMP TABLE promotion_details AS (
     WHERE event_rank = 1
 );
 
-/* Step 4: Calculate T4W ASP */
+
+/* Step 4: Identify T4W shipments */
+-- First identify pre-deal shipments
+DROP TABLE IF EXISTS t4w_shipments;
+CREATE TEMP TABLE t4w_shipments AS (
+    SELECT 
+        o.asin,
+        bp.region_id,
+        bp.marketplace_key,
+        bp.product_group_key,
+        bp.start_datetime,
+        o.customer_shipment_item_id,
+        o.shipped_units as shipped_units_4w
+    FROM andes.booker.d_unified_cust_shipment_items o
+        INNER JOIN base_promos bp 
+            ON o.asin = bp.asin
+            AND o.region_id = bp.region_id
+            AND o.marketplace_id = bp.marketplace_key  
+            AND o.gl_product_group = bp.product_group_key
+            AND o.order_datetime BETWEEN bp.start_datetime - interval '28 days' AND bp.start_datetime - interval '1 day'
+    WHERE o.order_condition != 6                      
+        AND o.shipped_units > 0
+        AND o.is_retail_merchant = 'Y'
+);
+
+
+-- then calculate T4W asp
 DROP TABLE IF EXISTS t4w;
 CREATE TEMP TABLE t4w AS (
-    SELECT
+    SELECT 
         o.asin,
+        cp.region_id,
+        cp.marketplace_key,
+        o.product_group_key,
+        o.start_datetime,
         COALESCE(
             SUM(CASE WHEN cp.revenue_share_amt IS NOT NULL THEN cp.revenue_share_amt ELSE 0 END) / 
             NULLIF(SUM(CASE WHEN o.shipped_units IS NOT NULL THEN o.shipped_units ELSE 0 END), 0),
         0) AS t4w_asp
-    FROM andes.booker.d_unified_cust_shipment_items o
-        INNER JOIN base_promos bp 
-            ON o.asin = bp.asin
-        LEFT JOIN andes.contribution_ddl.o_wbr_cp_na cp
-            ON o.customer_shipment_item_id = cp.customer_shipment_item_id 
-            AND o.asin = cp.asin
-    WHERE o.region_id = 1
-        AND o.marketplace_id = 7
-        AND TO_DATE(o.order_datetime, 'YYYY-MM-DD') 
-            BETWEEN DATE_TRUNC('week', TO_DATE(bp.start_datetime, 'YYYY-MM-DD')) - interval '28 days'
-            AND DATE_TRUNC('week', TO_DATE(bp.start_datetime, 'YYYY-MM-DD')) - interval '1 day'
-        AND o.shipped_units > 0
-        AND o.is_retail_merchant = 'Y'
-        AND o.order_condition != 6
-    GROUP BY o.asin
+    FROM andes.contribution_ddl.o_wbr_cp_na cp 
+        INNER JOIN t4w_shipments o
+        on cp.customer_shipment_item_id = o.customer_shipment_item_id 
+        AND cp.asin = o.asin
+        and cp.marketplace_key = o.marketplace_id
+        and cp.region_id = o.region_id
+
 );
 
-
-/* Step 5: Get shipments */
+/* Step 5: Get all shipments */
 -- First, create filtered shipment table
 DROP TABLE IF EXISTS filtered_shipments;
 CREATE TEMP TABLE filtered_shipments AS (
@@ -161,6 +197,7 @@ CREATE TEMP TABLE filtered_shipments AS (
         AND o.shipped_units > 0
         AND o.is_retail_merchant = 'Y'
 );
+
 
 -- Then create the final base_orders table
 DROP TABLE IF EXISTS base_orders;
@@ -197,6 +234,7 @@ CREATE TEMP TABLE base_orders AS (
             ON v.vendor_code = mam.dama_mfg_vendor_code
 );
 
+
 /* Step 6: Add event info back output */
 DROP TABLE IF EXISTS orders_event;
 CREATE TEMP TABLE orders_event AS (
@@ -223,6 +261,10 @@ CREATE TEMP TABLE orders_event AS (
     FROM base_promos bp
         LEFT JOIN t4w t 
             ON bp.asin = t.asin
+            and t.region_id = bp.region_id
+            and t.marketplace_key = bp.marketplace_key
+            and t.product_group_key = bp.product_group_key
+            and t.start_datetime = bp.start_datetime
         LEFT JOIN promotion_details pd 
             ON bp.asin = pd.asin
         LEFT JOIN base_orders bo
@@ -282,5 +324,6 @@ CREATE TEMP TABLE final_output AS (
         bo.event,
         bo.discount_amt
 );
+
 
 SELECT * FROM final_output;

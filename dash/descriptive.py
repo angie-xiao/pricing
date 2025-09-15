@@ -64,24 +64,34 @@ def layout(products):
             ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
-            # footnote
+
+            # Footer
             html.Div(
                 [
-                    html.Span("made with ♥️ | "),
-                    html.Span(html.I("@aqxiao")),
-                    html.P("github.com/angie-xiao"),
+                    html.Div(
+                        [html.Span("made with ♥️ | "), html.Span(html.I("@aqxiao"))],
+                        style={"marginBottom": "4px"},
+                    ),
+                    html.A(
+                        "github.com/angie-xiao",
+                        href="https://github.com/angie-xiao",
+                        style={"textDecoration": "none", "color": "#ac274f"},
+                    ),
                 ],
-                className="text-center py-3",
                 style={
-                    "font-size": "0.8em",
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "center",      # horizontal center
+                    "justifyContent": "center",  # vertical center
+                    "height": "80px",
+                    "fontSize": "0.8em",
                     "color": "#ac274f",
-                    "textAlign": "center",
-                    "background-color": "#f3f3f3",
-                    "margin": "40px auto 0 auto",  # <-- top margin added (40px); auto keeps centered
-                    "borderRadius": "6px",
-                    # "width":"100%"
+                    "backgroundColor": "#f3f3f3",
+                    "borderRadius": "0",
+                    "width": "100%",
+                    "marginTop": "40px",
                 },
-            ),
+            )
         ],
         fluid=True,
     )

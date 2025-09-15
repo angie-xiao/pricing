@@ -1,15 +1,18 @@
-# data files
+# ---------- files ----------
+# data
 *.csv
 *.xlsx
-
-# Virtual environments
-*.pricing-venv   
-
-# vscode
-.vscode/
 
 # code space
 *.code-workspace
 
+
+# ---------- folders ----------
 # cache
 .cache/
+
+# Virtual environments
+pricing-venv/
+
+# vscode folder
+.vscode/

@@ -346,6 +346,7 @@ def faq_section():
                 className="px-3",
                 style={"maxWidth": "1500px", "margin": "0 auto"},
             ),
+            # footer
             html.Div(
                 [
                     html.Span("made with ♥️ | "),

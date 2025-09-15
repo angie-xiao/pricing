@@ -1,14 +1,20 @@
-# show axes names on pred graph
-
 # --------- built_in_logic.py (RMSE-focused; Top-N only; adds annualized opps & data range) ---------
 import os, random
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from pygam import ExpectileGAM, s
-from dash_bootstrap_templates import load_figure_template
 import plotly.express as px
 import plotly.graph_objects as go
+from dash_bootstrap_templates import load_figure_template
+
+# local import
+from helpers import (
+    clean_cols,
+    compute_product_series,
+    nearest_row_at_price,
+    pick_best_by_group,
+)
 
 
 # --------------------------- Data engineering ---------------------------
@@ -19,18 +25,15 @@ class DataEngineer:
         self.top_n = top_n
 
     def prepare(self) -> pd.DataFrame:
-
-        def _clean_cols(df):
-            df = df.copy()
-            df.columns = df.columns.str.strip().str.lower()
-            return df
-
-        self.pricing_df = _clean_cols(self.pricing_df)
-        self.product_df = _clean_cols(self.product_df)
+        # normalize columns
+        self.pricing_df = clean_cols(self.pricing_df)
+        self.product_df = clean_cols(self.product_df)
 
         df = self.pricing_df.merge(self.product_df, how="left", on="asin")
 
-        df["product"] = (df["tag"] + " " + df["weight"].astype(str)).str.upper()
+        # canonical product label
+        df["product"] = compute_product_series(df)
+
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
         # ---- daily aggregation per asin, then derive ASP ----
@@ -53,11 +56,11 @@ class DataEngineer:
                 daily_units=(
                     "shipped_units",
                     lambda x: x.sum() / pd.Series(x.index).count(),
-                ),  # add daily rate
+                ),
                 daily_rev=(
                     "revenue_share_amt",
                     lambda x: x.sum() / pd.Series(x.index).count(),
-                ),  # add daily rate
+                ),
             )
             .reset_index()
         )
@@ -74,7 +77,6 @@ class DataEngineer:
 
         filtered = asp_product_df[
             (asp_product_df["product"].isin(top_n_products))
-            # & (asp_product_df["event_name"] == "NO DEAL")
         ].copy()
 
         # Normalize dtype for downstream joins
@@ -117,9 +119,7 @@ class ElasticityAnalyzer:
 class GAMTuner:
     """
     (auto-gridsearch; raw y)
-
-    Two-term ExpectileGAM:
-      units ~ s(price, order=3) + s(days_sold, order=2)
+    Two-term ExpectileGAM:      units ~ s(price, order=3) + s(days_sold, order=2)
     """
 
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
@@ -133,7 +133,6 @@ class GAMTuner:
         scaler_X = StandardScaler()
         Xs = scaler_X.fit_transform(X.astype(float))
         terms = s(0, spline_order=3) + s(1, spline_order=2)
-
         gam = ExpectileGAM(terms, expectile=self.expectile)
         try:
             gam = gam.gridsearch(
@@ -148,7 +147,6 @@ class GAMTuner:
             gam = ExpectileGAM(terms, expectile=self.expectile).fit(
                 Xs, y.astype(float), weights=sample_weight
             )
-
         gam._scaler_X = scaler_X
         return gam
 
@@ -171,29 +169,18 @@ class GAMModeler:
 
     def _make_weights(self, sub: pd.DataFrame) -> np.ndarray:
         """Weights based on daily revenue and days_sold for confidence in the data point"""
-        # Base weights from daily revenue (more weight to high-revenue price points)
         daily_rev = np.clip(sub["daily_rev"].values.astype(float), 1.0, None)
         w = np.sqrt(daily_rev)
-
-        # Time decay (more weight to price points with more days of data)
         days = np.clip(sub["days_sold"].values.astype(float), 1.0, None)
         d_med = np.median(days) if np.median(days) > 0 else 1.0
         w_time = np.exp(-self.gamma_time * (days / d_med))
         w *= w_time
-
-        # Price range weighting (more weight to prices with more data)
         if self.tail_strength > 0:
             asp = sub["asp"].values.astype(float)
             q25, q75 = np.percentile(asp, [25, 75])
             iqr = q75 - q25 if q75 > q25 else 1.0
-
-            # Calculate distance from median in terms of IQR
             rel_dist = np.abs(asp - np.median(asp)) / iqr
-
-            # Apply tail strength but cap the maximum weight multiplier
             w *= 1.0 + self.tail_strength * np.minimum(rel_dist, 2.0) ** self.tail_p
-
-        # Normalize weights
         w = w / np.mean(w) if w.size > 0 else w
         return w
 
@@ -201,28 +188,17 @@ class GAMModeler:
         all_results = []
         for product, sub in self.topsellers.groupby("product"):
             sub = sub.sort_values("asp").reset_index(drop=True)
-
-            # Features: price and days_sold
             X = sub[["asp", "days_sold"]].to_numpy(dtype=float)
-            # Target: daily revenue
             y = sub["daily_rev"].to_numpy(dtype=float)
-
-            # Weights based on daily revenue and days_sold
             weights = self._make_weights(sub)
-
             out = {}
             for q in [0.025, 0.5, 0.975]:
                 gam = GAMTuner(expectile=q).fit(X, y, sample_weight=weights)
                 y_pred = gam.predict(gam._scaler_X.transform(X))
-                # Add prefix 'revenue_' since these are revenue predictions
                 out[f"revenue_pred_{q}"] = y_pred
-
             preds = pd.DataFrame(out, index=sub.index)
-
-            # Add raw predictions without revenue prefix for compatibility
             for q in [0.025, 0.5, 0.975]:
                 preds[f"pred_{q}"] = preds[f"revenue_pred_{q}"]
-
             results = pd.concat(
                 [
                     sub[
@@ -243,16 +219,10 @@ class GAMModeler:
             all_results.append(results)
 
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
-
-        # Add revenue_pred_avg
         rev_cols = [c for c in all_gam_results.columns if c.startswith("revenue_pred_")]
         all_gam_results["revenue_pred_avg"] = all_gam_results[rev_cols].mean(axis=1)
-
-        # Set revenue_actual
         all_gam_results["revenue_actual"] = all_gam_results["daily_rev"]
-
         all_gam_results["asin"] = all_gam_results["asin"].astype(str)
-
         return all_gam_results
 
 
@@ -260,16 +230,19 @@ class GAMModeler:
 class Optimizer:
     @staticmethod
     def run(all_gam_results: pd.DataFrame) -> dict:
-        def pick_best(col):
-            if col not in all_gam_results or all_gam_results[col].isna().all():
-                return pd.DataFrame()
-            return all_gam_results.loc[all_gam_results.groupby("product")[col].idxmax()]
-
         return {
-            "best_avg": pick_best("revenue_pred_avg"),
-            "best50": pick_best("revenue_pred_0.5"),
-            "best975": pick_best("revenue_pred_0.975"),
-            "best25": pick_best("revenue_pred_0.025"),
+            "best_avg": pick_best_by_group(
+                all_gam_results, "product", "revenue_pred_avg"
+            ),
+            "best50": pick_best_by_group(
+                all_gam_results, "product", "revenue_pred_0.5"
+            ),
+            "best975": pick_best_by_group(
+                all_gam_results, "product", "revenue_pred_0.975"
+            ),
+            "best25": pick_best_by_group(
+                all_gam_results, "product", "revenue_pred_0.025"
+            ),
             "all_gam_results": all_gam_results,
         }
 
@@ -282,21 +255,9 @@ class PricingPipeline:
     def _build_curr_price_df(self) -> pd.DataFrame:
         """current price df with product tag"""
         product = self.engineer.product_df.copy()
-        product["product"] = (
-            product["tag"] + " " + product["weight"].astype(str)
-        ).str.upper()
+        product["product"] = compute_product_series(product)
         out = product[["asin", "product", "current_price"]]
         return out.reset_index(drop=True)
-
-    @staticmethod
-    def _nearest_row_at_price(prod_df: pd.DataFrame, price: float):
-        if prod_df.empty or pd.isna(price):
-            return None
-        idx = (prod_df["asp"] - price).abs().idxmin()
-        try:
-            return prod_df.loc[idx]
-        except Exception:
-            return None
 
     def assemble_dashboard_frames(self) -> dict:
         # 1) core tables
@@ -323,9 +284,6 @@ class PricingPipeline:
 
         # 3) current prices
         curr_price_df = self._build_curr_price_df()
-        # print(f"Current price DataFrame shape: {curr_price_df.shape}")
-        # print("Sample of current prices:")
-        # print(curr_price_df.head())
 
         # 4) data range + annualization factor
         df_dates = self.engineer.pricing_df.copy()
@@ -372,7 +330,7 @@ class PricingPipeline:
             curr_price = float(cp_ser.iloc[0]) if len(cp_ser) else np.nan
 
             curr_row = (
-                self._nearest_row_at_price(prod_curve, curr_price)
+                nearest_row_at_price(prod_curve, curr_price)
                 if pd.notna(curr_price)
                 else None
             )
@@ -416,6 +374,7 @@ class PricingPipeline:
                     ),
                 }
             )
+
         opps_summary = pd.DataFrame(rows)
 
         # 7) normalize key dtype across frames

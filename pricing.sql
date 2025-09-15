@@ -1,4 +1,5 @@
 /* Step 1: Get base promotion information */
+-- currently filtering for CA Pets
 DROP TABLE IF EXISTS base_promos;
 CREATE TEMP TABLE base_promos AS (
     SELECT DISTINCT
@@ -22,6 +23,7 @@ CREATE TEMP TABLE base_promos AS (
         AND p.approval_status IN ('Approved', 'Scheduled')
         AND p.promotion_type IN ('Best Deal', 'Deal of the Day', 'Lightning Deal', 'Event Deal')
         AND UPPER(p.promotion_internal_title) NOT LIKE '%OIH%'
+        AND pa.product_group_key=199  -- Pets
 );
 
 /* Step 2: Create raw events with detailed categorization */
@@ -159,25 +161,28 @@ DROP TABLE IF EXISTS t4w;
 CREATE TEMP TABLE t4w AS (
     SELECT 
         o.asin,
-        cp.region_id,
-        cp.marketplace_key,
+        o.marketplace_key,
         o.product_group_key,
-        o.start_datetime,
+        CAST(o.start_datetime AS DATE) AS start_datetime,
         COALESCE(
             SUM(CASE WHEN cp.revenue_share_amt IS NOT NULL THEN cp.revenue_share_amt ELSE 0 END) / 
-            NULLIF(SUM(CASE WHEN o.shipped_units IS NOT NULL THEN o.shipped_units ELSE 0 END), 0),
+            NULLIF(SUM(CASE WHEN o.shipped_units_4w IS NOT NULL THEN o.shipped_units_4w ELSE 0 END), 0),
         0) AS t4w_asp
     FROM andes.contribution_ddl.o_wbr_cp_na cp 
         INNER JOIN t4w_shipments o
-        on cp.customer_shipment_item_id = o.customer_shipment_item_id 
+        ON cp.customer_shipment_item_id = o.customer_shipment_item_id 
         AND cp.asin = o.asin
-        and cp.marketplace_key = o.marketplace_id
-        and cp.region_id = o.region_id
-
+        AND o.marketplace_key = cp.marketplace_id
+    GROUP BY
+        o.asin,
+        o.marketplace_key,
+        o.product_group_key,
+        CAST(o.start_datetime AS DATE) 
 );
 
 /* Step 5: Get all shipments */
 -- First, create filtered shipment table
+-- Currently filtering for CA Pets
 DROP TABLE IF EXISTS filtered_shipments;
 CREATE TEMP TABLE filtered_shipments AS (
     SELECT 
@@ -185,6 +190,7 @@ CREATE TEMP TABLE filtered_shipments AS (
         o.customer_shipment_item_id,
         o.marketplace_id,
         o.region_id,
+        o.our_price as price,
         TO_DATE(o.order_datetime, 'YYYY-MM-DD') as order_date,
         o.shipped_units
     FROM andes.booker.d_unified_cust_shipment_items o
@@ -200,6 +206,7 @@ CREATE TEMP TABLE filtered_shipments AS (
 
 
 -- Then create the final base_orders table
+-- currently filtering for Boxiecat (BO92F)
 DROP TABLE IF EXISTS base_orders;
 CREATE TEMP TABLE base_orders AS (
     SELECT DISTINCT
@@ -207,14 +214,15 @@ CREATE TEMP TABLE base_orders AS (
         maa.item_name,
         fs.customer_shipment_item_id,
         fs.order_date,
-        fs.shipped_units,
         maa.gl_product_group,
         maa.brand_name,
         maa.brand_code,
-        COALESCE(cp.revenue_share_amt, 0) as revenue_share_amt,
         mam.dama_mfg_vendor_code as vendor_code,
         v.company_code,
-        v.company_name
+        v.company_name,
+        fs.shipped_units,
+        fs.price,
+        COALESCE(cp.revenue_share_amt, 0) as revenue_share_amt
     FROM filtered_shipments fs
         INNER JOIN andes.booker.d_mp_asin_attributes maa
             ON maa.asin = fs.asin
@@ -225,13 +233,14 @@ CREATE TEMP TABLE base_orders AS (
             ON fs.customer_shipment_item_id = cp.customer_shipment_item_id 
             AND fs.asin = cp.asin
             AND fs.marketplace_id = cp.marketplace_id
-            AND cp.marketplace_id = 7
         LEFT JOIN andes.BOOKER.D_MP_ASIN_MANUFACTURER mam
             ON mam.asin = fs.asin
             AND mam.marketplace_id = 7
             AND mam.region_id = 1
         LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
             ON v.vendor_code = mam.dama_mfg_vendor_code
+    WHERE v.company_code='BO92F'  -- Boxiecat
+    
 );
 
 
@@ -250,8 +259,8 @@ CREATE TEMP TABLE orders_event AS (
         bo.vendor_code,
         bo.company_code,
         bo.company_name,
-        bp.promotion_pricing_amount as deal_price,
-        t.t4w_asp as pre_deal_price,
+        bo.price,
+        -- COALESCE(t.t4w_asp,0) as pre_deal_price,
         COALESCE(pd.event_name, 'BAU') as event,
         (CASE 
             WHEN bp.promotion_pricing_amount IS NOT NULL AND t.t4w_asp > 0 
@@ -261,7 +270,6 @@ CREATE TEMP TABLE orders_event AS (
     FROM base_promos bp
         LEFT JOIN t4w t 
             ON bp.asin = t.asin
-            and t.region_id = bp.region_id
             and t.marketplace_key = bp.marketplace_key
             and t.product_group_key = bp.product_group_key
             and t.start_datetime = bp.start_datetime
@@ -281,7 +289,8 @@ CREATE TEMP TABLE orders_event AS (
         bo.vendor_code,
         bo.company_code,
         bo.company_name,
-        bp.promotion_pricing_amount,
+        bo.price,
+        bp.promotion_pricing_amount
         t.t4w_asp,
         pd.event_name
 );
@@ -291,13 +300,13 @@ CREATE TEMP TABLE orders_event AS (
 DROP TABLE IF EXISTS final_output;
 CREATE TEMP TABLE final_output AS (
     SELECT 
-        bp.asin,
+        bo.asin,
         bo.item_name,
         bo.event,
         bo.vendor_code,
         bo.company_code,
         bo.company_name,
-        bp.price,
+        bo.price,
         bo.discount_amt,
         -- bo.pre_deal_price,
         -- bo.gl_product_group,
@@ -308,7 +317,7 @@ CREATE TEMP TABLE final_output AS (
         sum(bo.revenue) as revenue
     FROM orders_event bo
     GROUP BY 
-        bp.asin,
+        bo.asin,
         bo.item_name,
         bo.order_date,
         bo.shipped_units,
@@ -320,7 +329,7 @@ CREATE TEMP TABLE final_output AS (
         bo.vendor_code,
         bo.company_code,
         bo.company_name,
-        bp.deal_price,
+        bo.price,
         bo.event,
         bo.discount_amt
 );

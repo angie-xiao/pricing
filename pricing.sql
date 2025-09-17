@@ -354,8 +354,8 @@ CREATE TEMP TABLE orders_event AS (
         bo.price,
         pd.event_name,
         -- pd.event_year,
-        COALESCE(ROUND(bp.promotion_pricing_amount,2), 0),
-        COALESCE(ROUND(bp.current_discount_percent,2), 0)
+        bp.promotion_pricing_amount,
+        bp.current_discount_percent
 );
 
 

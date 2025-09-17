@@ -7,6 +7,8 @@ from pygam import ExpectileGAM, s
 import plotly.express as px
 import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
+from datetime import datetime, timedelta
+import seaborn as sns
 
 # local import
 from helpers import (
@@ -19,6 +21,7 @@ from helpers import (
 
 # --------------------------- Data engineering ---------------------------
 class DataEngineer:
+    
     def __init__(self, pricing_df, product_df, top_n=10):
         self.pricing_df = pricing_df
         self.product_df = product_df
@@ -33,55 +36,49 @@ class DataEngineer:
 
         # canonical product label
         df["product"] = compute_product_series(df)
-
         df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
-        # ---- daily aggregation per asin, then derive ASP ----
-        daily = df.groupby(["asin", "product", "order_date"])[
-            ["shipped_units", "revenue_share_amt"]
-        ].sum()
-        daily = daily[daily["shipped_units"] > 0]
-        daily["asp"] = daily["revenue_share_amt"] / daily["shipped_units"]
-        daily = daily[daily["asp"] > 0]
-        daily["asp"] = daily["asp"].round(1)
-        daily.reset_index(inplace=True)
-
-        # ---- product × ASP table with daily rates and totals ----
-        asp_product_df = (
-            daily.groupby(["asin", "product", "asp"])
-            .agg(
-                shipped_units=("shipped_units", "sum"),  # keep total units
-                revenue_share_amt=("revenue_share_amt", "sum"),
-                days_sold=("order_date", "count"),
-                daily_units=(
-                    "shipped_units",
-                    lambda x: x.sum() / pd.Series(x.index).count(),
-                ),
-                daily_rev=(
-                    "revenue_share_amt",
-                    lambda x: x.sum() / pd.Series(x.index).count(),
-                ),
-            )
-            .reset_index()
-        )
 
         # Top-N products by total revenue — KEEP ONLY those products (no over-display)
         top_n_products = (
-            asp_product_df.groupby("product")["revenue_share_amt"]
+            df.groupby("product")["revenue"]
             .sum()
             .reset_index()
-            .sort_values("revenue_share_amt", ascending=False)["product"]
+            .sort_values("revenue", ascending=False)["product"]
             .head(self.top_n)
             .tolist()
         )
 
-        filtered = asp_product_df[
-            (asp_product_df["product"].isin(top_n_products))
+        filtered = df[
+            (df["product"].isin(top_n_products))
         ].copy()
 
         # Normalize dtype for downstream joins
         filtered["asin"] = filtered["asin"].astype(str)
+        filtered.rename(columns={'revenue':'revenue_share_amt'},inplace=True)
+        
         return filtered
+
+    def time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
+        """
+        Calculates an exponential decay weight based on time difference.
+
+        Args:
+            timestamp (datetime): The timestamp of the data point.
+            reference_time (datetime): The reference time (e.g., current time or conversion time).
+            decay_rate (float): A positive float controlling the decay speed.
+                                Higher values mean faster decay.
+
+        Returns:
+            float: The calculated weight.
+        """
+        today_ref = pd.Timestamp('today')
+        df = prepared_df.copy()
+                              
+        df['days_apart'] = (today_ref - df['order_date']).dt.days
+        df['time_decay_weight'] = np.exp(decay_rate * df['days_apart'])
+
+        return df
 
 
 # --------------------------- Elasticity (UI summary only) ---------------------------
@@ -92,8 +89,8 @@ class ElasticityAnalyzer:
         elasticity = (
             topsellers.groupby("product")
             .agg(
-                asp_max=("asp", "max"),
-                asp_min=("asp", "min"),
+                asp_max=("price", "max"),
+                asp_min=("price", "min"),
                 shipped_units_max=("shipped_units", "max"),
                 shipped_units_min=("shipped_units", "min"),
                 product_count=("product", "count"),
@@ -249,6 +246,7 @@ class Optimizer:
 
 # --------------------------- Pipeline ---------------------------
 class PricingPipeline:
+    
     def __init__(self, pricing_df, product_df, top_n=10):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
 
@@ -261,8 +259,9 @@ class PricingPipeline:
 
     def assemble_dashboard_frames(self) -> dict:
         # 1) core tables
-        topsellers = self.engineer.prepare()  # Top-N only
-        elasticity_df = ElasticityAnalyzer.compute(topsellers)  # UI only
+        topsellers = self.engineer.prepare()                            # Top-N only
+        topselles_decayed = self.engineer.time_decay(topsellers)        # time decay
+        elasticity_df = ElasticityAnalyzer.compute(topselles_decayed)   # UI only
         all_gam_results = GAMModeler(topsellers, tail_strength=0.6, tail_p=1.0).run()
 
         # 2) optimizer + best tables
@@ -683,12 +682,12 @@ class viz:
         return fig
 
 
-# if __name__ == "__main__":
-#     pricing_df, product_df = pd.read_csv('data/730d.csv'), pd.read_csv('data/products.csv')
+if __name__ == "__main__":
+    pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
 
-#     # DataEngineer(pricing_df, product_df, top_n=10).prepare()
+    # DataEngineer(pricing_df, product_df, top_n=10).prepare()
 
-#     # GAMModeler(
-#     #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+    # GAMModeler(
+    #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
 
-#     PricingPipeline(pricing_df, product_df, top_n=10)._build_curr_price_df()
+    PricingPipeline(pricing_df, product_df, top_n=10).assemble_dashboard_frames()

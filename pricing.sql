@@ -126,8 +126,8 @@ CREATE TEMP TABLE base_promos AS (
         AND p.marketplace_key = pa.marketplace_key
     WHERE p.region_id = 1
         AND p.marketplace_key = 7
-        AND TO_DATE(start_datetime, 'YYYY-MM-DD') >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'  -- Changed from <= to >=
-        AND TO_DATE(start_datetime, 'YYYY-MM-DD') <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')  -- Added end date boundary
+        AND TO_DATE(start_datetime, 'YYYY-MM-DD') >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'   -- Changed from <= to >=
+        AND TO_DATE(start_datetime, 'YYYY-MM-DD') <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')                         -- Added end date boundary
         AND p.approval_status IN ('Approved', 'Scheduled')
         AND p.promotion_type IN ('Best Deal', 'Deal of the Day', 'Lightning Deal', 'Event Deal')
         AND UPPER(p.promotion_internal_title) NOT LIKE '%OIH%'
@@ -325,17 +325,19 @@ CREATE TEMP TABLE orders_event AS (
         bo.asin,
         bo.item_name,
         bo.order_date,
-        bo.gl_product_group, 
-        bo.company_code,
+        -- bo.gl_product_group, 
+        -- bo.company_code,
         bo.price,
         (CASE 
             WHEN bp.promotion_pricing_amount != bo.price THEN 'BAU'
             WHEN pd.event_name IS NULL OR pd.event_name = 'NO_PROMOTION' THEN 'BAU'
             ELSE pd.event_name 
         END) as event_name,
-        -- pd.event_year,
-        COALESCE(ROUND(bp.promotion_pricing_amount,2), 0) as promotion_pricing_amount,
-        COALESCE(ROUND(bp.current_discount_percent,2), 0) as current_discount_percent,
+        -- COALESCE(ROUND(bp.promotion_pricing_amount,2), 0) as promotion_pricing_amount,
+        (CASE
+            WHEN bp.promotion_pricing_amount != bo.price THEN 0
+            ELSE COALESCE(ROUND(bp.current_discount_percent,2), 0) 
+        END) as deal_discount_percent,
         CAST(SUM(bo.shipped_units) as int) as shipped_units,
         ROUND(SUM(bo.revenue_share_amt), 2) as revenue
     FROM base_orders bo
@@ -349,11 +351,10 @@ CREATE TEMP TABLE orders_event AS (
         bo.asin,
         bo.item_name,
         bo.order_date,
-        bo.gl_product_group, 
-        bo.company_code,
+        -- bo.gl_product_group, 
+        -- bo.company_code,
         bo.price,
         pd.event_name,
-        -- pd.event_year,
         bp.promotion_pricing_amount,
         bp.current_discount_percent
 );

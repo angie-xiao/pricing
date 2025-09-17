@@ -280,3 +280,64 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
   - Event type (BAU vs HVE)
 
     
+## 6. Technical Documentation
+
+### 6.1 Price Elasticity Modeling
+
+The dashboard uses a Generalized Additive Model (GAM) with sophisticated weighting mechanisms to accurately model price elasticity.
+
+#### 6.1.1 Weighting Mechanism
+
+The model employs two key weighting factors:
+
+1. **Time Decay Weights**
+   - More recent data points receive higher weights
+   - Implemented using exponential decay: `w = exp(decay_rate * days_apart)`
+   - `days_apart`: Days between order date and current date
+   - `decay_rate`: Controls decay speed (default = -0.01)
+   - Ensures model emphasizes recent market conditions
+
+2. **Price Outlier Weights**
+   - Prices far from median receive additional weight
+   - Calculated using relative distance from median price
+   - Controlled by two parameters:
+     - `tail_strength` (default = 1.0): Controls intensity of outlier weights
+       - 0.0: No extra weight for outliers
+       - 1.0: Strong emphasis on outliers
+     - `tail_p` (default = 0.5): Controls weight distribution shape
+       - 1.0: Linear increase with distance
+       - < 1.0: Convex curve (more weight to all non-median prices)
+       - > 1.0: Concave curve (more weight to extreme outliers)
+
+#### 6.1.2 Benefits of This Approach
+
+1. **Temporal Relevance**
+   - Recent price points better reflect current market conditions
+   - Gradual decay prevents sharp cutoffs in historical data
+
+2. **Price Range Coverage**
+   - Enhanced weight for rare price points
+   - Better captures full price-response curve
+   - Prevents model from over-fitting to common price points
+
+3. **Balanced Learning**
+   - Combines recency and price coverage
+   - Helps prevent both temporal bias and price-point bias
+
+#### 6.1.3 Implementation
+
+```python
+def _make_weights(self, sub: pd.DataFrame, tail_strength: float = 1.0, tail_p: float = 0.5):
+    # Time decay weights
+    decayed_df = self._time_decay(sub)
+    w = decayed_df['time_decay_weight'].values
+    
+    # Price outlier adjustments
+    if tail_strength > 0:
+        asp = sub["price"].values.astype(float)
+        q25, q75 = np.percentile(asp, [25, 75])
+        iqr = q75 - q25 if q75 > q25 else 1.0
+        rel_dist = np.abs(asp - np.median(asp)) / iqr
+        w *= 1.0 + tail_strength * np.minimum(rel_dist, 2.0) ** tail_p
+    
+    return w / np.mean(w) if w.size > 0 else w

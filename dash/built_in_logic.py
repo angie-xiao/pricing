@@ -1,3 +1,7 @@
+# dummy vars
+# tuner needs to be changed to accomodate multiple vars
+
+
 # --------- built_in_logic.py (RMSE-focused; Top-N only; adds annualized opps & data range) ---------
 import os, random
 import pandas as pd
@@ -12,7 +16,7 @@ from dash_bootstrap_templates import load_figure_template
 
 # ML
 from pygam import ExpectileGAM, s
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 # local import
 from helpers import (
@@ -101,6 +105,15 @@ class DataEngineer:
         return w
 
 
+    def _label_encoder(self, df) -> pd.DataFrame:
+        ''' label encoding categorical variable '''
+        le = LabelEncoder()
+        res = df.copy()
+        
+        res['event_encoded'] = le.fit_transform(res['event_name'])
+        res['product_encoded'] = le.fit_transform(res['product'])
+
+        return res
 
     def prepare(self) -> pd.DataFrame:
         ''' '''
@@ -137,7 +150,10 @@ class DataEngineer:
         filtered["asin"] = filtered["asin"].astype(str)
         filtered.rename(columns={'revenue':'revenue_share_amt'},inplace=True)
         
-        return filtered
+        # encode categorical vars after filtering
+        res = self._label_encoder(filtered)
+        
+        return res
 
 
 # --------------------- Elasticity --------------------------
@@ -175,8 +191,12 @@ class ElasticityAnalyzer:
 class GAMTuner:
     """
     (auto-gridsearch; raw y)
-    Two-term ExpectileGAM:      
-        units ~ s(price, order=3) + s(days_sold, order=2)
+    
+    4-term ExpectileGAM:     
+        days_sold
+        price
+        event
+        product 
     """
 
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
@@ -189,7 +209,7 @@ class GAMTuner:
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
         scaler_X = StandardScaler()
         Xs = scaler_X.fit_transform(X.astype(float))
-        terms = s(0, spline_order=3) + s(1, spline_order=2)
+        terms = s(0, spline_order=3) + s(1, spline_order=4)
         gam = ExpectileGAM(terms, expectile=self.expectile)
         try:
             gam = gam.gridsearch(
@@ -227,7 +247,7 @@ class GAMModeler:
         
         for product, sub in self.topsellers.groupby("product"):
             sub = sub.sort_values("price").reset_index(drop=True)
-            X = sub[["price", "days_sold"]].to_numpy(dtype=float)
+            X = sub[["price", "days_sold", "event_encoded", "product_encoded"]].to_numpy(dtype=float)
             y = sub["revenue_share_amt"].to_numpy(dtype=float)
             
             # Use DataEngineer's weight calculation

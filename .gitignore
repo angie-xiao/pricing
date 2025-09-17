@@ -6,6 +6,8 @@
 # code space
 *.code-workspace
 
+# venv
+*.pricing-venv
 
 # ---------- folders ----------
 # cache

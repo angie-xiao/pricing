@@ -208,19 +208,19 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
 
   The script implements a sophisticated deal categorization system:
 
-  1. Standardized Deal Periods
+  1. **Standardized Deal Periods**
      - Identifies common start/end dates for major events (Prime Day, Black Friday, etc.)
      - Requires minimum 3 deals with matching patterns to establish standard dates
      - Ensures consistent reporting and analysis
 
-  2. Flexible Event Recognition
+  2. **Flexible Event Recognition**
      - Accommodates floating date events (e.g., Prime Day in late June or July)
      - Pattern matching in promotion titles:
        - Direct event names (e.g., "Prime Day")
        - Known acronyms (e.g., "PD" for Prime Day)
        - Date-based validation for seasonal events
 
-  3. Event Name Tagging
+  3. **Event Name Tagging**
      - Based on `promotion_internal_title` field
      - Event types:
        - HVE (High Velocity Events)
@@ -230,7 +230,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
          - Defaults to "OTHER" if no matching pattern
       - Excludes promotions with "OIH" in title
 
-  4. Overlap Resolution
+  4. **Overlap Resolution**
      - Prioritizes higher tier events when dates overlap
      - Example priority order:
         - For HVEs, Tier 1 events get the highest priority
@@ -238,22 +238,45 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
         - Regular promotions
 
 
-#### 5.2.3. Pre-Deal Baseline Price Calculation (T4W ASP)
+#### 5.2.3 Promotion Processing
+1. **Base Promotion Extraction**
+   - Captures approved/scheduled promotions
+   - Types: Best Deal, Deal of the Day, Lightning Deal, Event Deal
+   - Excludes OIH promotions
 
-   - Calculates 4-week average selling price before promotion
-   - Window: 28 days before to 1 day before promotion
-   - Filters:
-     * Retail merchant sales
-     * New condition items
-     * Shipped units only
+2. **Event Categorization**
+   - Identifies major events (Prime Day, BSS, etc.)
+   - Uses both date logic and title pattern matching
+   - Priority order implemented for overlapping events
 
+3. **Date Standardization**
+   - Identifies common start/end dates for events
+   - Requires minimum 3 promotions for pattern recognition
+   - Consolidates promotion dates for consistency
 
-#### 5.2.4. Final Output
+#### 5.2.4 Final Output Assembly
+- Transaction Classification Logic:
+  * **Critical Price Validation**: Orders are classified as BAU (Business As Usual) if:
+    - Customer paid non-deal price during events (e.g., non-Prime members during Prime Day)
+    - ⚠️ **Edge Case**: Actual purchase price doesn't match promotional price
+      - e.g., if a non-Prime customer made a purchase during Prime Day and pays for non-deal price, this is considered as a **BAU** purchase
+    - No active promotion exists for the ASIN
+  * This ensures accurate event attribution based on actual customer purchase behavior
 
-   - Combines all previous steps
-   - Key metrics:
-     * Product identification (ASIN, item name)
-     * Pricing (deal price, baseline price)
-     * Performance (shipped units, revenue)
-     * Event categorization
-     * Discount amount
+- Key Metrics Output:
+  * ASIN and item details
+  * Order date
+  * GL product group
+  * Company information
+  * Price
+  * Event classification
+  * Promotion pricing details
+  * Aggregated units and revenue
+
+- Units and revenue are summed by
+  - ASIN
+  - Order date
+  - Price
+  - Event type (BAU vs HVE)
+
+    

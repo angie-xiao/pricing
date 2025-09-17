@@ -2,13 +2,17 @@
 import os, random
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from pygam import ExpectileGAM, s
+from datetime import datetime, timedelta
+
+# viz
+# import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
-from datetime import datetime, timedelta
-import seaborn as sns
+
+# ML
+from pygam import ExpectileGAM, s
+from sklearn.preprocessing import StandardScaler
 
 # local import
 from helpers import (
@@ -19,7 +23,7 @@ from helpers import (
 )
 
 
-# --------------------------- Data engineering ---------------------------
+# --------------------- Data engineering ---------------------
 class DataEngineer:
     
     def __init__(self, pricing_df, product_df, top_n=10):
@@ -27,39 +31,8 @@ class DataEngineer:
         self.product_df = product_df
         self.top_n = top_n
 
-    def prepare(self) -> pd.DataFrame:
-        # normalize columns
-        self.pricing_df = clean_cols(self.pricing_df)
-        self.product_df = clean_cols(self.product_df)
 
-        df = self.pricing_df.merge(self.product_df, how="left", on="asin")
-
-        # canonical product label
-        df["product"] = compute_product_series(df)
-        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
-
-
-        # Top-N products by total revenue — KEEP ONLY those products (no over-display)
-        top_n_products = (
-            df.groupby("product")["revenue"]
-            .sum()
-            .reset_index()
-            .sort_values("revenue", ascending=False)["product"]
-            .head(self.top_n)
-            .tolist()
-        )
-
-        filtered = df[
-            (df["product"].isin(top_n_products))
-        ].copy()
-
-        # Normalize dtype for downstream joins
-        filtered["asin"] = filtered["asin"].astype(str)
-        filtered.rename(columns={'revenue':'revenue_share_amt'},inplace=True)
-        
-        return filtered
-
-    def time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
+    def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
         """
         Calculates an exponential decay weight based on time difference.
 
@@ -81,7 +54,93 @@ class DataEngineer:
         return df
 
 
-# --------------------------- Elasticity (UI summary only) ---------------------------
+    def _days_at_price(self, df) -> pd.DataFrame:
+        ''' 
+        add a column for the number of days where an ASP was sold at
+        
+        param
+            df
+            
+        return
+            df [with a new "number of days for a price" column]        
+        '''
+        
+        days_at_asp = df[['asin', 'order_date', 'price']].groupby(['asin','price']).nunique().reset_index()
+        days_at_asp.rename(columns={'order_date':'days_sold'},inplace=True)
+        
+        res = df.merge(days_at_asp, left_on=['asin','price'], right_on=['asin','price'])
+        
+        return res
+    
+
+    def _make_weights(self, sub: pd.DataFrame, tail_strength: float = 1.0, tail_p: float = 0.5) -> np.ndarray:
+
+        """
+        Create weights based on time decay and price outliers
+        
+        Args:
+            sub: DataFrame containing the data
+            tail_strength: controls outlier weighting intensity (0 = no extra weight, 1 = aggressive)
+            tail_p: controls outlier weight distribution (1: linear, >1: concave, <1: convex)
+        """
+        # Time decay weights
+        decayed_df = self._time_decay(sub)
+        w = decayed_df['time_decay_weight'].values
+        
+        # Price outlier adjustments
+        if tail_strength > 0:
+            asp = sub["price"].values.astype(float)
+            q25, q75 = np.percentile(asp, [25, 75])
+            iqr = q75 - q25 if q75 > q25 else 1.0
+            rel_dist = np.abs(asp - np.median(asp)) / iqr
+            w *= 1.0 + tail_strength * np.minimum(rel_dist, 2.0) ** tail_p
+        
+        # Normalize weights
+        w = w / np.mean(w) if w.size > 0 else w
+        
+        return w
+
+
+
+    def prepare(self) -> pd.DataFrame:
+        ''' '''
+        # normalize columns
+        self.pricing_df = clean_cols(self.pricing_df)
+        self.product_df = clean_cols(self.product_df)
+        
+        # merge
+        df = self.pricing_df.merge(self.product_df, how="left", on="asin")
+        
+        # product label
+        df["product"] = compute_product_series(df)
+        
+        # data type
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+
+        # count how many days a price was sold at
+        df_days_asp = self._days_at_price(df)
+        
+        # Top-N products by total revenue
+        top_n_products = (
+            df_days_asp.groupby("product")["revenue"]
+            .sum()
+            .reset_index()
+            .sort_values("revenue", ascending=False)["product"]
+            .head(self.top_n)
+            .tolist()
+        )
+        # filtering
+        filtered = df_days_asp[
+            (df_days_asp["product"].isin(top_n_products))
+        ].copy()
+        # Normalize dtype for downstream joins
+        filtered["asin"] = filtered["asin"].astype(str)
+        filtered.rename(columns={'revenue':'revenue_share_amt'},inplace=True)
+        
+        return filtered
+
+
+# --------------------- Elasticity --------------------------
 class ElasticityAnalyzer:
     @staticmethod
     def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
@@ -116,7 +175,8 @@ class ElasticityAnalyzer:
 class GAMTuner:
     """
     (auto-gridsearch; raw y)
-    Two-term ExpectileGAM:      units ~ s(price, order=3) + s(days_sold, order=2)
+    Two-term ExpectileGAM:      
+        units ~ s(price, order=3) + s(days_sold, order=2)
     """
 
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
@@ -148,65 +208,49 @@ class GAMTuner:
         return gam
 
 
-# --------------------------- Modeling  ---------------------------
+# ------------------------ Modeling  ------------------------
 class GAMModeler:
-    """(weights = reaction-per-day * tail)"""
-
     def __init__(
         self,
         topsellers: pd.DataFrame,
-        gamma_time: float = 0.7,  # inverse-exp strength for days_sold
-        tail_strength: float = 0.6,
-        tail_p: float = 1.0,
+        tail_strength: float = 1,
+        tail_p: float = 0.5,
     ):
         self.topsellers = topsellers
-        self.gamma_time = float(gamma_time)
         self.tail_strength = float(tail_strength)
         self.tail_p = float(tail_p)
-
-    def _make_weights(self, sub: pd.DataFrame) -> np.ndarray:
-        """Weights based on daily revenue and days_sold for confidence in the data point"""
-        daily_rev = np.clip(sub["daily_rev"].values.astype(float), 1.0, None)
-        w = np.sqrt(daily_rev)
-        days = np.clip(sub["days_sold"].values.astype(float), 1.0, None)
-        d_med = np.median(days) if np.median(days) > 0 else 1.0
-        w_time = np.exp(-self.gamma_time * (days / d_med))
-        w *= w_time
-        if self.tail_strength > 0:
-            asp = sub["asp"].values.astype(float)
-            q25, q75 = np.percentile(asp, [25, 75])
-            iqr = q75 - q25 if q75 > q25 else 1.0
-            rel_dist = np.abs(asp - np.median(asp)) / iqr
-            w *= 1.0 + self.tail_strength * np.minimum(rel_dist, 2.0) ** self.tail_p
-        w = w / np.mean(w) if w.size > 0 else w
-        return w
+        self.engineer = DataEngineer(None, None)
 
     def run(self) -> pd.DataFrame:
+        ''' '''
         all_results = []
+        
         for product, sub in self.topsellers.groupby("product"):
-            sub = sub.sort_values("asp").reset_index(drop=True)
-            X = sub[["asp", "days_sold"]].to_numpy(dtype=float)
-            y = sub["daily_rev"].to_numpy(dtype=float)
-            weights = self._make_weights(sub)
+            sub = sub.sort_values("price").reset_index(drop=True)
+            X = sub[["price", "days_sold"]].to_numpy(dtype=float)
+            y = sub["revenue_share_amt"].to_numpy(dtype=float)
+            
+            # Use DataEngineer's weight calculation
+            weights = self.engineer._make_weights(sub, self.tail_strength, self.tail_p)
+            
             out = {}
+            # modeling at 2.5%, 50%, 97.5%
             for q in [0.025, 0.5, 0.975]:
                 gam = GAMTuner(expectile=q).fit(X, y, sample_weight=weights)
                 y_pred = gam.predict(gam._scaler_X.transform(X))
                 out[f"revenue_pred_{q}"] = y_pred
             preds = pd.DataFrame(out, index=sub.index)
-            for q in [0.025, 0.5, 0.975]:
-                preds[f"pred_{q}"] = preds[f"revenue_pred_{q}"]
+
             results = pd.concat(
                 [
                     sub[
                         [
-                            "asp",
+                            "asin",
+                            "price",
                             "days_sold",
                             "product",
-                            "asin",
                             "shipped_units",
-                            "daily_units",
-                            "daily_rev",
+                            "revenue_share_amt"
                         ]
                     ].reset_index(drop=True),
                     preds.reset_index(drop=True),
@@ -218,12 +262,13 @@ class GAMModeler:
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
         rev_cols = [c for c in all_gam_results.columns if c.startswith("revenue_pred_")]
         all_gam_results["revenue_pred_avg"] = all_gam_results[rev_cols].mean(axis=1)
-        all_gam_results["revenue_actual"] = all_gam_results["daily_rev"]
+        all_gam_results["revenue_actual"] = all_gam_results["revenue_share_amt"]
         all_gam_results["asin"] = all_gam_results["asin"].astype(str)
+        
         return all_gam_results
 
 
-# --------------------------- Optimizer (plain) ---------------------------
+# ------------------------ Optimizer ------------------------
 class Optimizer:
     @staticmethod
     def run(all_gam_results: pd.DataFrame) -> dict:
@@ -244,7 +289,7 @@ class Optimizer:
         }
 
 
-# --------------------------- Pipeline ---------------------------
+# ------------------------- Pipeline -------------------------
 class PricingPipeline:
     
     def __init__(self, pricing_df, product_df, top_n=10):
@@ -259,9 +304,9 @@ class PricingPipeline:
 
     def assemble_dashboard_frames(self) -> dict:
         # 1) core tables
-        topsellers = self.engineer.prepare()                            # Top-N only
-        topselles_decayed = self.engineer.time_decay(topsellers)        # time decay
-        elasticity_df = ElasticityAnalyzer.compute(topselles_decayed)   # UI only
+        topsellers = self.engineer.prepare()                             # Top-N only
+        topselles_decayed = self.engineer._time_decay(topsellers)        # time decay
+        elasticity_df = ElasticityAnalyzer.compute(topselles_decayed)    # UI only
         all_gam_results = GAMModeler(topsellers, tail_strength=0.6, tail_p=1.0).run()
 
         # 2) optimizer + best tables
@@ -687,7 +732,7 @@ if __name__ == "__main__":
 
     # DataEngineer(pricing_df, product_df, top_n=10).prepare()
 
-    # GAMModeler(
-    #     DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+    GAMModeler(
+        DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
 
-    PricingPipeline(pricing_df, product_df, top_n=10).assemble_dashboard_frames()
+    # PricingPipeline(pricing_df, product_df, top_n=10).assemble_dashboard_frames()

@@ -24,12 +24,26 @@ from sklearn.metrics import mean_squared_error
 # Constants / Styling
 # =====================================================================
 
+
 class Style:
     OVERVIEW_ACCENT = {"color": "#DAA520"}
-    HOME_ACCENT = {"padding": "24px 0", "color": "#DAA520", "marginLeft": "50px", "marginRight": "50px"}
+    HOME_ACCENT = {
+        "padding": "24px 0",
+        "color": "#DAA520",
+        "marginLeft": "50px",
+        "marginRight": "50px",
+    }
     HOME_MUTED = {"color": "#5f6b7a", "marginLeft": "50px", "marginRight": "50px"}
-    HOME_SECTION_STYLE = {"padding": "14px 0", "marginLeft": "50px", "marginRight": "50px"}
-    HOME_CARD_STYLE = {"border": "1px solid #e9eef5", "borderRadius": "14px", "boxShadow": "0 2px 8px rgba(16,24,40,0.06)"}
+    HOME_SECTION_STYLE = {
+        "padding": "14px 0",
+        "marginLeft": "50px",
+        "marginRight": "50px",
+    }
+    HOME_CARD_STYLE = {
+        "border": "1px solid #e9eef5",
+        "borderRadius": "14px",
+        "boxShadow": "0 2px 8px rgba(16,24,40,0.06)",
+    }
 
     # Opps page spacing
     OPP_LEFT_INSET = "50px"
@@ -40,12 +54,13 @@ class Style:
 
 class Paths:
     BASE_DIR = os.path.dirname(os.path.realpath(__file__))  # .../pricing/dash
-    PROJECT_BASE = os.path.dirname(BASE_DIR)                # .../pricing
+    PROJECT_BASE = os.path.dirname(BASE_DIR)  # .../pricing
 
 
 # =====================================================================
 # Caching / Build
 # =====================================================================
+
 
 class Cache:
     @staticmethod
@@ -65,6 +80,7 @@ class Cache:
     def code_sig() -> str:
         try:
             import built_in_logic  # lazy import
+
             try:
                 src = inspect.getsource(built_in_logic)
                 return hashlib.sha1(src.encode()).hexdigest()
@@ -90,7 +106,9 @@ class Cache:
 
         pricing_path = os.path.join(base_dir, data_folder, pricing_file)
         product_path = os.path.join(base_dir, data_folder, product_file)
-        sig = Cache.files_sig([pricing_path, product_path], top_n=top_n, version=Cache.code_sig())
+        sig = Cache.files_sig(
+            [pricing_path, product_path], top_n=top_n, version=Cache.code_sig()
+        )
 
         force = os.environ.get("PRICING_FORCE_REBUILD") == "1"
         cache_fp = None if force else os.path.join(cache_dir, f"frames_{sig}.pkl")
@@ -100,7 +118,10 @@ class Cache:
                 return pickle.load(f)
 
         from built_in_logic import PricingPipeline  # lazy import
-        frames = PricingPipeline.from_csv_folder(base_dir, data_folder, pricing_file, product_file, top_n)
+
+        frames = PricingPipeline.from_csv_folder(
+            base_dir, data_folder, pricing_file, product_file, top_n
+        )
 
         if cache_fp:
             with open(cache_fp, "wb") as f:
@@ -112,6 +133,7 @@ class Cache:
 # Data engineering primitives
 # =====================================================================
 
+
 class DataEng:
     @staticmethod
     def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,12 +142,21 @@ class DataEng:
         return out
 
     @staticmethod
-    def compute_product_series(df: pd.DataFrame, tag_col: str = "tag", var_col: str = "variation") -> pd.Series:
+    def compute_product_series(
+        df: pd.DataFrame, tag_col: str = "tag", var_col: str = "variation"
+    ) -> pd.Series:
         return (df[tag_col].astype(str) + " " + df[var_col].astype(str)).str.upper()
 
     @staticmethod
-    def nearest_row_at_price(prod_df: pd.DataFrame, price: float, price_col: str = "asp") -> Optional[pd.Series]:
-        if prod_df is None or prod_df.empty or pd.isna(price) or price_col not in prod_df:
+    def nearest_row_at_price(
+        prod_df: pd.DataFrame, price: float, price_col: str = "asp"
+    ) -> Optional[pd.Series]:
+        if (
+            prod_df is None
+            or prod_df.empty
+            or pd.isna(price)
+            or price_col not in prod_df
+        ):
             return None
         try:
             idx = (prod_df[price_col] - float(price)).abs().idxmin()
@@ -134,7 +165,9 @@ class DataEng:
             return None
 
     @staticmethod
-    def pick_best_by_group(df: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
+    def pick_best_by_group(
+        df: pd.DataFrame, group_col: str, value_col: str
+    ) -> pd.DataFrame:
         idx = df.groupby(group_col)[value_col].idxmax()
         return df.loc[idx].reset_index(drop=True)
 
@@ -161,9 +194,12 @@ class DataEng:
             .reset_index(drop=True)
         )
         return lookup
+
+
 # =====================================================================
 # Tables / columns for Opportunities page
 # =====================================================================
+
 
 class OppsTable:
     @staticmethod
@@ -172,7 +208,9 @@ class OppsTable:
             return df
         out = df.copy()
         if "days_asp_valid" not in out.columns:
-            out["days_asp_valid"] = out["days_sold"] if "days_sold" in out.columns else 1
+            out["days_asp_valid"] = (
+                out["days_sold"] if "days_sold" in out.columns else 1
+            )
         return out
 
     @staticmethod
@@ -181,27 +219,63 @@ class OppsTable:
             return []
 
         cols_in_order = [
-            "asin", "product", "asp", "days_asp_valid", "days_sold",
-            "shipped_units", "daily_units", "revenue_actual", "daily_rev",
-            "revenue_pred_0.025", "revenue_pred_0.5", "revenue_pred_0.975",
-            "pred_0.025", "pred_0.5", "pred_0.975",
+            "asin",
+            "product",
+            "asp",
+            "days_asp_valid",
+            "days_sold",
+            "shipped_units",
+            "daily_units",
+            "revenue_actual",
+            "daily_rev",
+            "revenue_pred_0.025",
+            "revenue_pred_0.5",
+            "revenue_pred_0.975",
+            "pred_0.025",
+            "pred_0.5",
+            "pred_0.975",
         ]
         present = [c for c in cols_in_order if c in df.columns]
         df = df[present].copy()
 
-        integer_columns = {"days_asp_valid", "days_sold", "shipped_units", "daily_units"}
+        integer_columns = {
+            "days_asp_valid",
+            "days_sold",
+            "shipped_units",
+            "daily_units",
+        }
         money_columns = {
-            "asp", "revenue_actual", "daily_rev",
-            "revenue_pred_0.025", "revenue_pred_0.5", "revenue_pred_0.975",
-            "pred_0.025", "pred_0.5", "pred_0.975",
+            "asp",
+            "revenue_actual",
+            "daily_rev",
+            "revenue_pred_0.025",
+            "revenue_pred_0.5",
+            "revenue_pred_0.975",
+            "pred_0.025",
+            "pred_0.5",
+            "pred_0.975",
         }
 
         cols: List[Dict[str, Any]] = []
         for c in df.columns:
             if c in integer_columns:
-                cols.append({"name": c.replace("_", " ").title(), "id": c, "type": "numeric", "format": {"specifier": ",d"}})
+                cols.append(
+                    {
+                        "name": c.replace("_", " ").title(),
+                        "id": c,
+                        "type": "numeric",
+                        "format": {"specifier": ",d"},
+                    }
+                )
             elif c in money_columns:
-                cols.append({"name": c.replace("_", " ").title(), "id": c, "type": "numeric", "format": FormatTemplate.money(2)})
+                cols.append(
+                    {
+                        "name": c.replace("_", " ").title(),
+                        "id": c,
+                        "type": "numeric",
+                        "format": FormatTemplate.money(2),
+                    }
+                )
             else:
                 cols.append({"name": c.replace("_", " ").title(), "id": c})
         return cols
@@ -211,13 +285,22 @@ class OppsTable:
 # Home page small UI pieces
 # =====================================================================
 
+
 class HomeUI:
     @staticmethod
     def step_card(title: str, desc: str) -> dbc.Col:
-        P_STYLE = {"color": "#5f6b7a", "marginLeft": "10px", "marginRight": "10px", "marginTop": "10px"}
+        P_STYLE = {
+            "color": "#5f6b7a",
+            "marginLeft": "10px",
+            "marginRight": "10px",
+            "marginTop": "10px",
+        }
         return dbc.Col(
             dbc.Card(
-                dbc.CardBody([html.H5(title), html.P(desc, style=P_STYLE)], className="d-flex flex-column"),
+                dbc.CardBody(
+                    [html.H5(title), html.P(desc, style=P_STYLE)],
+                    className="d-flex flex-column",
+                ),
                 style=Style.HOME_CARD_STYLE,
                 className="h-100",
             ),
@@ -225,10 +308,18 @@ class HomeUI:
 
     @staticmethod
     def info_card(title: str, text: str) -> dbc.Col:
-        P_STYLE = {"color": "#5f6b7a", "marginLeft": "10px", "marginRight": "10px", "marginTop": "10px"}
+        P_STYLE = {
+            "color": "#5f6b7a",
+            "marginLeft": "10px",
+            "marginRight": "10px",
+            "marginTop": "10px",
+        }
         return dbc.Col(
             dbc.Card(
-                dbc.CardBody([html.H5(title), html.P(text, style=P_STYLE)], className="d-flex flex-column"),
+                dbc.CardBody(
+                    [html.H5(title), html.P(text, style=P_STYLE)],
+                    className="d-flex flex-column",
+                ),
                 style=Style.HOME_CARD_STYLE,
                 className="h-100",
             ),
@@ -242,13 +333,28 @@ class HomeUI:
     ) -> html.Div:
         return html.Div(
             [
-                html.Div([html.Span("made with ♥️ | "), html.Span(html.I(signature_handle))], style={"marginBottom": "4px"}),
-                html.A(link_text, href=link_href, style={"textDecoration": "none", "color": "#ac274f"}),
+                html.Div(
+                    [html.Span("made with ♥️ | "), html.Span(html.I(signature_handle))],
+                    style={"marginBottom": "4px"},
+                ),
+                html.A(
+                    link_text,
+                    href=link_href,
+                    style={"textDecoration": "none", "color": "#ac274f"},
+                ),
             ],
             style={
-                "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center",
-                "height": "80px", "fontSize": "0.8em", "color": "#ac274f", "backgroundColor": "#f3f3f3",
-                "borderRadius": "0", "width": "100%", "marginTop": "40px",
+                "display": "flex",
+                "flexDirection": "column",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "height": "80px",
+                "fontSize": "0.8em",
+                "color": "#ac274f",
+                "backgroundColor": "#f3f3f3",
+                "borderRadius": "0",
+                "width": "100%",
+                "marginTop": "40px",
             },
         )
 
@@ -257,40 +363,74 @@ class HomeUI:
 # Overview page UI & metrics
 # =====================================================================
 
+
 class OverviewUI:
     @staticmethod
-    def kpi_card(id_title: str, title: str, id_value: str, bg: str = "#f3f0f0", id_subtext: Optional[str] = None) -> dbc.Col:
+    def kpi_card(
+        id_title: str,
+        title: str,
+        id_value: str,
+        bg: str = "#f3f0f0",
+        id_subtext: Optional[str] = None,
+    ) -> dbc.Col:
         return dbc.Col(
             dbc.Card(
                 dbc.CardBody(
                     [
                         html.Div(
-                            id=id_title, className="kpi-title",
+                            id=id_title,
+                            className="kpi-title",
                             style={
-                                "color": "#121212", "textAlign": "center", "marginBottom": "10px", "marginTop": "10px",
-                                "whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis",
+                                "color": "#121212",
+                                "textAlign": "center",
+                                "marginBottom": "10px",
+                                "marginTop": "10px",
+                                "whiteSpace": "nowrap",
+                                "overflow": "hidden",
+                                "textOverflow": "ellipsis",
                             },
                         ),
                         html.Div(
                             style={
-                                "height": "4px", "width": "44px", "margin": "2px auto 8px", "borderRadius": "999px",
-                                "background": "linear-gradient(90deg,#DAA520,#F0C64C)", "opacity": 0.9,
+                                "height": "4px",
+                                "width": "44px",
+                                "margin": "2px auto 8px",
+                                "borderRadius": "999px",
+                                "background": "linear-gradient(90deg,#DAA520,#F0C64C)",
+                                "opacity": 0.9,
                             }
                         ),
                         html.H2(
-                            title, className="kpi-eyebrow",
-                            style={"color": "#121212", "textAlign": "center", "fontSize": "18px",
-                                   "letterSpacing": ".14em", "fontWeight": 700},
+                            title,
+                            className="kpi-eyebrow",
+                            style={
+                                "color": "#121212",
+                                "textAlign": "center",
+                                "fontSize": "18px",
+                                "letterSpacing": ".14em",
+                                "fontWeight": 700,
+                            },
                         ),
                         html.H1(
-                            id=id_value, className="kpi-value",
-                            style={"color": "#DAA520", "textAlign": "center", "fontSize": "44px", "fontWeight": 800},
+                            id=id_value,
+                            className="kpi-value",
+                            style={
+                                "color": "#DAA520",
+                                "textAlign": "center",
+                                "fontSize": "44px",
+                                "fontWeight": 800,
+                            },
                         ),
                         html.Div(
                             id=id_subtext if id_subtext else f"{id_value}-subtext",
                             className="kpi-subtext text-muted",
-                            style={"textAlign": "center", "fontSize": "15px", "marginTop": "6px",
-                                   "lineHeight": "1.25", "minHeight": "34px"},
+                            style={
+                                "textAlign": "center",
+                                "fontSize": "15px",
+                                "marginTop": "6px",
+                                "lineHeight": "1.25",
+                                "minHeight": "34px",
+                            },
                         ),
                     ],
                     className="d-flex flex-column justify-content-start",
@@ -298,7 +438,9 @@ class OverviewUI:
                 ),
                 className="h-100 shadow-sm border rounded-4",
                 style={
-                    "backgroundColor": bg, "padding": "12px 0", "borderColor": "rgba(17,24,39,0.08)",
+                    "backgroundColor": bg,
+                    "padding": "12px 0",
+                    "borderColor": "rgba(17,24,39,0.08)",
                     "boxShadow": "0 1px 2px rgba(16,24,40,.03), 0 4px 8px rgba(16,24,40,.04)",
                     "backgroundImage": "radial-gradient(160% 80% at 50% 0%, rgba(218,165,32,.03), transparent 45%)",
                 },
@@ -376,10 +518,14 @@ class Metrics:
         rmse_val = np.sqrt(mean_squared_error(y_true, y_pred))
         avg_rev = float(np.mean(y_true)) if y_true.size else np.nan
         pct_err = (rmse_val / avg_rev * 100.0) if avg_rev else np.nan
-        return f"±${rmse_val:,.0f}", (f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else "")
+        return f"±${rmse_val:,.0f}", (
+            f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else ""
+        )
 
     @staticmethod
-    def update_elasticity_kpi_by_product(product_name: str, elast_df: pd.DataFrame) -> Tuple[str, str]:
+    def update_elasticity_kpi_by_product(
+        product_name: str, elast_df: pd.DataFrame
+    ) -> Tuple[str, str]:
         try:
             row = elast_df.loc[elast_df["product"] == product_name]
             if row.empty or "ratio" not in row or "pct" not in row:
@@ -389,7 +535,11 @@ class Metrics:
             value_text = f"{ratio:,.2f}"
             pct_round = int(round(pct))
             top_share = max(1, 100 - pct_round)
-            subtext = ("Top ~{0}% most ELASTIC".format(top_share) if pct >= 50 else "Top ~{0}% most INELASTIC".format(top_share))
+            subtext = (
+                "Top ~{0}% most ELASTIC".format(top_share)
+                if pct >= 50
+                else "Top ~{0}% most INELASTIC".format(top_share)
+            )
             return value_text, subtext
         except Exception:
             return "—", ""
@@ -405,12 +555,15 @@ class Scenario:
         """
         cols = ["case", "price", "revenue", "units"]
         if prod_df is None or prod_df.empty or "asp" not in prod_df.columns:
-            return pd.DataFrame([{"case": "—", "price": "—", "revenue": "—", "units": "—"}], columns=cols)
+            return pd.DataFrame(
+                [{"case": "—", "price": "—", "revenue": "—", "units": "—"}],
+                columns=cols,
+            )
 
         rows: List[Dict[str, Any]] = []
         spec = [
             ("revenue_pred_0.025", "units_pred_0.025", "Conservative"),
-            ("revenue_pred_0.5",   "units_pred_0.5",   "Expected"),
+            ("revenue_pred_0.5", "units_pred_0.5", "Expected"),
             ("revenue_pred_0.975", "units_pred_0.975", "Optimistic"),
         ]
         for rev_col, units_col, label in spec:
@@ -431,13 +584,22 @@ class Scenario:
             rows.append(
                 {
                     "case": label,
-                    "price": f"${float(price):,.2f}" if np.isfinite(float(price)) else "—",
-                    "revenue": f"${float(rev):,.0f}" if np.isfinite(float(rev)) else "—",
-                    "units": f"{float(units):,.0f}" if np.isfinite(float(units)) else "—",
+                    "price": (
+                        f"${float(price):,.2f}" if np.isfinite(float(price)) else "—"
+                    ),
+                    "revenue": (
+                        f"${float(rev):,.0f}" if np.isfinite(float(rev)) else "—"
+                    ),
+                    "units": (
+                        f"{float(units):,.0f}" if np.isfinite(float(units)) else "—"
+                    ),
                 }
             )
         if not rows:
-            return pd.DataFrame([{"case": "—", "price": "—", "revenue": "—", "units": "—"}], columns=cols)
+            return pd.DataFrame(
+                [{"case": "—", "price": "—", "revenue": "—", "units": "—"}],
+                columns=cols,
+            )
         return pd.DataFrame(rows, columns=cols)
 
     @staticmethod
@@ -456,11 +618,17 @@ class Scenario:
             daily_units_best = (
                 float(best.get("pred_0.5", np.nan).iloc[0])
                 if "pred_0.5" in best
-                else float(best.get("units_pred_0.5", np.nan).iloc[0])
-                if "units_pred_0.5" in best
+                else (
+                    float(best.get("units_pred_0.5", np.nan).iloc[0])
+                    if "units_pred_0.5" in best
+                    else np.nan
+                )
+            )
+            daily_rev_best = (
+                float(best.get("revenue_pred_0.5", np.nan).iloc[0])
+                if "revenue_pred_0.5" in best
                 else np.nan
             )
-            daily_rev_best = float(best.get("revenue_pred_0.5", np.nan).iloc[0]) if "revenue_pred_0.5" in best else np.nan
 
             cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
             curr_price = float(cp.iloc[0]) if len(cp) else np.nan
@@ -473,17 +641,29 @@ class Scenario:
             if prod.empty:
                 daily_units_diff = np.nan
             else:
-                idx = ((prod["asp"] - curr_price).abs().idxmin()) if pd.notna(curr_price) else None
+                idx = (
+                    ((prod["asp"] - curr_price).abs().idxmin())
+                    if pd.notna(curr_price)
+                    else None
+                )
                 if idx is not None:
                     daily_units_curr = float(prod.loc[idx, "pred_0.5"])
                     daily_units_diff = daily_units_best - daily_units_curr
                 else:
                     daily_units_diff = np.nan
 
-            units_diff_annual = (daily_units_diff * annual_factor) if pd.notna(daily_units_diff) else np.nan
-            rev_best_annual = (daily_rev_best * annual_factor) if pd.notna(daily_rev_best) else np.nan
+            units_diff_annual = (
+                (daily_units_diff * annual_factor)
+                if pd.notna(daily_units_diff)
+                else np.nan
+            )
+            rev_best_annual = (
+                (daily_rev_best * annual_factor) if pd.notna(daily_rev_best) else np.nan
+            )
 
-            return Formatters.signed_units(units_diff_annual), Formatters.signed_money(rev_best_annual)
+            return Formatters.signed_units(units_diff_annual), Formatters.signed_money(
+                rev_best_annual
+            )
         except Exception:
             return "—", "—"
 
@@ -503,7 +683,11 @@ class Badges:
             except Exception:
                 return np.nan
 
-        p_low, p_mid, p_high = (_peak_asp("revenue_pred_0.025"), _peak_asp("revenue_pred_0.5"), _peak_asp("revenue_pred_0.975"))
+        p_low, p_mid, p_high = (
+            _peak_asp("revenue_pred_0.025"),
+            _peak_asp("revenue_pred_0.5"),
+            _peak_asp("revenue_pred_0.975"),
+        )
         if np.isnan([p_low, p_mid, p_high]).any() or (not p_mid):
             spread_score = 0.0
         else:
@@ -513,12 +697,18 @@ class Badges:
         elasticity_score = 0.0
         if "elasticity" in prod_df.columns and p_mid and not np.isnan(p_mid):
             try:
-                row = prod_df.loc[(prod_df["asp"] == p_mid) & prod_df["elasticity"].notna()]
+                row = prod_df.loc[
+                    (prod_df["asp"] == p_mid) & prod_df["elasticity"].notna()
+                ]
                 if not row.empty:
                     el_mid = float(row["elasticity"].iloc[0])
                     el_min = float(prod_df["elasticity"].min())
                     el_max = float(prod_df["elasticity"].max())
-                    elasticity_score = (1.0 - (el_mid - el_min) / (el_max - el_min)) if el_max > el_min else 1.0
+                    elasticity_score = (
+                        (1.0 - (el_mid - el_min) / (el_max - el_min))
+                        if el_max > el_min
+                        else 1.0
+                    )
             except Exception:
                 pass
 
@@ -538,7 +728,9 @@ class Badges:
         elif final_score >= 0.45:
             label, color = ("Medium", "warning")
 
-        return dbc.Badge(f"Confidence: {label}", color=color, pill=True, className="px-3 py-2")
+        return dbc.Badge(
+            f"Confidence: {label}", color=color, pill=True, className="px-3 py-2"
+        )
 
 
 class Notes:
@@ -547,7 +739,9 @@ class Notes:
         if prod_df is None or prod_df.empty:
             return ""
         n_points = int(len(prod_df))
-        if {"revenue_actual", "revenue_pred_0.025", "revenue_pred_0.975"}.issubset(prod_df.columns):
+        if {"revenue_actual", "revenue_pred_0.025", "revenue_pred_0.975"}.issubset(
+            prod_df.columns
+        ):
             within = (
                 (prod_df["revenue_actual"] >= prod_df["revenue_pred_0.025"])
                 & (prod_df["revenue_actual"] <= prod_df["revenue_pred_0.975"])
@@ -559,24 +753,34 @@ class Notes:
                 html.Div(
                     [
                         "Based on ",
-                        html.Span(f"{n_points}", style={"color": Style.OVERVIEW_ACCENT["color"], "fontWeight": 600}),
+                        html.Span(
+                            f"{n_points}",
+                            style={
+                                "color": Style.OVERVIEW_ACCENT["color"],
+                                "fontWeight": 600,
+                            },
+                        ),
                         " historical points; ",
                         html.Span(
                             f"{within*100:,.0f}%" if np.isfinite(within) else "—",
-                            style={"color": Style.OVERVIEW_ACCENT["color"], "fontWeight": 600},
+                            style={
+                                "color": Style.OVERVIEW_ACCENT["color"],
+                                "fontWeight": 600,
+                            },
                         ),
                         " of actual revenue outcomes fall within the shown range.",
                     ],
                     style={"textAlign": "center"},
                 ),
             ],
-            style={"marginTop": "8px"},
+            style={"marginTop": "28px"},
         )
 
 
 # =====================================================================
 # Overview callback micro-helpers (already class-based)
 # =====================================================================
+
 
 class OverviewHelpers:
     """Small, testable helpers used by the Overview callback."""
@@ -585,13 +789,23 @@ class OverviewHelpers:
     def empty_overview_payload(viz):
         empty_fig = viz.empty_fig("Select a product")
         return (
-            "", "—", "",
-            "", "—",
-            "", "—",
-            "", "—", "",
-            "", "—",
-            "", "—",
-            "", "—", "",
+            "",
+            "—",
+            "",
+            "",
+            "—",
+            "",
+            "—",
+            "",
+            "—",
+            "",
+            "",
+            "—",
+            "",
+            "—",
+            "",
+            "—",
+            "",
             empty_fig,
             [{"case": "—", "price": "—", "revenue": "—", "units": "—"}],
             "",
@@ -609,7 +823,9 @@ class OverviewHelpers:
     @staticmethod
     def display_name(asin: str, products_lookup: pd.DataFrame) -> str:
         try:
-            return products_lookup.loc[products_lookup["asin"] == asin, "product"].iloc[0]
+            return products_lookup.loc[products_lookup["asin"] == asin, "product"].iloc[
+                0
+            ]
         except Exception:
             return ""
 
@@ -624,7 +840,9 @@ class OverviewHelpers:
         return f"${float(row['asp'].iloc[0]):,.2f}" if len(row) else "—"
 
     @staticmethod
-    def elasticity_texts(product_name: str, elasticity_df: pd.DataFrame) -> Tuple[str, str]:
+    def elasticity_texts(
+        product_name: str, elasticity_df: pd.DataFrame
+    ) -> Tuple[str, str]:
         return Metrics.update_elasticity_kpi_by_product(product_name, elasticity_df)
 
     @staticmethod
@@ -632,8 +850,10 @@ class OverviewHelpers:
         return all_gam_results[all_gam_results["asin"] == asin]
 
     @staticmethod
-    def dual_graph(viz, filt_df: pd.DataFrame):
-        return viz.gam_results(filt_df) if len(filt_df) else viz.empty_fig("No model data")
+    def pred_graph(viz, filt_df: pd.DataFrame):
+        return (
+            viz.gam_results(filt_df) if len(filt_df) else viz.empty_fig("No model data")
+        )
 
     @staticmethod
     def scenario_records(filt_df: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -642,9 +862,15 @@ class OverviewHelpers:
 
     @staticmethod
     def annualized_kpis(
-        asin: str, best50_df: pd.DataFrame, curr_price_df: pd.DataFrame, all_gam_results: pd.DataFrame, annual_factor: float
+        asin: str,
+        best50_df: pd.DataFrame,
+        curr_price_df: pd.DataFrame,
+        all_gam_results: pd.DataFrame,
+        annual_factor: float,
     ) -> Tuple[str, str]:
-        return Scenario.annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam_results, annual_factor)
+        return Scenario.annualized_kpis_signed(
+            asin, best50_df, curr_price_df, all_gam_results, annual_factor
+        )
 
     @staticmethod
     def fit_and_coverage(filt_df: pd.DataFrame) -> Tuple[str, str, Any]:
@@ -657,42 +883,103 @@ class OverviewHelpers:
 # Backwards-compatibility wrappers (keep existing imports working)
 # =====================================================================
 
+
 # cache wrappers
-def build_frames_with_cache(*args, **kwargs): return Cache.build_frames_with_cache(*args, **kwargs)
+def build_frames_with_cache(*args, **kwargs):
+    return Cache.build_frames_with_cache(*args, **kwargs)
+
 
 # data eng wrappers
-def clean_cols(df): return DataEng.clean_cols(df)
-def compute_product_series(df, tag_col="tag", var_col="variation"): return DataEng.compute_product_series(df, tag_col, var_col)
-def nearest_row_at_price(prod_df, price, price_col="asp"): return DataEng.nearest_row_at_price(prod_df, price, price_col)
-def pick_best_by_group(df, group_col, value_col): return DataEng.pick_best_by_group(df, group_col, value_col)
+def clean_cols(df):
+    return DataEng.clean_cols(df)
+
+
+def compute_product_series(df, tag_col="tag", var_col="variation"):
+    return DataEng.compute_product_series(df, tag_col, var_col)
+
+
+def nearest_row_at_price(prod_df, price, price_col="asp"):
+    return DataEng.nearest_row_at_price(prod_df, price, price_col)
+
+
+def pick_best_by_group(df, group_col, value_col):
+    return DataEng.pick_best_by_group(df, group_col, value_col)
+
 
 # opps wrappers
-def ensure_days_valid_column(df): return OppsTable.ensure_days_valid_column(df)
-def build_opp_table_columns(df): return OppsTable.build_columns(df)
+def ensure_days_valid_column(df):
+    return OppsTable.ensure_days_valid_column(df)
+
+
+def build_opp_table_columns(df):
+    return OppsTable.build_columns(df)
+
 
 # home ui wrappers
-def home_step_card(title, desc): return HomeUI.step_card(title, desc)
-def info_card(title, text): return HomeUI.info_card(title, text)
-def build_footer_two_lines(signature_handle="@aqxiao", link_text="github.com/angie-xiao", link_href="https://github.com/angie-xiao"): 
+def home_step_card(title, desc):
+    return HomeUI.step_card(title, desc)
+
+
+def info_card(title, text):
+    return HomeUI.info_card(title, text)
+
+
+def build_footer_two_lines(
+    signature_handle="@aqxiao",
+    link_text="github.com/angie-xiao",
+    link_href="https://github.com/angie-xiao",
+):
     return HomeUI.footer_two_lines(signature_handle, link_text, link_href)
 
+
 # overview ui wrappers
-def kpi_card(id_title, title, id_value, bg="#f3f0f0", id_subtext=None): 
+def kpi_card(id_title, title, id_value, bg="#f3f0f0", id_subtext=None):
     return OverviewUI.kpi_card(id_title, title, id_value, bg, id_subtext)
 
+
 # formatter wrappers
-def fmt_money(x): return Formatters.money(x)
-def fmt_units(x): return Formatters.units(x)
-def fmt_signed_units(x): return Formatters.signed_units(x)
-def fmt_signed_money(x): return Formatters.signed_money(x)
-def fmt_date(dt): return Formatters.date(dt)
+def fmt_money(x):
+    return Formatters.money(x)
+
+
+def fmt_units(x):
+    return Formatters.units(x)
+
+
+def fmt_signed_units(x):
+    return Formatters.signed_units(x)
+
+
+def fmt_signed_money(x):
+    return Formatters.signed_money(x)
+
+
+def fmt_date(dt):
+    return Formatters.date(dt)
+
 
 # metrics / scenario / notes wrappers
-def model_fit_units(prod_df): return Metrics.model_fit_units(prod_df)
-def update_elasticity_kpi_by_product(product_name, elast_df): 
+def model_fit_units(prod_df):
+    return Metrics.model_fit_units(prod_df)
+
+
+def update_elasticity_kpi_by_product(product_name, elast_df):
     return Metrics.update_elasticity_kpi_by_product(product_name, elast_df)
-def scenario_table(prod_df): return Scenario.table(prod_df)
-def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_factor): 
-    return Scenario.annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_factor)
-def robustness_badge(prod_df): return Badges.robustness(prod_df)
-def coverage_note(prod_df): return Notes.coverage(prod_df)
+
+
+def scenario_table(prod_df):
+    return Scenario.table(prod_df)
+
+
+def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_factor):
+    return Scenario.annualized_kpis_signed(
+        asin, best50_df, curr_price_df, all_gam, annual_factor
+    )
+
+
+def robustness_badge(prod_df):
+    return Badges.robustness(prod_df)
+
+
+def coverage_note(prod_df):
+    return Notes.coverage(prod_df)

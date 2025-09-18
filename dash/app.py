@@ -10,7 +10,7 @@ from built_in_logic import viz as Viz
 from navbar import get_navbar
 from home import Homepage
 import overview, opps, faq
-from helpers import (Paths, Cache, DataEng)
+from helpers import Paths, Cache, DataEng
 
 import warnings
 
@@ -49,7 +49,9 @@ dropdown_lookup = (
 if "revenue_pred_0.5" in all_gam_results.columns:
     idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
     best50_optimal_pricing = (
-        all_gam_results.loc[idx, ["product", "asp", "revenue_pred_0.5", "units_pred_0.5"]]
+        all_gam_results.loc[
+            idx, ["product", "asp", "revenue_pred_0.5", "units_pred_0.5"]
+        ]
         .reset_index(drop=True)
         .merge(dropdown_lookup, on="product", how="left")[
             ["product", "asin", "asp", "revenue_pred_0.5", "units_pred_0.5"]

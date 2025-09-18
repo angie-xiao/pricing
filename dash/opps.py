@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from helpers import OppsTable,Style   # import locally
+from helpers import OppsTable, Style  # import locally
 
 OPP_LEFT_INSET = Style.OPP_LEFT_INSET
 OPP_GAP_H1_TO_TABLE = Style.OPP_GAP_H1_TO_TABLE

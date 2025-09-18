@@ -8,7 +8,8 @@ from helpers import *
 HOME_ACCENT = Style.HOME_ACCENT
 HOME_MUTED = Style.HOME_MUTED
 HOME_SECTION_STYLE = Style.HOME_SECTION_STYLE
-HOME_CARD_STYLE = Style.HOME_CARD_STYLE 
+HOME_CARD_STYLE = Style.HOME_CARD_STYLE
+
 
 # -----------------------
 # Components (Explainers)

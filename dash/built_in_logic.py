@@ -36,7 +36,7 @@ class DataEngineer:
     ) -> pd.DataFrame:
         out = df.copy()
         start_ts = pd.to_datetime(start).value // 10**9
-        end_ts   = pd.to_datetime(end).value   // 10**9
+        end_ts = pd.to_datetime(end).value // 10**9
 
         rng = np.random.default_rng(seed)
         # generate for all rows to fully override
@@ -44,38 +44,93 @@ class DataEngineer:
         out[col] = pd.to_datetime(rand_ts, unit="s")
         return out
 
-
     def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
         """
         Calculates an exponential decay weight based on time difference.
         Assumes order_date is already synthesized/valid.
+
+        param
+            prepared_df (assuming that DataEngineer.prepare() has been run through)
+            decay_rate (default: -0.01)
+
+        return
+            df
         """
         df = prepared_df.copy()
         df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
 
-        today_ref = pd.Timestamp('today')
-        df['days_apart'] = (today_ref - df['order_date']).dt.days
-        df['time_decay_weight'] = np.exp(decay_rate * df['days_apart'].fillna(0))
+        today_ref = pd.Timestamp("today")
+        df["days_apart"] = (today_ref - df["order_date"]).dt.days
+        df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
         return df
 
+    def _grid_search_weights(self, sub: pd.DataFrame, param_grid: dict = None) -> tuple:
+        """
+        Grid search to find optimal weight parameters by minimizing RMSE
+        between actual and predicted values.
 
-    def _make_weights(self, sub: pd.DataFrame, tail_strength: float = 1.0, tail_p: float = 0.5) -> np.ndarray:
+        params:
+            sub: DataFrame containing the data
+            param_grid: Dictionary of parameters to search. If None, uses default grid
 
+        returns:
+            tuple: (best_tail_strength, best_tail_p, best_rmse)
+        """
+        if param_grid is None:
+            param_grid = {
+                "tail_strength": np.linspace(
+                    0.0, 1.0, 5
+                ),  # [0.0, 0.25, 0.5, 0.75, 1.0]
+                "tail_p": np.linspace(0.1, 2.0, 5),  # [0.1, 0.575, 1.05, 1.525, 2.0]
+            }
+
+        best_rmse = float("inf")
+        best_params = None
+
+        # Get actual values
+        y_true = sub["shipped_units"].values
+
+        for tail_strength in param_grid["tail_strength"]:
+            for tail_p in param_grid["tail_p"]:
+                # Generate weights with current parameters
+                weights = self._make_weights(sub, tail_strength, tail_p)
+
+                # Fit a simple model (e.g. weighted average) to predict units
+                if len(weights) > 0:
+                    y_pred = np.average(y_true, weights=weights)
+                    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+                    if rmse < best_rmse:
+                        best_rmse = rmse
+                        best_params = (tail_strength, tail_p)
+
+        if best_params is None:
+            return (0.3, 0.5, None)  # default values if search fails
+
+        return (*best_params, best_rmse)
+
+    def _make_weights(
+        self, sub: pd.DataFrame, tail_strength: float = None, tail_p: float = None
+    ) -> np.ndarray:
         """
         Create weights based on time decay and price outliers
-        
+
         params:
-            sub:  DataFrame containing the data
-            tail_strength:  controls outlier weighting intensity (0 = no extra weight, 1 = aggressive)
-            tail_p:  controls outlier weight distribution (1: linear, >1: concave, <1: convex)
-                
-        return
-            np array
+            sub: DataFrame containing the data
+            tail_strength: controls outlier weighting intensity (0 = no extra weight, 1 = aggressive)
+            tail_p: controls outlier weight distribution (1: linear, >1: concave, <1: convex)
+
+        returns:
+            numpy array of weights
         """
-        # # Time decay weights
+        # If parameters not provided, do grid search
+        if tail_strength is None or tail_p is None:
+            tail_strength, tail_p, _ = self._grid_search_weights(sub)
+
+        # Time decay weights
         decayed_df = self._time_decay(sub)
-        w = decayed_df['time_decay_weight'].values
-        
+        w = decayed_df["time_decay_weight"].values
+
         # Price outlier adjustments
         if tail_strength > 0:
             asp = sub["price"].values.astype(float)
@@ -83,45 +138,49 @@ class DataEngineer:
             iqr = q75 - q25 if q75 > q25 else 1.0
             rel_dist = np.abs(asp - np.median(asp)) / iqr
             w *= 1.0 + tail_strength * np.minimum(rel_dist, 2.0) ** tail_p
-        
+
         # Normalize weights
         w = w / np.mean(w) if w.size > 0 else w
-        
+
         return w
 
-
     def _days_at_price(self, df) -> pd.DataFrame:
-        ''' 
+        """
         add a column for the number of days where an ASP was sold at
-        
+
         param
             df
-            
+
         return
-            df [with a new "number of days for a price" column]        
-        '''
-        
-        days_at_asp = df[['asin', 'order_date', 'price']].groupby(['asin','price']).nunique().reset_index()
-        days_at_asp.rename(columns={'order_date':'days_sold'},inplace=True)
-        
-        res = df.merge(days_at_asp, left_on=['asin','price'], right_on=['asin','price'])
-        
+            df [with a new "number of days for a price" column]
+        """
+
+        days_at_asp = (
+            df[["asin", "order_date", "price"]]
+            .groupby(["asin", "price"])
+            .nunique()
+            .reset_index()
+        )
+        days_at_asp.rename(columns={"order_date": "days_sold"}, inplace=True)
+
+        res = df.merge(
+            days_at_asp, left_on=["asin", "price"], right_on=["asin", "price"]
+        )
+
         return res
-    
 
     def _label_encoder(self, df) -> pd.DataFrame:
-        ''' label encoding categorical variable '''
+        """label encoding categorical variable"""
         le = LabelEncoder()
         res = df.copy()
-        
-        res['event_encoded'] = le.fit_transform(res['event_name'])
-        res['product_encoded'] = le.fit_transform(res['product'])
+
+        res["event_encoded"] = le.fit_transform(res["event_name"])
+        res["product_encoded"] = le.fit_transform(res["product"])
 
         return res
 
-
     def prepare(self) -> pd.DataFrame:
-        ''' '''
+        """ """
         # normalize columns
         self.pricing_df = DataEng.clean_cols(self.pricing_df)
         self.product_df = DataEng.clean_cols(self.product_df)
@@ -141,13 +200,13 @@ class DataEngineer:
 
         # ---- GLOBAL OVERRIDE: synthesize order_date over a chosen window ----
         # If you truly want to override even partial data, just always run this line:
-        df = self._synthesize_order_dates(
-            df,
-            start="2023-09-17",
-            end="2025-09-17",
-            seed=42,
-            col="order_date",
-        )
+        # df = self._synthesize_order_dates(
+        #     df,
+        #     start="2023-09-17",
+        #     end="2025-09-17",
+        #     seed=42,
+        #     col="order_date",
+        # )
         # --------------------------------------------------------------------
 
         # persist back so meta/date-range uses the same synthetic dates
@@ -157,28 +216,45 @@ class DataEngineer:
         df_days_asp = self._days_at_price(df)
 
         # manually calculate rev
-        df_days_asp['revenue'] = df_days_asp['shipped_units'] * df_days_asp['price']
+        df_days_asp["revenue"] = df_days_asp["shipped_units"] * df_days_asp["price"]
 
         # group by asin - event - date
         df_agg = (
-            df_days_asp[['asin', 'event_name', 'order_date', 'shipped_units', 'revenue']]
-            .groupby(['asin', 'event_name', 'order_date'])[['revenue','shipped_units']]
+            df_days_asp[
+                ["asin", "event_name", "order_date", "shipped_units", "revenue"]
+            ]
+            .groupby(["asin", "event_name", "order_date"])[["revenue", "shipped_units"]]
             .sum()
             .reset_index()
         )
-        df_agg['price'] = df_agg['revenue'] / df_agg['shipped_units']
-        df_agg['price'] = round(df_agg['price'],2)
+        df_agg["price"] = df_agg["revenue"] / df_agg["shipped_units"]
+        df_agg["price"] = round(df_agg["price"], 2)
 
         df_agg_event = df_agg.merge(
-            df_days_asp[['asin', 'product', 'order_date', 'deal_discount_percent', 'current_price', 'days_sold']],
-            on=['asin', 'order_date'], how='left'
+            df_days_asp[
+                [
+                    "asin",
+                    "product",
+                    "order_date",
+                    "deal_discount_percent",
+                    "current_price",
+                    "days_sold",
+                ]
+            ],
+            on=["asin", "order_date"],
+            how="left",
         )
 
         # calculate daily shipped units &
-        df_agg_event['daily_rev'] = df_agg_event['revenue'] / df_agg_event['days_sold']
-        df_agg_event['daily_units'] = df_agg_event['shipped_units'] / df_agg_event['days_sold']
-        df_agg_event.drop(columns=['revenue','shipped_units'], inplace=True)
-        df_agg_event.rename(columns={'daily_rev':'revenue', 'daily_units':'shipped_units'}, inplace=True)
+        df_agg_event["daily_rev"] = df_agg_event["revenue"] / df_agg_event["days_sold"]
+        df_agg_event["daily_units"] = (
+            df_agg_event["shipped_units"] / df_agg_event["days_sold"]
+        )
+        df_agg_event.drop(columns=["revenue", "shipped_units"], inplace=True)
+        df_agg_event.rename(
+            columns={"daily_rev": "revenue", "daily_units": "shipped_units"},
+            inplace=True,
+        )
 
         # Top-N products by total revenue
         top_n_products = (
@@ -195,7 +271,7 @@ class DataEngineer:
 
         # Normalize dtype for downstream joins
         filtered["asin"] = filtered["asin"].astype(str)
-        filtered.rename(columns={'revenue':'revenue_share_amt'}, inplace=True)
+        filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)
 
         # encode categorical vars after filtering
         res = self._label_encoder(filtered)
@@ -244,15 +320,16 @@ class GAMTuner:
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
         scaler_X = StandardScaler()
         Xs = scaler_X.fit_transform(X.astype(float))
-        
+
         # Adjust terms to match the 5 input features
-        terms = (s(0, spline_order=3) +  # price
-                s(1, spline_order=2) +   # deal_discount_percent
-                s(2, spline_order=2) +   # event_encoded
-                s(3, spline_order=2) +   # product_encoded
-                s(4, spline_order=2)     # wt
-        )    
-        
+        terms = (
+            s(0, spline_order=3)  # price
+            + s(1, spline_order=2)  # deal_discount_percent
+            + s(2, spline_order=2)  # event_encoded
+            + s(3, spline_order=2)  # product_encoded
+            + s(4, spline_order=2)  # wt
+        )
+
         gam = ExpectileGAM(terms, expectile=self.expectile)
         try:
             gam = gam.gridsearch(
@@ -275,8 +352,10 @@ class GAMModeler:
     def __init__(
         self,
         topsellers: pd.DataFrame,
-        tail_strength: float = 0.3,
-        tail_p: float = 0.5,
+        tail_strength: float = None,
+        tail_p: float = None,
+        use_grid_search: bool = False,
+        custom_grid: dict = None,
     ):
         """
         Parameters
@@ -285,14 +364,20 @@ class GAMModeler:
             Source data (Top-N products) with required columns:
             ['product','asin','price','deal_discount_percent',
              'event_encoded','product_encoded','shipped_units','days_sold', ...]
-        tail_strength : float
+        tail_strength : float, optional
             Outlier weighting intensity (0 = none, 1 = aggressive)
-        tail_p : float
+        tail_p : float, optional
             Outlier weight distribution (1 = linear, >1 concave, <1 convex)
+        use_grid_search : bool, optional
+            Whether to use grid search to find optimal parameters
+        custom_grid : dict, optional
+            Custom parameter grid for grid search
         """
         self.topsellers = topsellers
-        self.tail_strength = float(tail_strength)
-        self.tail_p = float(tail_p)
+        self.tail_strength = tail_strength
+        self.tail_p = tail_p
+        self.use_grid_search = use_grid_search
+        self.custom_grid = custom_grid
         self.engineer = DataEngineer(None, None)
 
     # --------- helpers ---------
@@ -317,6 +402,16 @@ class GAMModeler:
         sub = sub.sort_values("price").reset_index(drop=True)
 
         # add weights once (time decay + outlier boost)
+        if self.use_grid_search:
+            if self.custom_grid:
+                self.tail_strength, self.tail_p, _ = self.engineer._grid_search_weights(
+                    sub, param_grid=self.custom_grid
+                )
+            else:
+                self.tail_strength, self.tail_p, _ = self.engineer._grid_search_weights(
+                    sub
+                )
+
         w = self.engineer._make_weights(sub, self.tail_strength, self.tail_p)
         sub = pd.concat([sub, pd.Series(w, name="wt")], axis=1)
 
@@ -327,17 +422,25 @@ class GAMModeler:
             return None, None, None, None
 
         # design / target / weights
-        X = sub_clean[["price", "deal_discount_percent", "event_encoded", "product_encoded", "wt"]].to_numpy(dtype=float)
+        X = sub_clean[
+            ["price", "deal_discount_percent", "event_encoded", "product_encoded", "wt"]
+        ].to_numpy(dtype=float)
         y = sub_clean["shipped_units"].to_numpy(dtype=float)
         w = sub_clean["wt"].to_numpy(dtype=float)
 
         # guard against non-finite
-        if not np.isfinite(X).all() or not np.isfinite(y).all() or not np.isfinite(w).all():
+        if (
+            not np.isfinite(X).all()
+            or not np.isfinite(y).all()
+            or not np.isfinite(w).all()
+        ):
             return None, None, None, None
 
         return sub_clean, X, y, w
 
-    def _fit_expectiles(self, X: np.ndarray, y: np.ndarray, w: np.ndarray, qs=(0.025, 0.5, 0.975)) -> dict:
+    def _fit_expectiles(
+        self, X: np.ndarray, y: np.ndarray, w: np.ndarray, qs=(0.025, 0.5, 0.975)
+    ) -> dict:
         """
         Fit Expectile GAM for each quantile in qs and return predictions dict
         keyed as {'units_pred_{q}': yhat, 'revenue_pred_{q}': yhat * price}.
@@ -350,7 +453,9 @@ class GAMModeler:
             out[f"units_pred_{q}"] = yhat
         return out
 
-    def _assemble_group_results(self, sub_clean: pd.DataFrame, preds: dict) -> pd.DataFrame:
+    def _assemble_group_results(
+        self, sub_clean: pd.DataFrame, preds: dict
+    ) -> pd.DataFrame:
         """
         Merge subgroup fields + predictions, and derive revenue preds from units * price.
         """
@@ -363,14 +468,24 @@ class GAMModeler:
                 res_pred[f"revenue_pred_{q}"] = preds[k] * sub_clean["price"].values
 
         keep_cols = [
-            "order_date", "wt", "asin", "price", "days_sold",
-            "product", "event_name", "deal_discount_percent",
-            "shipped_units", "revenue_share_amt",
+            "order_date",
+            "wt",
+            "asin",
+            "price",
+            "days_sold",
+            "product",
+            "event_name",
+            "deal_discount_percent",
+            "shipped_units",
+            "revenue_share_amt",
         ]
         keep_cols = [c for c in keep_cols if c in sub_clean.columns]
 
         return pd.concat(
-            [sub_clean[keep_cols].reset_index(drop=True), res_pred.reset_index(drop=True)],
+            [
+                sub_clean[keep_cols].reset_index(drop=True),
+                res_pred.reset_index(drop=True),
+            ],
             axis=1,
         )
 
@@ -447,30 +562,39 @@ class Optimizer:
             "best_avg": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_avg"
             ),
-            
             # Finds price that maximizes median predicted units
             "best50": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.5"
             ),
-            
             # Finds price that maximizes optimistic predicted units
             "best975": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.975"
             ),
-            
             # Finds price that maximizes conservative predicted units
             "best25": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.025"
             ),
-            
             "all_gam_results": all_gam_results,
         }
 
 
-
 class PricingPipeline:
-    def __init__(self, pricing_df, product_df, top_n=10):
+    def __init__(
+        self,
+        pricing_df,
+        product_df,
+        top_n=10,
+        use_grid_search=True,
+        custom_grid=(
+            {
+                "tail_strength": [0.1, 0.3, 0.5, 0.7, 0.9],
+                "tail_p": [0.2, 0.6, 1.0, 1.4, 1.8],
+            }
+        ),
+    ):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
+        self.use_grid_search = use_grid_search
+        self.custom_grid = custom_grid
 
     @classmethod
     def from_csv_folder(
@@ -481,8 +605,7 @@ class PricingPipeline:
         product_file="products.csv",
         top_n=10,
     ):
-        import os
-        import pandas as pd
+
         pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
         product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
         return cls(pricing_df, product_df, top_n).assemble_dashboard_frames()
@@ -502,7 +625,17 @@ class PricingPipeline:
         topsellers = self.engineer.prepare()  # Top-N only
         topsellers_decayed = self.engineer._time_decay(topsellers)  # time decay
         elasticity_df = ElasticityAnalyzer.compute(topsellers_decayed)  # UI only
-        all_gam_results = GAMModeler(topsellers, tail_strength=0.6, tail_p=1.0).run()
+
+        # Initialize GAMModeler with grid search parameters
+        modeler = GAMModeler(
+            topsellers,
+            use_grid_search=self.use_grid_search,
+            custom_grid=self.custom_grid,
+        )
+
+        # Run the model
+        all_gam_results = modeler.run()
+
         return topsellers, elasticity_df, all_gam_results
 
     def _compute_best_tables(self, all_gam_results, topsellers):
@@ -516,9 +649,13 @@ class PricingPipeline:
 
         if "revenue_actual" not in best_avg.columns:
             if {"price", "shipped_units"}.issubset(best_avg.columns):
-                best_avg["revenue_actual"] = best_avg["price"] * best_avg["shipped_units"]
+                best_avg["revenue_actual"] = (
+                    best_avg["price"] * best_avg["shipped_units"]
+                )
             else:
-                ra = all_gam_results[["product", "price", "revenue_actual"]].drop_duplicates()
+                ra = all_gam_results[
+                    ["product", "price", "revenue_actual"]
+                ].drop_duplicates()
                 best_avg = best_avg.merge(ra, on=["product", "price"], how="left")
 
         return best_avg
@@ -527,8 +664,12 @@ class PricingPipeline:
         """Compute data range and annualization factor using the pipeline’s pricing_df."""
         df_dates = self.engineer.pricing_df.copy()
         df_dates["order_date"] = pd.to_datetime(df_dates["order_date"], errors="coerce")
-        data_start = pd.to_datetime(df_dates["order_date"].min()) if len(df_dates) else pd.NaT
-        data_end = pd.to_datetime(df_dates["order_date"].max()) if len(df_dates) else pd.NaT
+        data_start = (
+            pd.to_datetime(df_dates["order_date"].min()) if len(df_dates) else pd.NaT
+        )
+        data_end = (
+            pd.to_datetime(df_dates["order_date"].max()) if len(df_dates) else pd.NaT
+        )
         days_covered = (
             int((data_end - data_start).days) + 1
             if pd.notna(data_start) and pd.notna(data_end)
@@ -554,10 +695,10 @@ class PricingPipeline:
                         "product",
                         "asin",
                         "price",
-                        "asp",               # used by viz/helpers
-                        "units_pred_0.5",    # P50 units
+                        "asp",  # used by viz/helpers
+                        "units_pred_0.5",  # P50 units
                         "revenue_pred_0.5",  # P50 revenue
-                        "pred_0.5",          # alias (units)
+                        "pred_0.5",  # alias (units)
                     ],
                 ]
                 .drop_duplicates(subset=["product"])
@@ -577,7 +718,9 @@ class PricingPipeline:
             )
         return best50
 
-    def _build_opportunity_summary(self, best50, all_gam_results, curr_price_df, annual_factor):
+    def _build_opportunity_summary(
+        self, best50, all_gam_results, curr_price_df, annual_factor
+    ):
         """Compute per-product upside at recommended vs current, plus annualization."""
         rows = []
         for _, r in best50.iterrows():
@@ -590,7 +733,11 @@ class PricingPipeline:
             prod_curve = all_gam_results[(all_gam_results["product"] == p)]
             cp_ser = curr_price_df.loc[curr_price_df["asin"] == pk, "current_price"]
             curr_price = float(cp_ser.iloc[0]) if len(cp_ser) else np.nan
-            curr_row = DataEng.nearest_row_at_price(prod_curve, curr_price) if pd.notna(curr_price) else None
+            curr_row = (
+                DataEng.nearest_row_at_price(prod_curve, curr_price)
+                if pd.notna(curr_price)
+                else None
+            )
 
             if curr_row is not None:
                 units_curr = float(curr_row.get("units_pred_0.5", np.nan))
@@ -598,8 +745,16 @@ class PricingPipeline:
             else:
                 units_curr, rev_curr = np.nan, np.nan
 
-            du = (units_best - units_curr) if (pd.notna(units_best) and pd.notna(units_curr)) else np.nan
-            dr = (rev_best - rev_curr) if (pd.notna(rev_best) and pd.notna(rev_curr)) else np.nan
+            du = (
+                (units_best - units_curr)
+                if (pd.notna(units_best) and pd.notna(units_curr))
+                else np.nan
+            )
+            dr = (
+                (rev_best - rev_curr)
+                if (pd.notna(rev_best) and pd.notna(rev_curr))
+                else np.nan
+            )
 
             rows.append(
                 {
@@ -613,9 +768,15 @@ class PricingPipeline:
                     "revenue_pred_curr": rev_curr,
                     "delta_units": du,
                     "delta_revenue": dr,
-                    "delta_units_annual": (du * annual_factor if pd.notna(du) else np.nan),
-                    "delta_revenue_annual": (dr * annual_factor if pd.notna(dr) else np.nan),
-                    "revenue_best_annual": (rev_best * annual_factor if pd.notna(rev_best) else np.nan),
+                    "delta_units_annual": (
+                        du * annual_factor if pd.notna(du) else np.nan
+                    ),
+                    "delta_revenue_annual": (
+                        dr * annual_factor if pd.notna(dr) else np.nan
+                    ),
+                    "revenue_best_annual": (
+                        rev_best * annual_factor if pd.notna(rev_best) else np.nan
+                    ),
                 }
             )
         return pd.DataFrame(rows)
@@ -640,7 +801,9 @@ class PricingPipeline:
         """Final dictionary payload used by the app."""
         return {
             "price_quant_df": (
-                topsellers.groupby(["price", "product"])["shipped_units"].sum().reset_index()
+                topsellers.groupby(["price", "product"])["shipped_units"]
+                .sum()
+                .reset_index()
             ),
             "best_avg": best_avg,
             "all_gam_results": all_gam_results,
@@ -673,10 +836,14 @@ class PricingPipeline:
         best50 = self._build_best50(all_gam_results)
 
         # 6) opportunities
-        opps_summary = self._build_opportunity_summary(best50, all_gam_results, curr_price_df, annual_factor)
+        opps_summary = self._build_opportunity_summary(
+            best50, all_gam_results, curr_price_df, annual_factor
+        )
 
         # 7) normalize key dtype across frames
-        self._normalize_key_types(best_avg, all_gam_results, curr_price_df, topsellers, opps_summary, best50)
+        self._normalize_key_types(
+            best_avg, all_gam_results, curr_price_df, topsellers, opps_summary, best50
+        )
 
         # 8) pack and return
         return self._pack_frames(
@@ -708,7 +875,6 @@ class viz:
         load_figure_template(templates)
         self.template = template
 
-
     def gam_results(self, all_gam_results: pd.DataFrame):
         """
         Single y-axis revenue chart with:
@@ -721,8 +887,12 @@ class viz:
             return self.empty_fig("No model data")
 
         need_cols = [
-            "product", "asp", "revenue_actual",
-            "revenue_pred_0.025", "revenue_pred_0.5", "revenue_pred_0.975",
+            "product",
+            "asp",
+            "revenue_actual",
+            "revenue_pred_0.025",
+            "revenue_pred_0.5",
+            "revenue_pred_0.975",
         ]
         for c in need_cols:
             if c not in all_gam_results.columns:
@@ -747,7 +917,7 @@ class viz:
                     x=g["asp"],
                     y=g["revenue_actual"],
                     mode="markers",
-                    opacity=0.5,  
+                    opacity=0.5,
                     name=f"{group_name} • Actual Revenue",
                     marker=dict(color=color_dct[group_name], size=8, symbol="circle"),
                     legendgroup=group_name,
@@ -760,7 +930,8 @@ class viz:
                 go.Scatter(
                     name=f"{group_name} (Rev band)",
                     x=g["asp"].tolist() + g["asp"].tolist()[::-1],
-                    y=g["revenue_pred_0.975"].tolist() + g["revenue_pred_0.025"].tolist()[::-1],
+                    y=g["revenue_pred_0.975"].tolist()
+                    + g["revenue_pred_0.025"].tolist()[::-1],
                     fill="toself",
                     fillcolor="rgba(0,0,0,0.15)",
                     line=dict(color="rgba(0,0,0,0)"),
@@ -772,28 +943,32 @@ class viz:
 
             # Add markers for recommended (P50), conservative (P2.5) and optimistic (P97.5) prices
             best_rows = {
-                'Recommended (P50)': ('0.5', g.loc[g["revenue_pred_0.5"].idxmax()]),
-                'Conservative (P2.5)': ('0.025', g.loc[g["revenue_pred_0.025"].idxmax()]),
-                'Optimistic (P97.5)': ('0.975', g.loc[g["revenue_pred_0.975"].idxmax()])
+                "Recommended (P50)": ("0.5", g.loc[g["revenue_pred_0.5"].idxmax()]),
+                "Conservative (P2.5)": (
+                    "0.025",
+                    g.loc[g["revenue_pred_0.025"].idxmax()],
+                ),
+                "Optimistic (P97.5)": (
+                    "0.975",
+                    g.loc[g["revenue_pred_0.975"].idxmax()],
+                ),
             }
 
             marker_colors = {
-                'Conservative (P2.5)': "#1F6FEB", 
-                'Optimistic (P97.5)': "#238636",
-                'Recommended (P50)': "#B82132",
+                "Conservative (P2.5)": "#1F6FEB",
+                "Optimistic (P97.5)": "#238636",
+                "Recommended (P50)": "#B82132",
             }
 
             for label, (quantile, row) in best_rows.items():
                 pred_col = f"revenue_pred_{quantile}"
                 fig.add_trace(
                     go.Scatter(
-                        x=[row["asp"]], 
+                        x=[row["asp"]],
                         y=[row[pred_col]],
                         mode="markers",
                         marker=dict(
-                            color=marker_colors[label], 
-                            size=16,
-                            symbol='diamond'
+                            color=marker_colors[label], size=16, symbol="diamond"
                         ),
                         name=f"{group_name} • {label}",
                         legendgroup=group_name,
@@ -801,11 +976,11 @@ class viz:
                     )
                 )
 
-
             # Revenue P50 line
             fig.add_trace(
                 go.Scatter(
-                    x=g["asp"], y=g["revenue_pred_0.5"],
+                    x=g["asp"],
+                    y=g["revenue_pred_0.5"],
                     mode="lines",
                     name=f"{group_name} • Expected Revenue (P50)",
                     line=dict(color="#B82132", width=2),
@@ -831,12 +1006,6 @@ class viz:
         )
         return fig
 
-
-    # keep a generic name for backward-compat
-    def gam_results(self, all_gam_results: pd.DataFrame):
-        return self.gam_results(all_gam_results)
-
-
     def elast_dist(self, elast_df: pd.DataFrame):
         fig = (
             px.histogram(
@@ -846,7 +1015,6 @@ class viz:
             .update_yaxes(title_text="Product Count")
         )
         return fig
-
 
     def opportunity_chart(self, elast_df, best50_df, curr_df, all_gam):
         """
@@ -974,7 +1142,6 @@ class viz:
         )
         return fig
 
-
     def empty_fig(self, title="No data"):
         fig = go.Figure()
         fig.update_layout(
@@ -990,12 +1157,12 @@ class viz:
         return fig
 
 
-if __name__ == "__main__":
-    pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
+# if __name__ == "__main__":
+#     pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
 
-    all_gam_results = GAMModeler(
-        DataEngineer(pricing_df, product_df, top_n=10).prepare()).run()
+#     all_gam_results = GAMModeler(
+#         DataEngineer(pricing_df, product_df, top_n=10).prepare()).run()
 
-    # Create a viz instance first, then call the method
-    viz_instance = viz()
-    viz_instance.gam_results(all_gam_results)
+#     # Create a viz instance first, then call the method
+#     viz_instance = viz()
+#     viz_instance.gam_results(all_gam_results)

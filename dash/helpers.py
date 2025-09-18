@@ -608,63 +608,52 @@ class Scenario:
         best50_df: pd.DataFrame,
         curr_price_df: pd.DataFrame,
         all_gam: pd.DataFrame,
-        annual_factor: float,
     ) -> Tuple[str, str]:
+        """
+        Returns (annualized_units_delta, annualized_revenue)
+        Both as formatted strings with signs.
+        """
         try:
+            # Get recommended price data
             best = best50_df[best50_df["asin"] == asin]
             if best.empty:
                 return "—", "—"
 
-            daily_units_best = (
-                float(best.get("pred_0.5", np.nan).iloc[0])
-                if "pred_0.5" in best
-                else (
-                    float(best.get("units_pred_0.5", np.nan).iloc[0])
-                    if "units_pred_0.5" in best
-                    else np.nan
-                )
-            )
-            daily_rev_best = (
-                float(best.get("revenue_pred_0.5", np.nan).iloc[0])
-                if "revenue_pred_0.5" in best
-                else np.nan
-            )
-
+            # Get current price
             cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
             curr_price = float(cp.iloc[0]) if len(cp) else np.nan
 
-            prod = all_gam[
-                (all_gam["asin"] == asin)
-                & pd.notna(all_gam["asp"])
-                & pd.notna(all_gam["pred_0.5"])
-            ]
-            if prod.empty:
-                daily_units_diff = np.nan
-            else:
-                idx = (
-                    ((prod["asp"] - curr_price).abs().idxmin())
-                    if pd.notna(curr_price)
-                    else None
+            # Get predicted values at recommended price
+            daily_units_best = float(best["units_pred_0.5"].iloc[0])
+            daily_rev_best = float(best["revenue_pred_0.5"].iloc[0])
+
+            # Get predicted values at current price
+            prod_curve = all_gam[all_gam["asin"] == asin].copy()
+            if not prod_curve.empty and pd.notna(curr_price):
+                # Find nearest price point
+                idx = (prod_curve["asp"] - curr_price).abs().idxmin()
+                daily_units_curr = float(prod_curve.loc[idx, "units_pred_0.5"])
+                
+                # Calculate daily difference and annualize
+                units_diff_annual = (daily_units_best - daily_units_curr) * 365
+                rev_best_annual = daily_rev_best * 365
+                
+                return (
+                    Formatters.signed_units(units_diff_annual),
+                    Formatters.signed_money(rev_best_annual)
                 )
-                if idx is not None:
-                    daily_units_curr = float(prod.loc[idx, "pred_0.5"])
-                    daily_units_diff = daily_units_best - daily_units_curr
-                else:
-                    daily_units_diff = np.nan
-
-            units_diff_annual = (
-                (daily_units_diff * annual_factor)
-                if pd.notna(daily_units_diff)
-                else np.nan
-            )
-            rev_best_annual = (
-                (daily_rev_best * annual_factor) if pd.notna(daily_rev_best) else np.nan
+            
+            # If we can't get current price predictions, just show annualized recommended values
+            units_best_annual = daily_units_best * 365
+            rev_best_annual = daily_rev_best * 365
+            
+            return (
+                Formatters.signed_units(units_best_annual),
+                Formatters.signed_money(rev_best_annual)
             )
 
-            return Formatters.signed_units(units_diff_annual), Formatters.signed_money(
-                rev_best_annual
-            )
-        except Exception:
+        except Exception as e:
+            print(f"Error in annualized_kpis_signed: {e}")
             return "—", "—"
 
 
@@ -773,7 +762,7 @@ class Notes:
                     style={"textAlign": "center"},
                 ),
             ],
-            style={"marginTop": "28px"},
+            style={"marginTop": "78px"},
         )
 
 
@@ -866,10 +855,9 @@ class OverviewHelpers:
         best50_df: pd.DataFrame,
         curr_price_df: pd.DataFrame,
         all_gam_results: pd.DataFrame,
-        annual_factor: float,
     ) -> Tuple[str, str]:
         return Scenario.annualized_kpis_signed(
-            asin, best50_df, curr_price_df, all_gam_results, annual_factor
+            asin, best50_df, curr_price_df, all_gam_results
         )
 
     @staticmethod
@@ -971,9 +959,9 @@ def scenario_table(prod_df):
     return Scenario.table(prod_df)
 
 
-def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_factor):
+def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam):
     return Scenario.annualized_kpis_signed(
-        asin, best50_df, curr_price_df, all_gam, annual_factor
+        asin, best50_df, curr_price_df, all_gam
     )
 
 

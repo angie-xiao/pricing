@@ -664,7 +664,6 @@ class PricingPipeline:
             "data_start": data_start,
             "data_end": data_end,
             "days_covered": days_covered,
-            "annual_factor": annual_factor,
         }
         return meta
 
@@ -703,7 +702,7 @@ class PricingPipeline:
         return best50
 
     def _build_opportunity_summary(
-        self, best50, all_gam_results, curr_price_df, annual_factor
+        self, best50, all_gam_results, curr_price_df
     ):
         """Compute per-product upside at recommended vs current, plus annualization."""
         rows = []
@@ -753,13 +752,13 @@ class PricingPipeline:
                     "delta_units": du,
                     "delta_revenue": dr,
                     "delta_units_annual": (
-                        du * annual_factor if pd.notna(du) else np.nan
+                        du * 365 if pd.notna(du) else np.nan
                     ),
                     "delta_revenue_annual": (
-                        dr * annual_factor if pd.notna(dr) else np.nan
+                        dr * 365 if pd.notna(dr) else np.nan
                     ),
                     "revenue_best_annual": (
-                        rev_best * annual_factor if pd.notna(rev_best) else np.nan
+                        rev_best * 365 if pd.notna(rev_best) else np.nan
                     ),
                 }
             )
@@ -812,16 +811,15 @@ class PricingPipeline:
         # 3) current prices
         curr_price_df = self._build_curr_price_df()
 
-        # 4) meta (dates & annualization)
+        # 4) meta (dates only, no annual_factor)
         meta = self._compute_date_meta()
-        annual_factor = meta["annual_factor"]
 
         # 5) best-50 (P50 revenue)
         best50 = self._build_best50(all_gam_results)
 
-        # 6) opportunities
+        # 6) opportunities - remove annual_factor parameter
         opps_summary = self._build_opportunity_summary(
-            best50, all_gam_results, curr_price_df, annual_factor
+            best50, all_gam_results, curr_price_df  # Removed annual_factor
         )
 
         # 7) normalize key dtype across frames
@@ -840,7 +838,6 @@ class PricingPipeline:
             best50=best50,
             meta=meta,
         )
-
 
 # --------------------------- viz ---------------------------
 class viz:

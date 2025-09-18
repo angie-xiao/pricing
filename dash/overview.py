@@ -79,8 +79,7 @@ def register_callbacks(
                 asin,
                 best50_optimal_pricing_df,
                 curr_price_df,
-                all_gam_results,
-                meta.get("annual_factor", 1.0),
+                all_gam_results
             )
 
             # Fit & coverage

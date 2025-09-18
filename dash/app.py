@@ -22,7 +22,7 @@ BASE_DIR = Paths.BASE_DIR
 PROJECT_BASE = Paths.PROJECT_BASE
 
 
-frames = Cache.build_frames_with_cache(PROJECT_BASE)
+frames = Cache.build_frames_with_cache(PROJECT_BASE,force_rebuild=True)
 price_quant_df = frames["price_quant_df"]
 best_avg_df = frames["best_avg"]
 all_gam_results = frames["all_gam_results"]
@@ -32,6 +32,7 @@ curr_opt_df = frames["curr_opt_df"]
 curr_price_df = frames["curr_price_df"]
 opps_summary = frames["opps_summary"]
 meta = frames["meta"]  # {data_start, data_end, days_covered}
+best_weighted_df = frames["best_weighted"] 
 
 # --- Build lookups ---
 lookup_all = DataEng.make_products_lookup(

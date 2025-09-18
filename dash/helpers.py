@@ -100,33 +100,36 @@ class Cache:
         pricing_file: str = "pricing.csv",
         product_file: str = "products.csv",
         top_n: int = 10,
+        force_rebuild: bool = True
     ) -> Dict[str, pd.DataFrame]:
+
         cache_dir = os.path.join(base_dir, ".cache")
         os.makedirs(cache_dir, exist_ok=True)
 
         pricing_path = os.path.join(base_dir, data_folder, pricing_file)
         product_path = os.path.join(base_dir, data_folder, product_file)
-        sig = Cache.files_sig(
-            [pricing_path, product_path], top_n=top_n, version=Cache.code_sig()
-        )
+        sig = Cache.files_sig([pricing_path, product_path], top_n=top_n, 
+                            version=Cache.code_sig())
 
-        force = os.environ.get("PRICING_FORCE_REBUILD") == "1"
-        cache_fp = None if force else os.path.join(cache_dir, f"frames_{sig}.pkl")
+        cache_fp = os.path.join(cache_dir, f"frames_{sig}.pkl")
 
-        if cache_fp and os.path.exists(cache_fp):
-            with open(cache_fp, "rb") as f:
-                return pickle.load(f)
+        # Force rebuild or use cache if available
+        if force_rebuild or not os.path.exists(cache_fp):
+            from built_in_logic import PricingPipeline
+            frames = PricingPipeline.from_csv_folder(
+                base_dir, data_folder, pricing_file, product_file, top_n
+            )
+            
+            # Save to cache
+            if not force_rebuild:
+                with open(cache_fp, "wb") as f:
+                    pickle.dump(frames, f)
+                    
+            return frames
 
-        from built_in_logic import PricingPipeline  # lazy import
-
-        frames = PricingPipeline.from_csv_folder(
-            base_dir, data_folder, pricing_file, product_file, top_n
-        )
-
-        if cache_fp:
-            with open(cache_fp, "wb") as f:
-                pickle.dump(frames, f)
-        return frames
+        # Load from cache
+        with open(cache_fp, "rb") as f:
+            return pickle.load(f)
 
 
 # =====================================================================
@@ -521,26 +524,31 @@ class Metrics:
         return f"±${rmse_val:,.0f}", (
             f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else ""
         )
-
+        
     @staticmethod
-    def update_elasticity_kpi_by_product(
-        product_name: str, elast_df: pd.DataFrame
-    ) -> Tuple[str, str]:
+    def update_elasticity_kpi_by_product(product_name: str, elast_df: pd.DataFrame) -> Tuple[str, str]:
         try:
             row = elast_df.loc[elast_df["product"] == product_name]
-            if row.empty or "ratio" not in row or "pct" not in row:
+            if row.empty or "ratio" not in row:
                 return "—", ""
+                
             ratio = float(row["ratio"].iloc[0])
-            pct = float(row["pct"].iloc[0])
+            
+            # Use elasticity_score instead of pct
+            elasticity_score = float(row["elasticity_score"].iloc[0])
             value_text = f"{ratio:,.2f}"
-            pct_round = int(round(pct))
-            top_share = max(1, 100 - pct_round)
+            
+            # Calculate elasticity tier
+            elasticity_tier = int(round(elasticity_score))
+            top_share = max(1, elasticity_tier)
+            
             subtext = (
                 "Top ~{0}% most ELASTIC".format(top_share)
-                if pct >= 50
+                if elasticity_score >= 50
                 else "Top ~{0}% most INELASTIC".format(top_share)
             )
             return value_text, subtext
+            
         except Exception:
             return "—", ""
 
@@ -845,10 +853,55 @@ class OverviewHelpers:
         )
 
     @staticmethod
-    def scenario_records(filt_df: pd.DataFrame) -> List[Dict[str, Any]]:
-        df = Scenario.table(filt_df)
-        return df.to_dict("records") if isinstance(df, pd.DataFrame) else df
+    def scenario_records(filt, include_weighted=True):
+        """Enhanced scenario table with weighted predictions"""
+        if filt is None or filt.empty:
+            return []
+        
+        scenarios = []
+        
+        # Add recommended scenarios
+        scenarios.extend([
+            {
+                "case": "Conservative",
+                "price": f"${filt.loc[filt['revenue_pred_0.025'].idxmax(), 'price']:.2f}",
+                "revenue": f"${filt['revenue_pred_0.025'].max():,.0f}"
+            },
+            {
+                "case": "Expected",
+                "price": f"${filt.loc[filt['revenue_pred_0.5'].idxmax(), 'price']:.2f}",
+                "revenue": f"${filt['revenue_pred_0.5'].max():,.0f}"
+            },
+            {
+                "case": "Optimistic",
+                "price": f"${filt.loc[filt['revenue_pred_0.975'].idxmax(), 'price']:.2f}",
+                "revenue": f"${filt['revenue_pred_0.975'].max():,.0f}"
+            }
+        ])
+        
+        # Add weighted prediction if available
+        if include_weighted and "weighted_pred" in filt.columns:
+            weighted_best = filt.loc[filt["weighted_pred"].idxmax()]
+            scenarios.insert(1, {
+                "case": "Recommended (Weighted)",
+                "price": f"${weighted_best['price']:.2f}",
+                "revenue": f"${weighted_best['revenue_pred_0.5']:,.0f}"
+            })
+        
+        # Insert current price scenario at the beginning if available
+        if "current_price" in filt.columns:
+            current_row = filt.iloc[0]  # Get first row for current scenario
+            scenarios.insert(0, {
+                "case": "Current Price",
+                "price": f"${current_row['current_price']:.2f}",
+                "revenue": f"${current_row['revenue_pred_0.5']:,.0f}"
+            })
+            
+        return scenarios
 
+        
+        
+        
     @staticmethod
     def annualized_kpis(
         asin: str,

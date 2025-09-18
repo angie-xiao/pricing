@@ -2,18 +2,17 @@
 from dash import html, dcc, Input, Output, dash_table
 import dash_bootstrap_components as dbc
 from helpers import (
-    Style,  # colors / constants
-    OverviewUI as UI,  # kpi_card
-    Metrics,  # model_fit_units, update_elasticity_kpi_by_product
-    Scenario,  # scenario_table
-    Notes,  # coverage_note
-    OverviewHelpers as OH,  # callback micro-helpers you already wired
+    Style,  
+    OverviewUI as UI, 
+    Metrics,  
+    Scenario, 
+    Notes, 
+    OverviewHelpers as OH, 
 )
 
 # constants previously imported directly
 OVERVIEW_ACCENT = Style.OVERVIEW_ACCENT
-
-
+    
 def register_callbacks(
     app,
     price_quant_df,
@@ -72,8 +71,11 @@ def register_callbacks(
             fig_dual = OH.pred_graph(viz, filt)
 
             # Scenario table (combined revenue + units)
-            scenario_data = OH.scenario_records(filt)
-
+            scenario_data = OH.scenario_records(
+                filt, 
+                include_weighted=True  # Add parameter to include weighted predictions
+            )
+            
             # Annualized KPI deltas (use pipeline's annual_factor)
             du_ann, rev_best_ann = OH.annualized_kpis(
                 asin,

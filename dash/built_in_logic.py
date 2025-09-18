@@ -44,6 +44,7 @@ class DataEngineer:
         out[col] = pd.to_datetime(rand_ts, unit="s")
         return out
 
+
     def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
         """
         Calculates an exponential decay weight based on time difference.
@@ -63,6 +64,7 @@ class DataEngineer:
         df["days_apart"] = (today_ref - df["order_date"]).dt.days
         df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
         return df
+
 
     def _grid_search_weights(self, sub: pd.DataFrame, param_grid: dict = None) -> tuple:
         """
@@ -111,29 +113,22 @@ class DataEngineer:
             return (0.3, 0.5, None)  # default values if search fails
 
         return (*best_params, best_rmse)
-
+    
+    
     def _make_weights(
-        self, sub: pd.DataFrame, tail_strength: float = None, tail_p: float = None
+        self, sub: pd.DataFrame, tail_strength: float = None, tail_p: float = None,
+        elasticity_df: pd.DataFrame = None
     ) -> np.ndarray:
         """
-        Create weights based on time decay and price outliers
-
-        params:
-            sub: DataFrame containing the data
-            tail_strength: controls outlier weighting intensity (0 = no extra weight, 1 = aggressive)
-            tail_p: controls outlier weight distribution (1: linear, >1: concave, <1: convex)
-
-        returns:
-            numpy array of weights
+        Create weights based on time decay, price outliers, and elasticity
         """
         # If parameters not provided, do grid search
         if tail_strength is None or tail_p is None:
             tail_strength, tail_p, _ = self._grid_search_weights(sub)
 
-        # Time decay weights
+        # Time decay weights  
         decayed_df = self._time_decay(sub)
         w = decayed_df["time_decay_weight"].values
-
 
         # Modify the outlier adjustment formula
         if tail_strength > 0:
@@ -148,6 +143,17 @@ class DataEngineer:
             # Add dampening factor and reduce power
             dampening = 0.7
             w *= 1.0 + (tail_strength * dampening) * np.minimum(rel_dist, max_dist) ** (tail_p * 0.8)
+
+        # Incorporate elasticity if available
+        if elasticity_df is not None:
+            product = sub["product"].iloc[0]
+            elasticity_score = elasticity_df.loc[
+                elasticity_df["product"] == product, "elasticity_score"
+            ].iloc[0] if product in elasticity_df["product"].values else 50
+
+            # Scale factor based on elasticity (0.8 to 1.2)
+            elasticity_factor = 0.8 + (0.4 * elasticity_score / 100)
+            w *= elasticity_factor
 
         return w / np.mean(w) if w.size > 0 else w
 
@@ -177,6 +183,7 @@ class DataEngineer:
 
         return res
 
+
     def _label_encoder(self, df) -> pd.DataFrame:
         """label encoding categorical variable"""
         le = LabelEncoder()
@@ -186,6 +193,7 @@ class DataEngineer:
         res["product_encoded"] = le.fit_transform(res["product"])
 
         return res
+
 
     def prepare(self) -> pd.DataFrame:
         """ """
@@ -226,6 +234,7 @@ class DataEngineer:
         # manually calculate rev
         df_days_asp["revenue"] = df_days_asp["shipped_units"] * df_days_asp["price"]
 
+        # ----------- reog this step later -----------
         # group by asin - event - date
         df_agg = (
             df_days_asp[
@@ -263,7 +272,9 @@ class DataEngineer:
             columns={"daily_rev": "revenue", "daily_units": "shipped_units"},
             inplace=True,
         )
-
+        # -------------------------------------------------------
+        
+        
         # Top-N products by total revenue
         top_n_products = (
             df_agg_event.groupby("product")["revenue"]
@@ -302,6 +313,8 @@ class ElasticityAnalyzer:
             )
             .reset_index()
         )
+        
+        # Calculate elasticity metrics
         elasticity["pct_change_price"] = 100.0 * (
             np.log(np.maximum(elasticity["asp_max"], eps))
             - np.log(np.maximum(elasticity["asp_min"], eps))
@@ -310,80 +323,111 @@ class ElasticityAnalyzer:
             np.log(np.maximum(elasticity["shipped_units_max"], eps))
             - np.log(np.maximum(elasticity["shipped_units_min"], eps))
         )
+        
+        # Calculate price elasticity ratio
         elasticity["ratio"] = elasticity["pct_change_qty"] / np.where(
             elasticity["pct_change_price"] == 0, np.nan, elasticity["pct_change_price"]
         )
-        elasticity["pct"] = elasticity["ratio"].rank(pct=True) * 100
+        
+        # Add normalized elasticity score (0-100)
+        elasticity["elasticity_score"] = 100 * (1 - elasticity["ratio"].rank(pct=True))
+        
+        # Add confidence metric based on data points
+        elasticity["confidence"] = np.minimum(100, elasticity["product_count"] / 5)
+        
         return elasticity.sort_values("ratio", ascending=False).reset_index(drop=True)
 
 
 class GAMTuner:
+    
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
+        '''
+        params
+            expectile
+            lam_grid
+            n_splines_grid
+        '''
         self.expectile = expectile
-        self.lam_grid = np.logspace(-3, 3, 10) if lam_grid is None else np.array(lam_grid)
-        self.n_splines_grid = n_splines_grid or [10, 20, 30]
-
+        # Expanded lambda grid for better smoothing control
+        self.lam_grid = np.logspace(-5, 5, 20) if lam_grid is None else np.array(lam_grid)
+        # More flexible spline options
+        self.n_splines_grid = n_splines_grid or [20, 30, 40]
+        
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
         scaler_X = StandardScaler()
         Xs = scaler_X.fit_transform(X.reshape(-1, 1).astype(float))
         
-        # Single term for price only
-        terms = s(0, basis='ps', n_splines=20)
+        best_gam = None
+        best_score = float('inf')
         
-        gam = ExpectileGAM(terms, expectile=self.expectile)
-        try:
-            gam = gam.gridsearch(
-                Xs,
-                y.astype(float),
-                lam=self.lam_grid,
-                weights=sample_weight,
-            )
-        except Exception as e:
-            print(f"Gridsearch failed; fallback: {e}")
-            gam = ExpectileGAM(terms, expectile=self.expectile).fit(
+        for n_splines in self.n_splines_grid:
+            # Add constraints to ensure monotonic decreasing relationship
+            terms = s(0, basis='ps', n_splines=n_splines)
+            gam = ExpectileGAM(terms, expectile=self.expectile, fit_intercept=True)
+            
+            try:
+                gam = gam.gridsearch(
+                    Xs, 
+                    y.astype(float),
+                    lam=self.lam_grid,
+                    weights=sample_weight,
+                    progress=False
+                )
+                
+                # Score based on prediction accuracy and smoothness
+                base_score = gam.deviance(Xs, y.astype(float))
+                
+                # Add small penalty for excessive wiggliness
+                # but allow for non-monotonic relationships
+                y_pred = gam.predict(Xs)
+                smoothness_penalty = np.abs(np.diff(y_pred, 2)).mean() / y_pred.mean()
+                score = base_score * (1 + 0.05 * smoothness_penalty)
+                
+                if score < best_score:
+                    best_score = score
+                    best_gam = gam
+                     
+                    
+            except Exception as e:
+                continue
+
+        
+        if best_gam is None:
+            # Fallback to simple model with reasonable defaults
+            terms = s(0, basis='ps', n_splines=25)
+            best_gam = ExpectileGAM(terms, expectile=self.expectile).fit(
                 Xs, y.astype(float), weights=sample_weight
             )
         
-        gam._scaler_X = scaler_X
-        return gam
+        best_gam._scaler_X = scaler_X
+        return best_gam
+
+
 
 class GAMModeler:
+    
+        
     def __init__(
         self,
         topsellers: pd.DataFrame,
         tail_strength: float = None,
         tail_p: float = None,
-        # use_grid_search: bool = False,
-        # custom_grid: dict =(
-        #     {
-        #         "tail_strength": [0.1, 0.2, 0.3, 0.4, 0.5],  # Reduced from [0.1, 0.3, 0.5, 0.7, 0.9]
-        #         "tail_p": [0.2, 0.4, 0.6, 0.8, 1.0],  # Reduced from [0.2, 0.6, 1.0, 1.4, 1.8]
-        #     }
-        # ),
+        use_grid_search: bool = True,
+        custom_grid: dict = None,
+        elasticity_df: pd.DataFrame = None  # Add elasticity_df parameter
     ):
-        """
-        Parameters
-        ----------
-        topsellers : DataFrame
-            Source data (Top-N products) with required columns:
-            ['product','asin','price','deal_discount_percent',
-             'event_encoded','product_encoded','shipped_units','days_sold', ...]
-        tail_strength : float, optional
-            Outlier weighting intensity (0 = none, 1 = aggressive)
-        tail_p : float, optional
-            Outlier weight distribution (1 = linear, >1 concave, <1 convex)
-        use_grid_search : bool, optional
-            Whether to use grid search to find optimal parameters
-        custom_grid : dict, optional
-            Custom parameter grid for grid search
-        """
         self.topsellers = topsellers
         self.tail_strength = tail_strength
         self.tail_p = tail_p
-        # self.use_grid_search = use_grid_search
-        # self.custom_grid = custom_grid
+        self.use_grid_search = use_grid_search
+        self.custom_grid = custom_grid or {
+            "tail_strength": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "tail_p": [0.2, 0.4, 0.6, 0.8, 1.0]
+        }
         self.engineer = DataEngineer(None, None)
-
+        self.elasticity_df = elasticity_df  # Store elasticity data
+        
+        
     # --------- helpers ---------
     def _required_cols(self) -> list:
         return [
@@ -393,34 +437,89 @@ class GAMModeler:
             "product_encoded",
             "shipped_units",
         ]
-
+    
+ 
     def _make_design_matrix(self, sub: pd.DataFrame) -> tuple:
-        """Prepare subgroup rows: sort, add weights, drop NaNs, build (X, y, w)."""
+        """
+        Enhanced version with grid search for optimal weights and elasticity
+        """
         if sub is None or sub.empty:
             return None, None, None, None
 
         # sort by price for consistent curves
         sub = sub.sort_values("price").reset_index(drop=True)
+        
+        if self.use_grid_search:
+            # Grid search for optimal parameters
+            best_tail_strength, best_tail_p, _ = self.engineer._grid_search_weights(
+                sub, param_grid=self.custom_grid
+            )
+            
+            # Apply optimal parameters to weight calculation
+            w = self.engineer._make_weights(
+                sub, 
+                tail_strength=best_tail_strength,
+                tail_p=best_tail_p
+            )
+            
+        else:
+            # Use standard weighting scheme
+            de = DataEngineer(None,None)
+            sub_decayed = de._time_decay(sub)
+            time_decay_weight = sub_decayed["time_decay_weight"]
+            
+            volume = sub['shipped_units']
+            volume_weight = np.log1p(volume) / np.log1p(volume.max())
+            
+            price_range = sub['price'].max() - sub['price'].min()
+            if price_range > 0:
+                price_counts = sub['price'].value_counts()
+                price_density = sub['price'].map(price_counts) / len(sub)
+                price_weight = 1 / (price_density + 0.1)
+                price_weight = price_weight / price_weight.max()
+            else:
+                price_weight = pd.Series(1.0, index=sub.index)
 
-        # add weights (simpler version)
-        w = np.ones(len(sub))  # equal weights or modify as needed
-        sub = pd.concat([sub, pd.Series(w, name="wt")], axis=1)
+            w = (time_decay_weight * 0.4 + 
+                volume_weight * 0.4 + 
+                price_weight * 0.2)
+            
+            w = w / w.mean()
 
-        # keep only rows with complete price & target
+        # Apply elasticity adjustment if available
+        if self.elasticity_df is not None:
+            product = sub["product"].iloc[0]
+            if product in self.elasticity_df["product"].values:
+                ratio = self.elasticity_df.loc[
+                    self.elasticity_df["product"] == product, "ratio"
+                ].iloc[0]
+                
+                # Adjust factor based on ratio (higher ratio = more elastic)
+                elasticity_factor = 0.9 + (0.2 * (1 - ratio/self.elasticity_df["ratio"].max()))
+                w = w * elasticity_factor
+                w = w / w.mean()  # Renormalize
+
+
+        # Add weights to dataframe
+        sub = pd.concat([sub, pd.Series(w, name="wt", index=sub.index)], axis=1)
+
+        # Keep only rows with complete data
         sub_clean = sub.dropna(subset=["price", "shipped_units"]).copy()
-        if sub_clean.shape[0] < 5:  # minimum points needed
+        
+        # Require minimum points and price variation
+        if sub_clean.shape[0] < 5 or sub_clean['price'].nunique() < 3:
             return None, None, None, None
 
-        # design matrix is just price
         X = sub_clean[["price"]].to_numpy(dtype=float)
         y = sub_clean["shipped_units"].to_numpy(dtype=float)
         w = sub_clean["wt"].to_numpy(dtype=float)
 
-        if not np.isfinite(X).all() or not np.isfinite(y).all():
+        if not np.isfinite(X).all() or not np.isfinite(y).all() or not np.isfinite(w).all():
             return None, None, None, None
 
         return sub_clean, X, y, w
 
+    
 
     def _fit_expectiles(
         self, X: np.ndarray, y: np.ndarray, w: np.ndarray, qs=(0.025, 0.5, 0.975)
@@ -541,20 +640,33 @@ class GAMModeler:
 class Optimizer:
     @staticmethod
     def run(all_gam_results: pd.DataFrame) -> dict:
+        '''Calculate weighted predictions based on ratio'''
+        
+        if "ratio" in all_gam_results.columns:
+            # Normalize ratio to 0-1 range for weighting
+            max_ratio = all_gam_results["ratio"].max()
+            confidence_weight = 1 - (all_gam_results["ratio"] / max_ratio)
+        else:
+            confidence_weight = 0.5  # Default to equal weighting
+        
+        all_gam_results["weighted_pred"] = (
+            all_gam_results["units_pred_0.5"] * confidence_weight +
+            all_gam_results["units_pred_avg"] * (1 - confidence_weight)
+        )
+        
         return {
-            # Finds price that maximizes average predicted units
+            "best_weighted": DataEng.pick_best_by_group(
+                all_gam_results, "product", "weighted_pred"
+            ),
             "best_avg": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_avg"
             ),
-            # Finds price that maximizes median predicted units
             "best50": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.5"
             ),
-            # Finds price that maximizes optimistic predicted units
             "best975": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.975"
             ),
-            # Finds price that maximizes conservative predicted units
             "best25": DataEng.pick_best_by_group(
                 all_gam_results, "product", "units_pred_0.025"
             ),
@@ -568,17 +680,12 @@ class PricingPipeline:
         pricing_df,
         product_df,
         top_n=10,
-        # use_grid_search=True,
-        # custom_grid=(
-        #     {
-        #         "tail_strength": [0.1, 0.2, 0.3, 0.4, 0.5],  # Reduced from [0.1, 0.3, 0.5, 0.7, 0.9]
-        #         "tail_p": [0.2, 0.4, 0.6, 0.8, 1.0],  # Reduced from [0.2, 0.6, 1.0, 1.4, 1.8]
-        #     }
-        # ),
+        use_grid_search=True,
+        custom_grid=None
     ):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
-        # self.use_grid_search = use_grid_search
-        # self.custom_grid = custom_grid
+        self.use_grid_search = use_grid_search
+        self.custom_grid = custom_grid
 
     @classmethod
     def from_csv_folder(
@@ -599,27 +706,45 @@ class PricingPipeline:
     # -----------------------------
     def _build_curr_price_df(self) -> pd.DataFrame:
         """current price df with product tag"""
+        if "current_price" not in self.engineer.product_df.columns:
+            # Create empty DataFrame with required columns
+            return pd.DataFrame(columns=["asin", "product", "current_price"])
+            
         product = self.engineer.product_df.copy()
         product["product"] = DataEng.compute_product_series(product)
-        out = product[["asin", "product", "current_price"]]
+        
+        # Keep only the required columns and ensure current_price exists
+        out = product[["asin", "product", "current_price"]].copy()
+        out["current_price"] = pd.to_numeric(out["current_price"], errors="coerce")
+        
         return out.reset_index(drop=True)
 
-    def _build_core_frames(self):
-        """Prepare core data, decay, elasticity, and GAM model results."""
-        topsellers = self.engineer.prepare()  # Top-N only
-        topsellers_decayed = self.engineer._time_decay(topsellers)  # time decay
-        elasticity_df = ElasticityAnalyzer.compute(topsellers_decayed)  # UI only
 
-        # Initialize GAMModeler with grid search parameters
+    def _build_core_frames(self):
+        """Prepare core data incorporating elasticity"""
+        topsellers = self.engineer.prepare()
+        topsellers_decayed = self.engineer._time_decay(topsellers)
+        
+        # Get elasticity metrics
+        elasticity_df = ElasticityAnalyzer.compute(topsellers_decayed)
+        
+        # Initialize GAMModeler with elasticity data
         modeler = GAMModeler(
             topsellers,
-            # use_grid_search=self.use_grid_search,
-            # custom_grid=self.custom_grid,
+            elasticity_df=elasticity_df,
+            use_grid_search=self.use_grid_search,
+            custom_grid=self.custom_grid
         )
-
-        # Run the model
+        
         all_gam_results = modeler.run()
-
+        
+        # Merge elasticity data into results
+        all_gam_results = all_gam_results.merge(
+            elasticity_df[["product", "ratio", "elasticity_score"]],
+            on="product",
+            how="left"
+        )
+        
         return topsellers, elasticity_df, all_gam_results
 
     def _compute_best_tables(self, all_gam_results, topsellers):
@@ -645,7 +770,7 @@ class PricingPipeline:
         return best_avg
 
     def _compute_date_meta(self):
-        """Compute data range and annualization factor using the pipeline’s pricing_df."""
+        """Compute data range and annualization factor using the pipeline's pricing_df."""
         df_dates = self.engineer.pricing_df.copy()
         df_dates["order_date"] = pd.to_datetime(df_dates["order_date"], errors="coerce")
         data_start = (
@@ -769,19 +894,12 @@ class PricingPipeline:
         for df in dfs:
             if isinstance(df, pd.DataFrame) and "asin" in df.columns:
                 df["asin"] = df["asin"].astype(str)
-
-    def _pack_frames(
-        self,
-        topsellers,
-        best_avg,
-        all_gam_results,
-        elasticity_df,
-        curr_price_df,
-        opps_summary,
-        best50,
-        meta,
-    ):
-        """Final dictionary payload used by the app."""
+                
+    def _pack_frames(self, topsellers, best_avg, all_gam_results, elasticity_df, 
+                    curr_price_df, opps_summary, best50, meta):
+        # Run optimizer to get all results including weighted
+        optimizer_results = Optimizer.run(all_gam_results)
+        
         return {
             "price_quant_df": (
                 topsellers.groupby(["price", "product"])["shipped_units"]
@@ -789,15 +907,17 @@ class PricingPipeline:
                 .reset_index()
             ),
             "best_avg": best_avg,
+            "best_weighted": optimizer_results["best_weighted"],
             "all_gam_results": all_gam_results,
-            "best_optimal_pricing_df": best50.copy(),  # consumed by Overview KPIs/callbacks
-            "elasticity_df": elasticity_df[["product", "ratio", "pct"]],
+            "best_optimal_pricing_df": best50.copy(),
+            "elasticity_df": elasticity_df[["product", "ratio", "elasticity_score"]],  # Keep elasticity_score
             "curr_opt_df": best_avg,
             "curr_price_df": curr_price_df,
             "opps_summary": opps_summary,
             "meta": meta,
         }
 
+        
     # -----------------------------
     # Public API
     # -----------------------------
@@ -838,6 +958,8 @@ class PricingPipeline:
             best50=best50,
             meta=meta,
         )
+
+
 
 # --------------------------- viz ---------------------------
 class viz:
@@ -1140,10 +1262,12 @@ class viz:
 
 # if __name__ == "__main__":
 #     pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
+    
+#     PricingPipeline(pricing_df,product_df,top_n=10, use_grid_search=True).assemble_dashboard_frames()
 
-#     all_gam_results = GAMModeler(
-#         DataEngineer(pricing_df, product_df, top_n=10).prepare()).run()
 
-#     # Create a viz instance first, then call the method
-#     viz_instance = viz()
-#     viz_instance.gam_results(all_gam_results)
+    # all_gam_results = GAMModeler(
+    #     DataEngineer(pricing_df, product_df, top_n=10).prepare()).run()
+    # # Create a viz instance first, then call the method
+    # viz_instance = viz()
+    # viz_instance.gam_results(all_gam_results)

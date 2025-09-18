@@ -163,17 +163,21 @@ git pull origin master      # windows
 # in terminal:
 cd dash
 
-# activate pyvenv
-../.venv/Scripts/activate                # windows
-source ../.pricing-venv/bin/activate     # mac
-# windows:  py app.py
-# mac:      python3 app.py
 
-# run script
-py app.py                               # windows
-python3 app.py                          # mac
+# ------------- mac -------------
+# install pyenv
+pyenv install 3.11.7
+pyenv global 3.11.7
+python -m venv .pricing-venv
+source ../pricing-venv/bin/activate      # activate
+python3 app.py                           # run
 
-# optional: black formatter
+# ------------- winsows -------------
+../.venv/Scripts/activate                 # activate
+ py app.py                                # run
+
+# ------- optional:  formatter -------
+
 python3 -m black helpers.py
 
 """

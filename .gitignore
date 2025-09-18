@@ -14,7 +14,7 @@
 .cache/
 
 # Virtual environments
-pricing-venv/
+.venv/
 
 # vscode folder
 .vscode/

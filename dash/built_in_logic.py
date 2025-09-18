@@ -28,33 +28,44 @@ from helpers import (
 
 # --------------------- Data engineering ---------------------
 class DataEngineer:
-    
     def __init__(self, pricing_df, product_df, top_n=10):
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
 
+    # synthesize order_date when real dates are missing
+    def _synthesize_order_dates(
+        self,
+        df: pd.DataFrame,
+        start="2023-09-17",
+        end="2025-09-17",
+        seed=42,
+        col="order_date",
+    ) -> pd.DataFrame:
+        out = df.copy()
+        start_ts = pd.to_datetime(start).value // 10**9
+        end_ts   = pd.to_datetime(end).value   // 10**9
+
+        rng = np.random.default_rng(seed)
+        # generate for all rows to fully override
+        rand_ts = rng.integers(start_ts, end_ts, size=len(out), endpoint=False)
+        out[col] = pd.to_datetime(rand_ts, unit="s")
+        return out
+
 
     def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
         """
         Calculates an exponential decay weight based on time difference.
-
-        Args:
-            timestamp (datetime): The timestamp of the data point.
-            reference_time (datetime): The reference time (e.g., current time or conversion time).
-            decay_rate (float): A positive float controlling the decay speed.
-                                Higher values mean faster decay.
-
-        Returns:
-            float: The calculated weight.
+        Assumes order_date is already synthesized/valid.
         """
-        today_ref = pd.Timestamp('today')
         df = prepared_df.copy()
-                              
-        df['days_apart'] = (today_ref - df['order_date']).dt.days
-        df['time_decay_weight'] = np.exp(decay_rate * df['days_apart'])
+        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
 
+        today_ref = pd.Timestamp('today')
+        df['days_apart'] = (today_ref - df['order_date']).dt.days
+        df['time_decay_weight'] = np.exp(decay_rate * df['days_apart'].fillna(0))
         return df
+
 
 
     def _make_weights(self, sub: pd.DataFrame, tail_strength: float = 1.0, tail_p: float = 0.5) -> np.ndarray:
@@ -123,39 +134,61 @@ class DataEngineer:
         # normalize columns
         self.pricing_df = clean_cols(self.pricing_df)
         self.product_df = clean_cols(self.product_df)
-        
+
         # merge
         df = self.pricing_df.merge(self.product_df, how="left", on="asin")
-        
+
         # product label
         df["product"] = compute_product_series(df)
-        df.drop(columns=['tag','variation'], inplace=True)
-        
+        # keep if they exist; ignore otherwise
+        for c in ("tag", "variation"):
+            if c in df.columns:
+                df.drop(columns=[c], inplace=True)
+
         # data type
-        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
+
+        # ---- GLOBAL OVERRIDE: synthesize order_date over a chosen window ----
+        # If you truly want to override even partial data, just always run this line:
+        df = self._synthesize_order_dates(
+            df,
+            start="2023-09-17",
+            end="2025-09-17",
+            seed=42,
+            col="order_date",
+        )
+        # --------------------------------------------------------------------
+
+        # persist back so meta/date-range uses the same synthetic dates
+        self.pricing_df = df.copy()
 
         # count how many days a price was sold at
         df_days_asp = self._days_at_price(df)
-        
+
         # manually calculate rev
         df_days_asp['revenue'] = df_days_asp['shipped_units'] * df_days_asp['price']
-        
+
         # group by asin - event - date
-        df_agg = df_days_asp[['asin', 'event_name', 'order_date', 'shipped_units', 'revenue']].groupby(['asin', 'event_name', 'order_date'])[['revenue','shipped_units']].sum().reset_index()
+        df_agg = (
+            df_days_asp[['asin', 'event_name', 'order_date', 'shipped_units', 'revenue']]
+            .groupby(['asin', 'event_name', 'order_date'])[['revenue','shipped_units']]
+            .sum()
+            .reset_index()
+        )
         df_agg['price'] = df_agg['revenue'] / df_agg['shipped_units']
         df_agg['price'] = round(df_agg['price'],2)
-        
+
         df_agg_event = df_agg.merge(
-            df_days_asp[['asin', 'product', 'order_date', 'deal_discount_percent', 'current_price', 'days_sold', ]],
+            df_days_asp[['asin', 'product', 'order_date', 'deal_discount_percent', 'current_price', 'days_sold']],
             on=['asin', 'order_date'], how='left'
         )
-        
-        # calculate daily shipped units & 
+
+        # calculate daily shipped units &
         df_agg_event['daily_rev'] = df_agg_event['revenue'] / df_agg_event['days_sold']
         df_agg_event['daily_units'] = df_agg_event['shipped_units'] / df_agg_event['days_sold']
-        df_agg_event.drop(columns=['revenue','shipped_units'],inplace=True)
-        df_agg_event.rename(columns={'daily_rev':'revenue', 'daily_units':'shipped_units'},inplace=True)
-        
+        df_agg_event.drop(columns=['revenue','shipped_units'], inplace=True)
+        df_agg_event.rename(columns={'daily_rev':'revenue', 'daily_units':'shipped_units'}, inplace=True)
+
         # Top-N products by total revenue
         top_n_products = (
             df_agg_event.groupby("product")["revenue"]
@@ -165,17 +198,17 @@ class DataEngineer:
             .head(self.top_n)
             .tolist()
         )
+
         # filtering
-        filtered = df_days_asp[
-            (df_days_asp["product"].isin(top_n_products))
-        ].copy()
+        filtered = df_days_asp[(df_days_asp["product"].isin(top_n_products))].copy()
+
         # Normalize dtype for downstream joins
         filtered["asin"] = filtered["asin"].astype(str)
-        filtered.rename(columns={'revenue':'revenue_share_amt'},inplace=True)
-        
+        filtered.rename(columns={'revenue':'revenue_share_amt'}, inplace=True)
+
         # encode categorical vars after filtering
         res = self._label_encoder(filtered)
-        
+
         return res
 
 
@@ -248,6 +281,7 @@ class GAMTuner:
         gam._scaler_X = scaler_X
         return gam
 
+
 # ------------------------ Modeling  ------------------------
 class GAMModeler:
     def __init__(
@@ -261,53 +295,80 @@ class GAMModeler:
         self.tail_p = float(tail_p)
         self.engineer = DataEngineer(None, None)
 
-
     def run(self) -> pd.DataFrame:
         all_results = []
-        
+
         for product, sub in self.topsellers.groupby("product"):
             sub = sub.sort_values("price").reset_index(drop=True)
+
+            # weights
             weights = self.engineer._make_weights(sub, self.tail_strength, self.tail_p)
-            sub = pd.concat([sub, pd.Series(weights)],axis=1).rename(columns={0:'wt'})
-            
+            sub = pd.concat([sub, pd.Series(weights)], axis=1).rename(columns={0: "wt"})
+
             X = sub[["price", "deal_discount_percent", "event_encoded", "product_encoded", "wt"]].to_numpy(dtype=float)
             y = sub["shipped_units"].to_numpy(dtype=float)
             weights = self.engineer._make_weights(sub, self.tail_strength, self.tail_p)
-          
+
             out = {}
             for q in [0.025, 0.5, 0.975]:
                 gam = GAMTuner(expectile=q).fit(X, y, sample_weight=weights)
                 y_pred = gam.predict(gam._scaler_X.transform(X))
                 out[f"units_pred_{q}"] = y_pred
-                # Calculate revenue predictions
+                # revenue predictions derived from units * price
                 out[f"revenue_pred_{q}"] = y_pred * sub["price"].values
-        
+
             preds = pd.DataFrame(out, index=sub.index)
 
-            results = pd.concat([
-                sub[[
-                    "order_date", "wt", "asin", "price", "days_sold",
-                    "product", "event_name", "deal_discount_percent",
-                    "shipped_units", "revenue_share_amt"
-                ]].reset_index(drop=True),
-                preds.reset_index(drop=True),
-            ], axis=1)
+            results = pd.concat(
+                [
+                    sub[
+                        [
+                            "order_date",
+                            "wt",
+                            "asin",
+                            "price",
+                            "days_sold",
+                            "product",
+                            "event_name",
+                            "deal_discount_percent",
+                            "shipped_units",
+                            "revenue_share_amt",
+                        ]
+                    ].reset_index(drop=True),
+                    preds.reset_index(drop=True),
+                ],
+                axis=1,
+            )
             all_results.append(results)
 
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
-        
-        # Add asp column and ensure correct column naming
+
+        # Add asp column and normalize
         all_gam_results["asp"] = all_gam_results["price"]
         all_gam_results["asin"] = all_gam_results["asin"].astype(str)
-        
-        # Calculate actual revenue
+
+        # Actual revenue
         all_gam_results["revenue_actual"] = all_gam_results["shipped_units"] * all_gam_results["price"]
-        
-        # Calculate average predictions
+
+        # Average predictions
         units_pred_cols = [c for c in all_gam_results.columns if c.startswith("units_pred_")]
         all_gam_results["units_pred_avg"] = all_gam_results[units_pred_cols].mean(axis=1)
         all_gam_results["revenue_pred_avg"] = all_gam_results["units_pred_avg"] * all_gam_results["price"]
-        
+
+        # ---- REQUIRED FOR KPIs ----
+        # daily metrics for Model Fit (Daily Revenue) & coverage note
+        if "days_sold" in all_gam_results.columns:
+            den = all_gam_results["days_sold"].replace(0, np.nan)
+            all_gam_results["daily_rev"] = all_gam_results["revenue_actual"] / den
+            all_gam_results["daily_units"] = all_gam_results["shipped_units"] / den
+        else:
+            all_gam_results["daily_rev"] = all_gam_results["revenue_actual"]
+            all_gam_results["daily_units"] = all_gam_results["shipped_units"]
+
+        # alias for helpers that expect 'pred_0.5' (units)
+        if "units_pred_0.5" in all_gam_results.columns and "pred_0.5" not in all_gam_results.columns:
+            all_gam_results["pred_0.5"] = all_gam_results["units_pred_0.5"]
+
         return all_gam_results
 
 
@@ -343,25 +404,44 @@ class Optimizer:
 
 # ------------------------- Pipeline -------------------------
 class PricingPipeline:
-    
     def __init__(self, pricing_df, product_df, top_n=10):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
 
+    @classmethod
+    def from_csv_folder(
+        cls,
+        base_dir,
+        data_folder="data",
+        pricing_file="pricing.csv",
+        product_file="products.csv",
+        top_n=10,
+    ):
+        import os
+        import pandas as pd
+        pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
+        product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
+        return cls(pricing_df, product_df, top_n).assemble_dashboard_frames()
+
+    # -----------------------------
+    # Small helpers (pure functions)
+    # -----------------------------
     def _build_curr_price_df(self) -> pd.DataFrame:
         """current price df with product tag"""
         product = self.engineer.product_df.copy()
         product["product"] = compute_product_series(product)
-        out = product[["asin", "product", "current_price",]]
+        out = product[["asin", "product", "current_price"]]
         return out.reset_index(drop=True)
 
-    def assemble_dashboard_frames(self) -> dict:
-        # 1) core tables
-        topsellers = self.engineer.prepare()                             # Top-N only
-        topselles_decayed = self.engineer._time_decay(topsellers)        # time decay
-        elasticity_df = ElasticityAnalyzer.compute(topselles_decayed)    # UI only
+    def _build_core_frames(self):
+        """Prepare core data, decay, elasticity, and GAM model results."""
+        topsellers = self.engineer.prepare()  # Top-N only
+        topsellers_decayed = self.engineer._time_decay(topsellers)  # time decay
+        elasticity_df = ElasticityAnalyzer.compute(topsellers_decayed)  # UI only
         all_gam_results = GAMModeler(topsellers, tail_strength=0.6, tail_p=1.0).run()
+        return topsellers, elasticity_df, all_gam_results
 
-        # 2) optimizer + best tables
+    def _compute_best_tables(self, all_gam_results, topsellers):
+        """Run Optimizer and ensure required cols are present."""
         bests = Optimizer.run(all_gam_results)
         best_avg = bests["best_avg"].copy()
 
@@ -370,88 +450,91 @@ class PricingPipeline:
             best_avg = best_avg.merge(pk_map, on="product", how="left")
 
         if "revenue_actual" not in best_avg.columns:
-            if {"price", "shipped_units"}.issubset(best_avg.columns):  # Changed asp to price
+            if {"price", "shipped_units"}.issubset(best_avg.columns):
                 best_avg["revenue_actual"] = best_avg["price"] * best_avg["shipped_units"]
             else:
-                ra = all_gam_results[
-                    ["product", "price", "revenue_actual"]  # Changed asp to price
-                ].drop_duplicates()
+                ra = all_gam_results[["product", "price", "revenue_actual"]].drop_duplicates()
                 best_avg = best_avg.merge(ra, on=["product", "price"], how="left")
 
-        # 3) current prices
-        curr_price_df = self._build_curr_price_df()
+        return best_avg
 
-        # 4) data range + annualization factor
+    def _compute_date_meta(self):
+        """Compute data range and annualization factor using the pipeline’s pricing_df."""
         df_dates = self.engineer.pricing_df.copy()
         df_dates["order_date"] = pd.to_datetime(df_dates["order_date"], errors="coerce")
-        data_start = (
-            pd.to_datetime(df_dates["order_date"].min()) if len(df_dates) else pd.NaT
-        )
-        data_end = (
-            pd.to_datetime(df_dates["order_date"].max()) if len(df_dates) else pd.NaT
-        )
+        data_start = pd.to_datetime(df_dates["order_date"].min()) if len(df_dates) else pd.NaT
+        data_end = pd.to_datetime(df_dates["order_date"].max()) if len(df_dates) else pd.NaT
         days_covered = (
             int((data_end - data_start).days) + 1
             if pd.notna(data_start) and pd.notna(data_end)
             else 0
         )
         annual_factor = (365.0 / max(1, days_covered)) if days_covered else 1.0
+        meta = {
+            "data_start": data_start,
+            "data_end": data_end,
+            "days_covered": days_covered,
+            "annual_factor": annual_factor,
+        }
+        return meta
 
-        # 5) best-50 by expected revenue
-        if "units_pred_0.5" in all_gam_results.columns:
-            idx = all_gam_results.groupby("product")["units_pred_0.5"].idxmax()
+    def _build_best50(self, all_gam_results):
+        """Pick best P50 revenue row per product for KPIs and scenarios."""
+        if {"revenue_pred_0.5", "units_pred_0.5"}.issubset(all_gam_results.columns):
+            idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
             best50 = (
                 all_gam_results.loc[
-                    idx, ["product", "asin", "price", "units_pred_0.5",]
+                    idx,
+                    [
+                        "product",
+                        "asin",
+                        "price",
+                        "asp",               # used by viz/helpers
+                        "units_pred_0.5",    # P50 units
+                        "revenue_pred_0.5",  # P50 revenue
+                        "pred_0.5",          # alias (units)
+                    ],
                 ]
                 .drop_duplicates(subset=["product"])
                 .reset_index(drop=True)
             )
         else:
             best50 = pd.DataFrame(
-                columns=["product", "asin", "price", "units_pred_0.5",]
+                columns=[
+                    "product",
+                    "asin",
+                    "price",
+                    "asp",
+                    "units_pred_0.5",
+                    "revenue_pred_0.5",
+                    "pred_0.5",
+                ]
             )
+        return best50
 
-
-            
-        # 6) opportunity summary per product (units & revenue, + annualized)
+    def _build_opportunity_summary(self, best50, all_gam_results, curr_price_df, annual_factor):
+        """Compute per-product upside at recommended vs current, plus annualization."""
         rows = []
-        
         for _, r in best50.iterrows():
             p = r["product"]
             pk = str(r["asin"])
             price_best = float(r["price"])
-            units_best = float(r.get("units_pred_0.5", np.nan))  # Changed from pred_0.5
+            units_best = float(r.get("units_pred_0.5", np.nan))
             rev_best = float(r.get("revenue_pred_0.5", np.nan))
 
             prod_curve = all_gam_results[(all_gam_results["product"] == p)]
             cp_ser = curr_price_df.loc[curr_price_df["asin"] == pk, "current_price"]
             curr_price = float(cp_ser.iloc[0]) if len(cp_ser) else np.nan
+            curr_row = nearest_row_at_price(prod_curve, curr_price) if pd.notna(curr_price) else None
 
-            curr_row = (
-                nearest_row_at_price(prod_curve, curr_price)
-                if pd.notna(curr_price)
-                else None
-            )
-            
             if curr_row is not None:
-                units_curr = float(curr_row.get("units_pred_0.5", np.nan))  # Changed from pred_0.5
+                units_curr = float(curr_row.get("units_pred_0.5", np.nan))
                 rev_curr = float(curr_row.get("revenue_pred_0.5", np.nan))
             else:
                 units_curr, rev_curr = np.nan, np.nan
 
-
-
-            du = (
-                (units_best - units_curr)
-                if (pd.notna(units_best) and pd.notna(units_curr))
-                else np.nan
-            )
-            dr = (
-                (rev_best - rev_curr)
-                if (pd.notna(rev_best) and pd.notna(rev_curr))
-                else np.nan
-            )
+            du = (units_best - units_curr) if (pd.notna(units_best) and pd.notna(units_curr)) else np.nan
+            dr = (rev_best - rev_curr) if (pd.notna(rev_best) and pd.notna(rev_curr)) else np.nan
 
             rows.append(
                 {
@@ -465,65 +548,82 @@ class PricingPipeline:
                     "revenue_pred_curr": rev_curr,
                     "delta_units": du,
                     "delta_revenue": dr,
-                    "delta_units_annual": (
-                        du * annual_factor if pd.notna(du) else np.nan
-                    ),
-                    "delta_revenue_annual": (
-                        dr * annual_factor if pd.notna(dr) else np.nan
-                    ),
-                    "revenue_best_annual": (
-                        rev_best * annual_factor if pd.notna(rev_best) else np.nan
-                    ),
+                    "delta_units_annual": (du * annual_factor if pd.notna(du) else np.nan),
+                    "delta_revenue_annual": (dr * annual_factor if pd.notna(dr) else np.nan),
+                    "revenue_best_annual": (rev_best * annual_factor if pd.notna(rev_best) else np.nan),
                 }
             )
+        return pd.DataFrame(rows)
 
-        opps_summary = pd.DataFrame(rows)
-
-        # 7) normalize key dtype across frames
-        for df in (best_avg, all_gam_results, curr_price_df, topsellers, opps_summary):
-            if "asin" in df.columns:
+    def _normalize_key_types(self, *dfs):
+        """Ensure asin is str across frames."""
+        for df in dfs:
+            if isinstance(df, pd.DataFrame) and "asin" in df.columns:
                 df["asin"] = df["asin"].astype(str)
 
-        # 8) frames dict
-        # In PricingPipeline.assemble_dashboard_frames()
-        frames = {
+    def _pack_frames(
+        self,
+        topsellers,
+        best_avg,
+        all_gam_results,
+        elasticity_df,
+        curr_price_df,
+        opps_summary,
+        best50,
+        meta,
+    ):
+        """Final dictionary payload used by the app."""
+        return {
             "price_quant_df": (
-                topsellers.groupby(["price", "product"])["shipped_units"]
-                .sum()
-                .reset_index()
+                topsellers.groupby(["price", "product"])["shipped_units"].sum().reset_index()
             ),
             "best_avg": best_avg,
             "all_gam_results": all_gam_results,
-            "best_optimal_pricing_df": best_avg[
-                ["product", "asin", "price", "asp", "units_pred_avg", "shipped_units"]
-            ].copy(),
+            "best_optimal_pricing_df": best50.copy(),  # consumed by Overview KPIs/callbacks
             "elasticity_df": elasticity_df[["product", "ratio", "pct"]],
             "curr_opt_df": best_avg,
             "curr_price_df": curr_price_df,
             "opps_summary": opps_summary,
-            "meta": {
-                "data_start": data_start,
-                "data_end": data_end,
-                "days_covered": days_covered,
-                "annual_factor": annual_factor,
-            },
+            "meta": meta,
         }
 
-        return frames
+    # -----------------------------
+    # Public API
+    # -----------------------------
+    def assemble_dashboard_frames(self) -> dict:
+        # 1) core
+        topsellers, elasticity_df, all_gam_results = self._build_core_frames()
 
-    @classmethod
-    def from_csv_folder(
-        cls,
-        base_dir,
-        data_folder="data",
-        pricing_file="pricing.csv",
-        product_file="products.csv",
-        top_n=10,
-    ):
-        pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
-        product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
-        return cls(pricing_df, product_df, top_n).assemble_dashboard_frames()
+        # 2) optimizer tables
+        best_avg = self._compute_best_tables(all_gam_results, topsellers)
 
+        # 3) current prices
+        curr_price_df = self._build_curr_price_df()
+
+        # 4) meta (dates & annualization)
+        meta = self._compute_date_meta()
+        annual_factor = meta["annual_factor"]
+
+        # 5) best-50 (P50 revenue)
+        best50 = self._build_best50(all_gam_results)
+
+        # 6) opportunities
+        opps_summary = self._build_opportunity_summary(best50, all_gam_results, curr_price_df, annual_factor)
+
+        # 7) normalize key dtype across frames
+        self._normalize_key_types(best_avg, all_gam_results, curr_price_df, topsellers, opps_summary, best50)
+
+        # 8) pack and return
+        return self._pack_frames(
+            topsellers=topsellers,
+            best_avg=best_avg,
+            all_gam_results=all_gam_results,
+            elasticity_df=elasticity_df,
+            curr_price_df=curr_price_df,
+            opps_summary=opps_summary,
+            best50=best50,
+            meta=meta,
+        )
 
 
 # --------------------------- viz ---------------------------

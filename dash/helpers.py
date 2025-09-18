@@ -8,19 +8,17 @@ import pandas as pd
 import numpy as np
 from typing import Optional  # (put at top if not already present)
 
-
 from typing import List, Dict
-from dash.dash_table import FormatTemplate
 
 # --- home page helpers ---
 from typing import Optional
 from dash import html
 import dash_bootstrap_components as dbc
+from dash.dash_table import FormatTemplate
 
 # --- overview helpers ---
 from typing import Tuple, List, Dict
-import numpy as np
-import pandas as pd
+
 from dash import html
 import dash_bootstrap_components as dbc
 from sklearn.metrics import mean_squared_error
@@ -181,8 +179,8 @@ def compute_product_series(
     df: pd.DataFrame, tag_col="tag", var_col="variation"
 ) -> pd.Series:
     """
-    Vectorized 'PRODUCT' label used across the app (TAG + WEIGHT, uppercased).
-    Expects tag_col and weight_col to exist.
+    Vectorized 'PRODUCT' label used across the app (TAG + VARIATION, uppercased).
+    Expects tag_col and variation_col to exist.
     """
     return (df[tag_col].astype(str) + " " + df[var_col].astype(str)).str.upper()
 
@@ -589,17 +587,24 @@ def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_facto
         best = best50_df[best50_df["asin"] == asin]
         if best.empty:
             return "—", "—"
+
+        # P50 units at best
         daily_units_best = (
-            float(best.get("pred_0.5", np.nan).iloc[0])
+            float(best.get("pred_0.5", np.nan).iloc[0])  # alias of units_pred_0.5
             if "pred_0.5" in best
+            else float(best.get("units_pred_0.5", np.nan).iloc[0])
+            if "units_pred_0.5" in best
             else np.nan
         )
+
+        # P50 revenue at best
         daily_rev_best = (
             float(best.get("revenue_pred_0.5", np.nan).iloc[0])
             if "revenue_pred_0.5" in best
             else np.nan
         )
 
+        # find current operating point on the curve
         cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
         curr_price = float(cp.iloc[0]) if len(cp) else np.nan
 
@@ -611,23 +616,17 @@ def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam, annual_facto
         if prod.empty:
             daily_units_diff = np.nan
         else:
-            idx = (
-                (prod["asp"] - curr_price).abs().idxmin()
-                if pd.notna(curr_price)
-                else None
-            )
+            idx = ((prod["asp"] - curr_price).abs().idxmin()) if pd.notna(curr_price) else None
             if idx is not None:
                 daily_units_curr = float(prod.loc[idx, "pred_0.5"])
                 daily_units_diff = daily_units_best - daily_units_curr
             else:
                 daily_units_diff = np.nan
 
-        units_diff_annual = (
-            (daily_units_diff * 365.0) if pd.notna(daily_units_diff) else np.nan
-        )
-        rev_best_annual = (
-            (daily_rev_best * 365.0) if pd.notna(daily_rev_best) else np.nan
-        )
+        # use pipeline annual_factor
+        units_diff_annual = (daily_units_diff * annual_factor) if pd.notna(daily_units_diff) else np.nan
+        rev_best_annual = (daily_rev_best * annual_factor) if pd.notna(daily_rev_best) else np.nan
+
         return fmt_signed_units(units_diff_annual), fmt_signed_money(rev_best_annual)
     except Exception:
         return "—", "—"

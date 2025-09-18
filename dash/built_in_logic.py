@@ -709,7 +709,7 @@ class viz:
         self.template = template
 
 
-    def gam_results_dual(self, all_gam_results: pd.DataFrame):
+    def gam_results(self, all_gam_results: pd.DataFrame):
         """
         Single y-axis revenue chart with:
         - Revenue band (P2.5 - P97.5)
@@ -741,6 +741,20 @@ class viz:
             if g.empty:
                 continue
 
+            # Actual revenue points
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"],
+                    y=g["revenue_actual"],
+                    mode="markers",
+                    opacity=0.5,  
+                    name=f"{group_name} • Actual Revenue",
+                    marker=dict(color=color_dct[group_name], size=8, symbol="circle"),
+                    legendgroup=group_name,
+                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
+                )
+            )
+
             # Revenue band (P2.5-P97.5)
             fig.add_trace(
                 go.Scatter(
@@ -756,31 +770,6 @@ class viz:
                 )
             )
 
-            # Revenue P50 line
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"], y=g["revenue_pred_0.5"],
-                    mode="lines",
-                    name=f"{group_name} • Expected Revenue (P50)",
-                    line=dict(color="#B82132", width=2),
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}<extra></extra>",
-                )
-            )
-
-            # Actual revenue points
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"],
-                    y=g["revenue_actual"],
-                    mode="markers",
-                    name=f"{group_name} • Actual Revenue",
-                    marker=dict(color=color_dct[group_name], size=8, symbol="circle"),
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
-                )
-            )
-
             # Add markers for recommended (P50), conservative (P2.5) and optimistic (P97.5) prices
             best_rows = {
                 'Recommended (P50)': ('0.5', g.loc[g["revenue_pred_0.5"].idxmax()]),
@@ -789,9 +778,9 @@ class viz:
             }
 
             marker_colors = {
-                'Recommended (P50)': "#B82132",
                 'Conservative (P2.5)': "#1F6FEB", 
-                'Optimistic (P97.5)': "#238636"
+                'Optimistic (P97.5)': "#238636",
+                'Recommended (P50)': "#B82132",
             }
 
             for label, (quantile, row) in best_rows.items():
@@ -811,6 +800,19 @@ class viz:
                         hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
                     )
                 )
+
+
+            # Revenue P50 line
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"], y=g["revenue_pred_0.5"],
+                    mode="lines",
+                    name=f"{group_name} • Expected Revenue (P50)",
+                    line=dict(color="#B82132", width=2),
+                    legendgroup=group_name,
+                    hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}<extra></extra>",
+                )
+            )
 
         fig.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
@@ -832,7 +834,7 @@ class viz:
 
     # keep a generic name for backward-compat
     def gam_results(self, all_gam_results: pd.DataFrame):
-        return self.gam_results_dual(all_gam_results)
+        return self.gam_results(all_gam_results)
 
 
     def elast_dist(self, elast_df: pd.DataFrame):

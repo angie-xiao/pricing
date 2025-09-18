@@ -633,7 +633,7 @@ class OverviewHelpers:
 
     @staticmethod
     def dual_graph(viz, filt_df: pd.DataFrame):
-        return viz.gam_results_dual(filt_df) if len(filt_df) else viz.empty_fig("No model data")
+        return viz.gam_results(filt_df) if len(filt_df) else viz.empty_fig("No model data")
 
     @staticmethod
     def scenario_records(filt_df: pd.DataFrame) -> List[Dict[str, Any]]:

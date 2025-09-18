@@ -3,16 +3,12 @@ from dash import html
 import dash_bootstrap_components as dbc
 
 # Helpers (styles + small builders + footer)
-from helpers import (
-    HOME_ACCENT,
-    HOME_MUTED,
-    HOME_SECTION_STYLE,
-    HOME_CARD_STYLE,  # kept for consistency if you want to reuse directly
-    home_step_card,
-    info_card,
-    build_footer_two_lines,
-)
+from helpers import *
 
+HOME_ACCENT = Style.HOME_ACCENT
+HOME_MUTED = Style.HOME_MUTED
+HOME_SECTION_STYLE = Style.HOME_SECTION_STYLE
+HOME_CARD_STYLE = Style.HOME_CARD_STYLE 
 
 # -----------------------
 # Components (Explainers)
@@ -102,7 +98,7 @@ def problem_objective_section():
             )
         ],
         fluid=True,
-        style=HOME_SECTION_STYLE,
+        style=Style.HOME_SECTION_STYLE,
     )
 
 

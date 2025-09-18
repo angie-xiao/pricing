@@ -10,19 +10,19 @@ from built_in_logic import viz as Viz
 from navbar import get_navbar
 from home import Homepage
 import overview, opps, faq
-from helpers import (
-    BASE_DIR,
-    PROJECT_BASE,
-    build_frames_with_cache,
-    make_products_lookup,
-)
+from helpers import (Paths, Cache, DataEng)
 
 import warnings
 
 warnings.filterwarnings("ignore")
 
+
 # ---------- Load data (cached) ----------
-frames = build_frames_with_cache(PROJECT_BASE)
+BASE_DIR = Paths.BASE_DIR
+PROJECT_BASE = Paths.PROJECT_BASE
+
+
+frames = Cache.build_frames_with_cache(PROJECT_BASE)
 price_quant_df = frames["price_quant_df"]
 best_avg_df = frames["best_avg"]
 all_gam_results = frames["all_gam_results"]
@@ -34,7 +34,7 @@ opps_summary = frames["opps_summary"]
 meta = frames["meta"]  # {data_start, data_end, days_covered, annual_factor}
 
 # --- Build lookups ---
-lookup_all = make_products_lookup(
+lookup_all = DataEng.make_products_lookup(
     best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results
 )
 

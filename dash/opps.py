@@ -4,24 +4,20 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from helpers import OppsTable,Style   # import locally
 
-# import centralized helpers/constants
-from helpers import (
-    OPP_LEFT_INSET,
-    OPP_GAP_H1_TO_TABLE,
-    OPP_GAP_TABLE_TO_H3,
-    OPP_GAP_H3_TO_GRAPH,
-    ensure_days_valid_column,
-    build_opp_table_columns,
-)
+OPP_LEFT_INSET = Style.OPP_LEFT_INSET
+OPP_GAP_H1_TO_TABLE = Style.OPP_GAP_H1_TO_TABLE
+OPP_GAP_TABLE_TO_H3 = Style.OPP_GAP_TABLE_TO_H3
+OPP_GAP_H3_TO_GRAPH = Style.OPP_GAP_H3_TO_GRAPH
 
 
 def layout(opp_table_df: pd.DataFrame):
     # make sure 'days_asp_valid' exists
-    table_df = ensure_days_valid_column(opp_table_df)
+    table_df = OppsTable.ensure_days_valid_column(opp_table_df)
 
     # build columns
-    cols = build_opp_table_columns(table_df)
+    cols = OppsTable.build_opp_table_columns(table_df)
 
     data = table_df.to_dict("records") if isinstance(table_df, pd.DataFrame) else []
 
@@ -155,7 +151,7 @@ def register_callbacks(app, opp_inputs, opp_table_df: pd.DataFrame, viz_cls):
         prevent_initial_call=False,
     )
     def _fill_table(_):
-        df = ensure_days_valid_column(opp_table_df)
+        df = OppsTable.ensure_days_valid_column(opp_table_df)
         return df.to_dict("records")
 
     @app.callback(

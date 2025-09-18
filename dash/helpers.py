@@ -178,13 +178,13 @@ def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_product_series(
-    df: pd.DataFrame, tag_col="tag", weight_col="weight"
+    df: pd.DataFrame, tag_col="tag", var_col="variation"
 ) -> pd.Series:
     """
     Vectorized 'PRODUCT' label used across the app (TAG + WEIGHT, uppercased).
     Expects tag_col and weight_col to exist.
     """
-    return (df[tag_col].astype(str) + " " + df[weight_col].astype(str)).str.upper()
+    return (df[tag_col].astype(str) + " " + df[var_col].astype(str)).str.upper()
 
 
 def nearest_row_at_price(prod_df: pd.DataFrame, price: float, price_col: str = "asp"):
@@ -200,16 +200,24 @@ def nearest_row_at_price(prod_df: pd.DataFrame, price: float, price_col: str = "
         return None
 
 
-def pick_best_by_group(
-    df: pd.DataFrame, group_col: str, target_col: str
-) -> pd.DataFrame:
+# def pick_best_by_group(
+#     df: pd.DataFrame, group_col: str, target_col: str
+# ) -> pd.DataFrame:
+#     """
+#     For each group, pick the row with the max target_col.
+#     Returns empty DataFrame if target_col missing or all-NA.
+#     """
+#     if df is None or df.empty or target_col not in df or df[target_col].isna().all():
+#         return pd.DataFrame()
+#     return df.loc[df.groupby(group_col)[target_col].idxmax()]
+
+def pick_best_by_group(df: pd.DataFrame, group_col: str, value_col: str) -> pd.DataFrame:
     """
-    For each group, pick the row with the max target_col.
-    Returns empty DataFrame if target_col missing or all-NA.
+    For each group, pick the row with the highest value in value_col
     """
-    if df is None or df.empty or target_col not in df or df[target_col].isna().all():
-        return pd.DataFrame()
-    return df.loc[df.groupby(group_col)[target_col].idxmax()]
+    idx = df.groupby(group_col)[value_col].idxmax()
+    return df.loc[idx].reset_index(drop=True)
+
 
 
 # ----------- for opp.py -----------

@@ -693,7 +693,6 @@ class PricingPipeline:
 
 # --------------------------- viz ---------------------------
 class viz:
-
     def __init__(self, template="lux"):
         templates = [
             "bootstrap",
@@ -710,21 +709,20 @@ class viz:
         self.template = template
 
 
-    # -------- Dual-axis figure (Revenue & Units; actual vs predicted) --------
     def gam_results_dual(self, all_gam_results: pd.DataFrame):
         """
-        One chart, two y-axes:
-          - Left Y: Revenue ($)  | band (P2.5–P97.5), P50 line, actual revenue (x markers), Rec Price marker
-          - Right Y: Units       | P50 line, actual units (circle markers)
+        Single y-axis revenue chart with:
+        - Revenue band (P2.5 - P97.5)
+        - P50 revenue line
+        - Actual revenue points
+        - Markers for recommended, conservative and optimistic prices
         """
         if all_gam_results is None or all_gam_results.empty:
             return self.empty_fig("No model data")
 
         need_cols = [
-            "product", "asp",
-            "revenue_actual",
+            "product", "asp", "revenue_actual",
             "revenue_pred_0.025", "revenue_pred_0.5", "revenue_pred_0.975",
-            "shipped_units", "units_pred_0.5"
         ]
         for c in need_cols:
             if c not in all_gam_results.columns:
@@ -743,10 +741,7 @@ class viz:
             if g.empty:
                 continue
 
-            # Best rows (by P50 revenue) for the "Rec. Price" marker
-            best_50_row = g.loc[g["revenue_pred_0.5"].idxmax()].to_frame().T
-
-            # --- Revenue band (left Y) ---
+            # Revenue band (P2.5-P97.5)
             fig.add_trace(
                 go.Scatter(
                     name=f"{group_name} (Rev band)",
@@ -761,72 +756,61 @@ class viz:
                 )
             )
 
-            # --- Actual revenue (left Y) ---
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"], y=g["revenue_actual"],
-                    mode="markers",
-                    name=f"{group_name} • Actual Revenue",
-                    marker=dict(symbol="x", color=color_dct[group_name], size=9),
-                    opacity=0.55,
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
-                    yaxis="y",
-                )
-            )
-
-            # --- Predicted revenue P50 line (left Y) ---
+            # Revenue P50 line
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"], y=g["revenue_pred_0.5"],
                     mode="lines",
-                    name=f"{group_name} • Pred Rev (P50)",
+                    name=f"{group_name} • Expected Revenue (P50)",
                     line=dict(color="#B82132", width=2),
                     legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Pred Rev (P50)=%{y:$,.0f}<extra></extra>",
-                    yaxis="y",
+                    hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}<extra></extra>",
                 )
             )
 
-            # --- Recommended price marker by P50 revenue (left Y) ---
+            # Actual revenue points
             fig.add_trace(
                 go.Scatter(
-                    x=best_50_row["asp"], y=best_50_row["revenue_pred_0.5"],
+                    x=g["asp"],
+                    y=g["revenue_actual"],
                     mode="markers",
-                    marker=dict(color="#B82132", size=16),
-                    name=f"{group_name} • Rec. Price",
+                    name=f"{group_name} • Actual Revenue",
+                    marker=dict(color=color_dct[group_name], size=8, symbol="circle"),
                     legendgroup=group_name,
-                    hovertemplate="Rec Price=%{x:$,.2f}<br>Pred Rev (P50)=%{y:$,.0f}<extra></extra>",
-                    yaxis="y",
+                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
                 )
             )
 
-            # --- Units: P50 line (right Y) ---
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"], y=g["units_pred_0.5"],
-                    mode="lines",
-                    name=f"{group_name} • Pred Units (P50)",
-                    line=dict(color="#1F6FEB", width=2, dash="solid"),
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Pred Units (P50)=%{y:,.0f}<extra></extra>",
-                    yaxis="y2",
-                )
-            )
+            # Add markers for recommended (P50), conservative (P2.5) and optimistic (P97.5) prices
+            best_rows = {
+                'Recommended (P50)': ('0.5', g.loc[g["revenue_pred_0.5"].idxmax()]),
+                'Conservative (P2.5)': ('0.025', g.loc[g["revenue_pred_0.025"].idxmax()]),
+                'Optimistic (P97.5)': ('0.975', g.loc[g["revenue_pred_0.975"].idxmax()])
+            }
 
-            # --- Units: actual (right Y) ---
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"], y=g["shipped_units"],
-                    mode="markers",
-                    name=f"{group_name} • Actual Units",
-                    marker=dict(symbol="circle-open", color=color_dct[group_name], size=9),
-                    opacity=0.55,
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Units=%{y:,.0f}<extra></extra>",
-                    yaxis="y2",
+            marker_colors = {
+                'Recommended (P50)': "#B82132",
+                'Conservative (P2.5)': "#1F6FEB", 
+                'Optimistic (P97.5)': "#238636"
+            }
+
+            for label, (quantile, row) in best_rows.items():
+                pred_col = f"revenue_pred_{quantile}"
+                fig.add_trace(
+                    go.Scatter(
+                        x=[row["asp"]], 
+                        y=[row[pred_col]],
+                        mode="markers",
+                        marker=dict(
+                            color=marker_colors[label], 
+                            size=16,
+                            symbol='diamond'
+                        ),
+                        name=f"{group_name} • {label}",
+                        legendgroup=group_name,
+                        hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
+                    )
                 )
-            )
 
         fig.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
@@ -837,12 +821,6 @@ class viz:
                 tickprefix="$",
                 separatethousands=True,
             ),
-            yaxis2=dict(
-                title="Expected Daily Units",
-                overlaying="y",
-                side="right",
-                separatethousands=True,
-            ),
             xaxis=dict(
                 title="Average Selling Price (ASP)",
                 tickprefix="$",
@@ -850,6 +828,7 @@ class viz:
             ),
         )
         return fig
+
 
     # keep a generic name for backward-compat
     def gam_results(self, all_gam_results: pd.DataFrame):
@@ -1012,10 +991,9 @@ class viz:
 if __name__ == "__main__":
     pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
 
-    # DataEngineer(pricing_df, product_df, top_n=10).prepare()
-
     all_gam_results = GAMModeler(
-        DataEngineer(pricing_df, product_df, top_n=10).prepare(),).run()
+        DataEngineer(pricing_df, product_df, top_n=10).prepare()).run()
 
-    # PricingPipeline(pricing_df, product_df, top_n=10).assemble_dashboard_frames()
-    viz.gam_results(all_gam_results)
+    # Create a viz instance first, then call the method
+    viz_instance = viz()
+    viz_instance.gam_results(all_gam_results)

@@ -90,16 +90,19 @@ class DataEngineer:
         # Get actual values
         y_true = sub["shipped_units"].values
 
+        # robustness check
         for tail_strength in param_grid["tail_strength"]:
             for tail_p in param_grid["tail_p"]:
-                # Generate weights with current parameters
                 weights = self._make_weights(sub, tail_strength, tail_p)
-
-                # Fit a simple model (e.g. weighted average) to predict units
+                
+                # Add robustness check
+                if weights.std() > 2.0:  # Skip if weights are too dispersed
+                    continue
+                    
                 if len(weights) > 0:
                     y_pred = np.average(y_true, weights=weights)
                     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-
+                    
                     if rmse < best_rmse:
                         best_rmse = rmse
                         best_params = (tail_strength, tail_p)
@@ -131,18 +134,23 @@ class DataEngineer:
         decayed_df = self._time_decay(sub)
         w = decayed_df["time_decay_weight"].values
 
-        # Price outlier adjustments
+
+        # Modify the outlier adjustment formula
         if tail_strength > 0:
             asp = sub["price"].values.astype(float)
             q25, q75 = np.percentile(asp, [25, 75])
             iqr = q75 - q25 if q75 > q25 else 1.0
+            
+            # Add a cap to relative distance calculation
             rel_dist = np.abs(asp - np.median(asp)) / iqr
-            w *= 1.0 + tail_strength * np.minimum(rel_dist, 2.0) ** tail_p
+            max_dist = 1.5  # Reduce from 2.0 to 1.5
+            
+            # Add dampening factor and reduce power
+            dampening = 0.7
+            w *= 1.0 + (tail_strength * dampening) * np.minimum(rel_dist, max_dist) ** (tail_p * 0.8)
 
-        # Normalize weights
-        w = w / np.mean(w) if w.size > 0 else w
+        return w / np.mean(w) if w.size > 0 else w
 
-        return w
 
     def _days_at_price(self, df) -> pd.DataFrame:
         """
@@ -312,31 +320,22 @@ class ElasticityAnalyzer:
 class GAMTuner:
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
         self.expectile = expectile
-        self.lam_grid = (
-            np.array(lam_grid) if lam_grid is not None else np.logspace(-4, 3, 8)
-        )
-        self.n_splines_grid = n_splines_grid or [5, 10, 20, 30]
+        self.lam_grid = np.logspace(-3, 3, 10) if lam_grid is None else np.array(lam_grid)
+        self.n_splines_grid = n_splines_grid or [10, 20, 30]
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
         scaler_X = StandardScaler()
-        Xs = scaler_X.fit_transform(X.astype(float))
-
-        # Adjust terms to match the 5 input features
-        terms = (
-            s(0, spline_order=3)  # price
-            + s(1, spline_order=2)  # deal_discount_percent
-            + s(2, spline_order=2)  # event_encoded
-            + s(3, spline_order=2)  # product_encoded
-            + s(4, spline_order=2)  # wt
-        )
-
+        Xs = scaler_X.fit_transform(X.reshape(-1, 1).astype(float))
+        
+        # Single term for price only
+        terms = s(0, basis='ps', n_splines=20)
+        
         gam = ExpectileGAM(terms, expectile=self.expectile)
         try:
             gam = gam.gridsearch(
                 Xs,
                 y.astype(float),
                 lam=self.lam_grid,
-                n_splines=self.n_splines_grid,
                 weights=sample_weight,
             )
         except Exception as e:
@@ -344,9 +343,9 @@ class GAMTuner:
             gam = ExpectileGAM(terms, expectile=self.expectile).fit(
                 Xs, y.astype(float), weights=sample_weight
             )
+        
         gam._scaler_X = scaler_X
         return gam
-
 
 class GAMModeler:
     def __init__(
@@ -354,8 +353,13 @@ class GAMModeler:
         topsellers: pd.DataFrame,
         tail_strength: float = None,
         tail_p: float = None,
-        use_grid_search: bool = False,
-        custom_grid: dict = None,
+        # use_grid_search: bool = False,
+        # custom_grid: dict =(
+        #     {
+        #         "tail_strength": [0.1, 0.2, 0.3, 0.4, 0.5],  # Reduced from [0.1, 0.3, 0.5, 0.7, 0.9]
+        #         "tail_p": [0.2, 0.4, 0.6, 0.8, 1.0],  # Reduced from [0.2, 0.6, 1.0, 1.4, 1.8]
+        #     }
+        # ),
     ):
         """
         Parameters
@@ -376,8 +380,8 @@ class GAMModeler:
         self.topsellers = topsellers
         self.tail_strength = tail_strength
         self.tail_p = tail_p
-        self.use_grid_search = use_grid_search
-        self.custom_grid = custom_grid
+        # self.use_grid_search = use_grid_search
+        # self.custom_grid = custom_grid
         self.engineer = DataEngineer(None, None)
 
     # --------- helpers ---------
@@ -391,52 +395,32 @@ class GAMModeler:
         ]
 
     def _make_design_matrix(self, sub: pd.DataFrame) -> tuple:
-        """
-        Prepare subgroup rows: sort, add weights (wt), drop NaNs, and build (X, y, w).
-        Returns (sub_clean, X, y, w). If not enough rows, returns (None, None, None, None).
-        """
+        """Prepare subgroup rows: sort, add weights, drop NaNs, build (X, y, w)."""
         if sub is None or sub.empty:
             return None, None, None, None
 
         # sort by price for consistent curves
         sub = sub.sort_values("price").reset_index(drop=True)
 
-        # add weights once (time decay + outlier boost)
-        if self.use_grid_search:
-            if self.custom_grid:
-                self.tail_strength, self.tail_p, _ = self.engineer._grid_search_weights(
-                    sub, param_grid=self.custom_grid
-                )
-            else:
-                self.tail_strength, self.tail_p, _ = self.engineer._grid_search_weights(
-                    sub
-                )
-
-        w = self.engineer._make_weights(sub, self.tail_strength, self.tail_p)
+        # add weights (simpler version)
+        w = np.ones(len(sub))  # equal weights or modify as needed
         sub = pd.concat([sub, pd.Series(w, name="wt")], axis=1)
 
-        # keep only rows with complete predictors & target
-        need = self._required_cols() + ["wt"]
-        sub_clean = sub.dropna(subset=need).copy()
-        if sub_clean.shape[0] < 3:  # not enough points to fit a curve
+        # keep only rows with complete price & target
+        sub_clean = sub.dropna(subset=["price", "shipped_units"]).copy()
+        if sub_clean.shape[0] < 5:  # minimum points needed
             return None, None, None, None
 
-        # design / target / weights
-        X = sub_clean[
-            ["price", "deal_discount_percent", "event_encoded", "product_encoded", "wt"]
-        ].to_numpy(dtype=float)
+        # design matrix is just price
+        X = sub_clean[["price"]].to_numpy(dtype=float)
         y = sub_clean["shipped_units"].to_numpy(dtype=float)
         w = sub_clean["wt"].to_numpy(dtype=float)
 
-        # guard against non-finite
-        if (
-            not np.isfinite(X).all()
-            or not np.isfinite(y).all()
-            or not np.isfinite(w).all()
-        ):
+        if not np.isfinite(X).all() or not np.isfinite(y).all():
             return None, None, None, None
 
         return sub_clean, X, y, w
+
 
     def _fit_expectiles(
         self, X: np.ndarray, y: np.ndarray, w: np.ndarray, qs=(0.025, 0.5, 0.975)
@@ -584,17 +568,17 @@ class PricingPipeline:
         pricing_df,
         product_df,
         top_n=10,
-        use_grid_search=True,
-        custom_grid=(
-            {
-                "tail_strength": [0.1, 0.3, 0.5, 0.7, 0.9],
-                "tail_p": [0.2, 0.6, 1.0, 1.4, 1.8],
-            }
-        ),
+        # use_grid_search=True,
+        # custom_grid=(
+        #     {
+        #         "tail_strength": [0.1, 0.2, 0.3, 0.4, 0.5],  # Reduced from [0.1, 0.3, 0.5, 0.7, 0.9]
+        #         "tail_p": [0.2, 0.4, 0.6, 0.8, 1.0],  # Reduced from [0.2, 0.6, 1.0, 1.4, 1.8]
+        #     }
+        # ),
     ):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
-        self.use_grid_search = use_grid_search
-        self.custom_grid = custom_grid
+        # self.use_grid_search = use_grid_search
+        # self.custom_grid = custom_grid
 
     @classmethod
     def from_csv_folder(
@@ -629,8 +613,8 @@ class PricingPipeline:
         # Initialize GAMModeler with grid search parameters
         modeler = GAMModeler(
             topsellers,
-            use_grid_search=self.use_grid_search,
-            custom_grid=self.custom_grid,
+            # use_grid_search=self.use_grid_search,
+            # custom_grid=self.custom_grid,
         )
 
         # Run the model

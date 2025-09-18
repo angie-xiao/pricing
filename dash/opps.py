@@ -17,7 +17,7 @@ def layout(opp_table_df: pd.DataFrame):
     table_df = OppsTable.ensure_days_valid_column(opp_table_df)
 
     # build columns
-    cols = OppsTable.build_opp_table_columns(table_df)
+    cols = OppsTable.build_columns(table_df)
 
     data = table_df.to_dict("records") if isinstance(table_df, pd.DataFrame) else []
 

@@ -1,5 +1,6 @@
 # overview.py
-from dash import Input, Output
+from dash import html, dcc, Input, Output, dash_table
+import dash_bootstrap_components as dbc
 from helpers import (
     Style,                        # colors / constants
     OverviewUI as UI,             # kpi_card
@@ -101,3 +102,191 @@ def register_callbacks(
             scenario_data,              # scenario_table (combined)
             cov,                        # coverage_note
         )
+        
+        
+
+def layout(products_lookup):
+    """Pass a Top-N-only DataFrame with columns ['asin','product']."""
+    return dbc.Container([
+        html.H1(
+            "Overview",
+            className="display-5",
+            style={"textAlign": "center", "padding": "58px 0 8px"},
+        ),
+        # Product selector (Top-N only)
+        dbc.Row([
+            dbc.Col(
+                html.Label(
+                    "Select a Product:",
+                    style={
+                        "fontWeight": 600,
+                        "textAlign": "right",
+                        "marginRight": "10px",
+                    },
+                ),
+                width="auto",
+            ),
+            dbc.Col(
+                dcc.Dropdown(
+                    id="product_dropdown_snap",
+                    options=[
+                        {"label": r["product"], "value": r["asin"]}
+                        for _, r in products_lookup.iterrows()
+                    ],
+                    value=(
+                        products_lookup["asin"].iloc[0]
+                        if len(products_lookup)
+                        else None
+                    ),
+                    style={"width": "300px"},
+                    clearable=False,
+                ),
+                width="auto",
+            ),
+        ],
+        justify="center",
+        align="center",
+        style={"padding": "10px 0 20px"},
+        ),
+        # KPI row
+        dbc.Row([
+            UI.kpi_card("card_title_date_range", "Number of Days", "date_range_value", bg="#eef2fa", id_subtext="date-range-subtext"),
+            UI.kpi_card("card_title_curr_price_snap", "Current Price", "curr_price_snap", bg="#eef2fa"),
+            UI.kpi_card("card_title_snap", "Recommended Price", "card_asp_snap", bg="#F5E8D8"),
+            UI.kpi_card("card_title_elasticity_snap", "Elasticity", "elasticity_ratio_snap", bg="#eef2fa", id_subtext="elasticity-subtext"),
+            UI.kpi_card("card_title_units_opp_ann", "Annualized Units Sold Opportunity", "units_opp_ann_value", bg="#eef8f0"),
+            UI.kpi_card("card_title_rev_best_ann", "Annualized Revenue Opportunity", "rev_best_ann_value", bg="#eef8f0"),
+            UI.kpi_card("card_title_fit_snap", "Model Fit (Daily Revenue)", "fit_value_snap", bg="#eef2fa", id_subtext="fit-subtext"),
+        ],
+        className="g-4 align-items-stretch",
+        justify="center",
+        align="center",
+        style={"padding": "10px 0 10px"},
+        ),
+
+            
+        html.Br(),
+        html.Hr(className="my-4", style={"padding": "20px"}),
+        # Graph + scenario section
+        dbc.Row([
+            html.H3(
+                "Predictive Graph",
+                className="mt-3",
+                style={
+                    "marginLeft": "50px",
+                    "marginTop": "190px",
+                    "color": OVERVIEW_ACCENT,
+                },
+            ),
+            dbc.Col([
+                dcc.Loading(
+                    type="circle",
+                    children=dcc.Graph(
+                        id="gam_results_dual",
+                        style={"height": "560px"},
+                        config={"displaylogo": False},
+                    ),
+                )
+            ],
+            md=8,
+            xs=12,
+            className="mb-0",
+            ),
+            # Scenario table and explainer
+            dbc.Col([
+                html.H6(
+                    "Scenario Summary",
+                    className="mb-2",
+                    style={"textAlign": "center", "marginTop": "40px"},
+                ),
+                dash_table.DataTable(
+                    id="scenario_table",
+                    columns=[
+                        {"name": "Case", "id": "case"},
+                        {"name": "Price", "id": "price"},
+                        {"name": "Revenue", "id": "revenue"},
+                    ],
+                    style_table={"border": "none", "marginBottom": "12px"},
+                    style_cell={
+                        "textAlign": "center",
+                        "border": "none",
+                        "fontSize": "14px",
+                        "padding": "6px",
+                    },
+                    style_header={
+                        "fontWeight": 600,
+                        "border": "none",
+                        "backgroundColor": "#f6f6f6",
+                    },
+                ),
+                dbc.Card(
+                    dbc.CardBody([
+                        html.H6(
+                            "How to read this",
+                            className="mb-2 fw-bold text-uppercase",
+                        ),
+                        html.Ul([
+                            html.Li([
+                                html.B("Goal: "),
+                                "Pick the price where the central curve's expected revenue is highest.",
+                            ]),
+                            html.Li([
+                                html.B("Range: "),
+                                "Conservative and optimistic curves show how outcomes may vary.",
+                            ]),
+                            html.Li([
+                                html.B("Confidence: "),
+                                "Stronger when all curves peak around a similar price and there's lots of nearby data.",
+                            ]),
+                        ],
+                        className="predictive-explainer-list",
+                        ),
+                    ]),
+                    className="shadow-sm",
+                    style={"marginTop": "70px"},
+                ),
+            ],
+            md=4,
+            xs=12,
+            ),
+        ],
+        className="g-3 mb-2",
+        ),
+        # Coverage note
+        html.Div(
+            html.Span(html.I(id="coverage_note")),
+            style={
+                "textAlign": "center",
+                "color": "#5f6b7a",
+                "fontSize": "0.9em",
+                "marginBottom": "50px",
+            },
+        ),
+        # Footer
+        html.Div([
+            html.Div(
+                [html.Span("made with ♥️ | "), html.Span(html.I("@aqxiao"))],
+                style={"marginBottom": "4px"},
+            ),
+            html.A(
+                "github.com/angie-xiao",
+                href="https://github.com/angie-xiao",
+                style={"textDecoration": "none", "color": "#ac274f"},
+            ),
+        ],
+        style={
+            "display": "flex",
+            "flexDirection": "column",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "height": "80px",
+            "fontSize": "0.8em",
+            "color": "#ac274f",
+            "backgroundColor": "#f3f3f3",
+            "borderRadius": "0",
+            "width": "100%",
+            "marginTop": "40px",
+        }),
+    ],
+    fluid=True,
+    )

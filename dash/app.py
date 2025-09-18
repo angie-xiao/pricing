@@ -31,44 +31,34 @@ elasticity_df = frames["elasticity_df"]
 curr_opt_df = frames["curr_opt_df"]
 curr_price_df = frames["curr_price_df"]
 opps_summary = frames["opps_summary"]
-meta = frames["meta"]  # {data_start, data_end, days_covered, annual_factor}
+meta = frames["meta"]  # {data_start, data_end, days_covered}
 
 # --- Build lookups ---
 lookup_all = DataEng.make_products_lookup(
     best_optimal_pricing, best_avg_df, curr_price_df, all_gam_results
 )
 
-dropdown_lookup = (
-    best_optimal_pricing[["product", "asin"]]
-    .dropna(subset=["asin"])
+
+# First, create best50_optimal_pricing
+idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
+best50_optimal_pricing = (
+    all_gam_results.loc[
+        idx, ["product", "asin", "asp", "revenue_pred_0.5", "units_pred_0.5"]
+    ]
+    .reset_index(drop=True)
     .drop_duplicates(subset=["product"])
+)
+
+
+# Then create dropdown_lookup from best50_optimal_pricing
+dropdown_lookup = (
+    best50_optimal_pricing[["product", "asin", "revenue_pred_0.5"]]
+    .sort_values(by="revenue_pred_0.5", ascending=False)  # Sort by revenue
+    .dropna(subset=["asin"])
     .astype({"asin": str})
     .reset_index(drop=True)
 )
 
-if "revenue_pred_0.5" in all_gam_results.columns:
-    idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
-    best50_optimal_pricing = (
-        all_gam_results.loc[
-            idx, ["product", "asp", "revenue_pred_0.5", "units_pred_0.5"]
-        ]
-        .reset_index(drop=True)
-        .merge(dropdown_lookup, on="product", how="left")[
-            ["product", "asin", "asp", "revenue_pred_0.5", "units_pred_0.5"]
-        ]
-    )
-
-else:
-    best50_optimal_pricing = (
-        best_optimal_pricing[["product", "asin", "asp"]]
-        .merge(
-            all_gam_results[["product", "asp", "revenue_pred_0.5", "pred_0.5"]],
-            on=["product", "asp"],
-            how="left",
-        )
-        .drop_duplicates(subset=["product"])
-        .reset_index(drop=True)
-    )
 
 # ---------- app ----------
 app = Dash(

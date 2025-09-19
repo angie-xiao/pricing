@@ -660,16 +660,6 @@ class DataEngineer:
         - encodes categories
         Returns: DataFrame ready for downstream modeling.
         """
-
-        # # --- sanity: need pricing & product frames
-        # if self.pricing_df is None or self.product_df is None:
-        #     _v(
-        #         self,
-        #         "[prepare] pricing_df or product_df is None -> returning empty df",
-        #         "WARN",
-        #     )
-        #     return pd.DataFrame()
-
         # 1) normalize column names
         self.pricing_df = DataEng.clean_cols(self.pricing_df)
         self.product_df = DataEng.clean_cols(self.product_df)
@@ -771,80 +761,69 @@ class DataEngineer:
 
         res = self._label_encoder(filtered)
 
-        # _v(
-        #     self,
-        #     f"[prepare] rows={len(res)} topN={len(top_n_products)} unique_products={res['product'].nunique()}",
-        # )
         return res
-
-
-# --- DROP-IN REPLACEMENT: GAMTuner ---
-
-import numpy as np
-from sklearn.preprocessing import StandardScaler
-from pygam import ExpectileGAM, s, f, te  # ensure f, te are imported
 
 
 class GAMTuner:
     """
-    Lightweight tuner for ExpectileGAM with concise logging.
-    Accepts constructor args and exposes .fit(X, y, sample_weight).
-
-    Args:
-        expectile (float): target expectile, e.g. 0.5, 0.025, 0.975
-        lam_grid (array-like|None): coarse lambda grid; default logspace 1e-6..1e9 (18 pts)
-        n_splines_grid (list[int]|None): candidate spline counts for price; default [15,25,35,45]
-        use_interaction (bool): whether to add te(0,1) tensor term; default False
+    Silent tuner for ExpectileGAM.
+    - Uses coarse + fine lambda search over multiple n_splines for price.
+    - No logging here; caller can read best info from returned model:
+        model._tuning_n_price, model._tuning_lam, model._tuning_score
     """
 
     def __init__(
         self, expectile=0.5, lam_grid=None, n_splines_grid=None, use_interaction=False
     ):
-        self.expectile = expectile
+        self.expectile = float(expectile)
         self.lam_grid = (
-            np.logspace(-6, 9, 18)
-            if lam_grid is None
-            else np.array(lam_grid, dtype=float)
+            np.logspace(-6, 9, 18) if lam_grid is None else np.asarray(lam_grid, float)
         )
         self.n_splines_grid = (
-            [15, 25, 35, 45] if not n_splines_grid else list(n_splines_grid)
+            [15, 25, 35, 45] if n_splines_grid is None else list(n_splines_grid)
         )
         self.use_interaction = bool(use_interaction)
-        self._verbose = getattr(self, "_verbose", False)  # allow external toggle
+        # external toggles (not used for printing here; kept for compatibility)
+        self._verbose = getattr(self, "_verbose", False)
 
-    # tiny logger helper (uses your _v/_p if present)
-    def _log(self, msg):
-        try:
-            from datetime import datetime
-
-            if getattr(self, "_verbose", False):
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] GAMTuner {msg}",
-                    flush=True,
-                )
-        except Exception:
-            pass
-
-    def _build_terms(self, n_price: int):
-        terms = (
-            s(0, basis="ps", n_splines=int(n_price))
-            + s(1, basis="ps", n_splines=15)
-            + f(2)
-        )
-        if self.use_interaction:
-            terms = terms + te(0, 1)
-        return terms
-
+    # ---------- public API ----------
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
-        import numpy as np
-        from sklearn.preprocessing import StandardScaler
-        from pygam import ExpectileGAM
+        Xs, y, sw, scaler, num_idx, fac_idx = self._prepare_data(X, y, sample_weight)
 
+        best_gam, best_ns, coarse_lam, best_score = self._coarse_search(
+            Xs, y, sw, sample_weight
+        )
+
+        best_gam, best_score, lam_mean = self._fine_search(
+            Xs, y, sw, sample_weight, best_ns, coarse_lam, best_gam, best_score
+        )
+
+        if best_gam is None:
+            # Last-resort single fit with a reasonable terms spec
+            terms = self._build_terms(best_ns if best_ns is not None else 25)
+            best_gam = ExpectileGAM(
+                terms, expectile=self.expectile, fit_intercept=True
+            ).fit(Xs, y, weights=sample_weight)
+            lam_mean = self._lam_mean(getattr(best_gam, "lam", None))
+            best_score = np.nan
+
+        # attach preprocessors + tuning summary
+        best_gam._scaler = scaler
+        best_gam._num_idx = num_idx
+        best_gam._fac_idx = fac_idx
+        best_gam._tuning_n_price = best_ns
+        best_gam._tuning_lam = lam_mean
+        best_gam._tuning_score = (
+            float(best_score) if np.isfinite(best_score) else np.nan
+        )
+        return best_gam
+
+    # ---------- helpers ----------
+    def _prepare_data(self, X, y, sample_weight):
         X = np.asarray(X, float)
         y = np.asarray(y, float)
+        num_idx, fac_idx = [0, 1], [2]
 
-        num_idx = [0, 1]
-        fac_idx = [2]
         scaler = StandardScaler()
         X_num = scaler.fit_transform(X[:, num_idx])
         X_fac = X[:, fac_idx]
@@ -856,20 +835,32 @@ class GAMTuner:
             sw[~np.isfinite(sw)] = 0.0
             ssum = sw.sum()
             sw = (sw / ssum) if ssum > 0 else None
+        return Xs, y, sw, scaler, num_idx, fac_idx
 
-        def _score(gam):
-            y_pred = gam.predict(Xs)
-            resid2 = (y - y_pred) ** 2
-            mse = float((resid2 * sw).sum()) if sw is not None else float(resid2.mean())
-            rmse = np.sqrt(mse)
-            denom = max(np.mean(np.abs(y_pred)), 1e-9)
-            smooth = float(np.mean(np.abs(np.diff(y_pred, 2))) / denom)
-            return rmse * (1 + 0.9 * smooth)
+    def _build_terms(self, n_price: int):
+        terms = (
+            s(0, basis="ps", n_splines=int(n_price))
+            + s(1, basis="ps", n_splines=15)
+            + f(2)
+        )
+        if self.use_interaction:
+            terms = terms + te(0, 1)
+        return terms
 
-        best_gam, best_score, best_ns = None, np.inf, None
-        coarse_best_lam = None
+    def _score_model(
+        self, gam: ExpectileGAM, Xs: np.ndarray, y: np.ndarray, sw: np.ndarray | None
+    ) -> float:
+        """RMSE*(1+0.9*smoothness) on the provided (Xs, y)."""
+        y_pred = gam.predict(Xs)
+        resid2 = (y - y_pred) ** 2
+        mse = float((resid2 * sw).sum()) if sw is not None else float(resid2.mean())
+        rmse = np.sqrt(mse)
+        denom = max(np.mean(np.abs(y_pred)), 1e-9)
+        smooth = float(np.mean(np.abs(np.diff(y_pred, 2))) / denom)
+        return rmse * (1 + 0.9 * smooth)
 
-        # Coarse search
+    def _coarse_search(self, Xs, y, sw, sample_weight):
+        best_gam, best_score, best_ns, coarse_best_lam = None, np.inf, None, None
         for n_price in self.n_splines_grid or [25]:
             terms = self._build_terms(n_price)
             try:
@@ -878,56 +869,40 @@ class GAMTuner:
                 ).gridsearch(
                     Xs, y, lam=self.lam_grid, weights=sample_weight, progress=False
                 )
-                sc = _score(g)
+                sc = self._score_model(g, Xs, y, sw)
                 if sc < best_score:
                     best_score, best_gam, best_ns = sc, g, n_price
                     coarse_best_lam = getattr(g, "lam", None)
             except Exception:
                 continue
+        return best_gam, best_ns, coarse_best_lam, best_score
 
-        # Fine search
+    def _fine_search(
+        self, Xs, y, sw, sample_weight, best_ns, coarse_lam, best_gam, best_score
+    ):
+        if coarse_lam is None:
+            return best_gam, best_score, self._lam_mean(getattr(best_gam, "lam", None))
         try:
-            center = (
-                float(coarse_best_lam)
-                if np.ndim(coarse_best_lam) == 0
-                else float(np.mean(coarse_best_lam))
-            )
+            center = self._lam_mean(coarse_lam)
             fine = np.clip(center * np.logspace(-0.6, 0.6, 8), 1e-8, 1e12)
             terms = self._build_terms(best_ns if best_ns is not None else 25)
             g2 = ExpectileGAM(
                 terms, expectile=self.expectile, fit_intercept=True
             ).gridsearch(Xs, y, lam=fine, weights=sample_weight, progress=False)
-            sc2 = _score(g2)
+            sc2 = self._score_model(g2, Xs, y, sw)
             if sc2 < best_score:
-                best_gam, best_score = g2, sc2
+                return g2, sc2, self._lam_mean(getattr(g2, "lam", None))
+            return best_gam, best_score, self._lam_mean(getattr(best_gam, "lam", None))
         except Exception:
-            pass
+            return best_gam, best_score, self._lam_mean(getattr(best_gam, "lam", None))
 
-        if best_gam is None:
-            terms = self._build_terms(best_ns if best_ns is not None else 25)
-            best_gam = ExpectileGAM(
-                terms, expectile=self.expectile, fit_intercept=True
-            ).fit(Xs, y, weights=sample_weight)
-
-        # expose preprocessors for caller
-        best_gam._scaler = scaler
-        best_gam._num_idx = num_idx
-        best_gam._fac_idx = fac_idx
-
-        # STASH final best so caller can log ONCE
-        lam = getattr(best_gam, "lam", None)
-        lam_mean = (
-            float(lam)
-            if np.ndim(lam) == 0
-            else (float(np.mean(lam)) if lam is not None else np.nan)
-        )
-        best_gam._tuning_n_price = best_ns
-        best_gam._tuning_lam = lam_mean
-        best_gam._tuning_score = (
-            float(best_score) if np.isfinite(best_score) else np.nan
-        )
-
-        return best_gam
+    @staticmethod
+    def _lam_mean(lam):
+        """Return a scalar summary of lam (handles None, scalar, or array)."""
+        if lam is None:
+            return np.nan
+        lam = np.asarray(lam).astype(float)
+        return float(lam.mean()) if lam.size > 1 else float(lam.item())
 
 
 class GAMModeler:
@@ -976,14 +951,6 @@ class GAMModeler:
         self.engineer = DataEngineer(None, None)
         self.engineer._verbose = self.verbose
 
-        # if self.verbose:
-        #     _p(
-        #         "[init] GAMModeler ready | "
-        #         f"rows={len(self.topsellers)} | gridsearch={self.use_grid_search} | "
-        #         f"test_size={self.test_size} | bootstraps={self.n_bootstrap} | "
-        #         f"bootstrap_frac={self.bootstrap_frac}"
-        #     )
-
     # --------- helpers ---------
 
     def _bootstrap_loops_for_size(self, n_train: int) -> int:
@@ -1007,65 +974,81 @@ class GAMModeler:
             "shipped_units",
         ]
 
+    # ---------- _make_design_matrix (refactored) ----------
     def _make_design_matrix(self, sub: pd.DataFrame):
         """
-        Build the per-product design matrix and sample weights.
+        Orchestrates per-product design matrix construction.
 
-        Features (columns in X):
-        - col 0: price  (float, numeric; scaled later)
-        - col 1: deal_discount_percent (float; NA->0; scaled later)
-        - col 2: event_encoded (int categorical; used via f(2) in pyGAM)
-
-        Returns
-        sub_clean, X_train, y_train, w_train, X_all
-        or (None, None, None, None, None) if not enough data.
+        Returns (unchanged signature expected by callers):
+            sub_clean, X_tr, y_tr, w_tr, X_all
         """
         if sub is None or sub.empty:
             return None, None, None, None, None
 
-        # --- sort by price for stable diagnostics; modeling doesn’t require it
-        sub = sub.sort_values("price").reset_index(drop=True)
+        # sort for stability
+        sub = self._mdm_sort(sub)
 
-        # --- build per-row weights (time decay + rarity, etc.)
-        if self.use_grid_search:
-            best_tail_strength, best_tail_p, _ = self.engineer._grid_search_weights(
-                sub, param_grid=self.custom_grid
-            )
-            w = self.engineer._make_weights(
-                sub,
-                tail_strength=best_tail_strength,
-                tail_p=best_tail_p,
-                elasticity_df=self.elasticity_df,  # ok if None
-            )
-        else:
-            # simple fallback: recency + volume + inverse price-density
-            de = DataEngineer(None, None)
-            sub_decayed = de._time_decay(sub)
-            time_decay_weight = sub_decayed["time_decay_weight"].astype(float)
-
-            vol = sub["shipped_units"].astype(float)
-            volume_weight = np.log1p(vol) / np.log1p(max(vol.max(), 1.0))
-
-            if sub["price"].max() > sub["price"].min():
-                dens = sub["price"].map(sub["price"].value_counts()) / len(sub)
-                price_weight = 1.0 / (dens + 0.1)
-                price_weight = price_weight / price_weight.max()
-            else:
-                price_weight = pd.Series(1.0, index=sub.index)
-
-            w = 0.4 * time_decay_weight + 0.4 * volume_weight + 0.2 * price_weight
-            w = w / w.mean()
-
+        # per-row weights
+        w = self._mdm_build_weights(sub)
         sub = pd.concat([sub, pd.Series(w, name="wt", index=sub.index)], axis=1)
 
-        # --- minimal cleanliness & sufficiency checks
-        sub_clean = sub.dropna(subset=["price", "shipped_units"]).copy()
-        if sub_clean.shape[0] < 5 or sub_clean["price"].nunique() < 3:
-            # if self.verbose:
-            #     _p("[split] insufficient data; skip")
+        # basic checks
+        sub_clean = self._mdm_prune_and_check(sub)
+        if sub_clean is None:
             return None, None, None, None, None
 
-        # --- time-aware train/test split (fallback to random if necessary)
+        # train/test split
+        is_train, _ = self._mdm_train_test_split(sub_clean)
+        sub_clean["split"] = np.where(is_train, "train", "test")
+
+        # features/targets/weights
+        X_all, y_all, w_all = self._mdm_build_features(sub_clean)
+
+        # slice train
+        mask = is_train.values
+        X_tr = X_all[mask]
+        y_tr = y_all[mask]
+        w_tr = w_all[mask]
+
+        # Note: we intentionally return ONLY 5 items to match existing callers.
+        return sub_clean, X_tr, y_tr, w_tr, X_all
+
+    # ---- helpers ----
+    def _mdm_sort(self, sub: pd.DataFrame) -> pd.DataFrame:
+        return sub.sort_values("price").reset_index(drop=True)
+
+    def _mdm_build_weights(self, sub: pd.DataFrame) -> np.ndarray:
+        if self.use_grid_search:
+            ts, tp, _ = self.engineer._grid_search_weights(
+                sub, param_grid=self.custom_grid
+            )
+            return self.engineer._make_weights(
+                sub,
+                tail_strength=ts,
+                tail_p=tp,
+                elasticity_df=self.elasticity_df,
+            )
+        # fallback simple scheme
+        de = DataEngineer(None, None)
+        dec = de._time_decay(sub)["time_decay_weight"].astype(float).to_numpy()
+        vol = sub["shipped_units"].astype(float)
+        volume_weight = np.log1p(vol) / np.log1p(max(vol.max(), 1.0))
+        if sub["price"].max() > sub["price"].min():
+            dens = sub["price"].map(sub["price"].value_counts()) / len(sub)
+            price_weight = 1.0 / (dens + 0.1)
+            price_weight = price_weight / price_weight.max()
+        else:
+            price_weight = pd.Series(1.0, index=sub.index)
+        w = 0.4 * dec + 0.4 * volume_weight + 0.2 * price_weight
+        return (w / w.mean()).to_numpy()
+
+    def _mdm_prune_and_check(self, sub: pd.DataFrame):
+        sub_clean = sub.dropna(subset=["price", "shipped_units"]).copy()
+        if sub_clean.shape[0] < 5 or sub_clean["price"].nunique() < 3:
+            return None
+        return sub_clean
+
+    def _mdm_train_test_split(self, sub_clean: pd.DataFrame):
         is_train = pd.Series(True, index=sub_clean.index)
         used_time_split = False
         if self.split_by_date and "order_date" in sub_clean.columns:
@@ -1074,28 +1057,19 @@ class GAMModeler:
                 cutoff = dates.quantile(1 - self.test_size)
                 is_train = dates <= cutoff
                 used_time_split = True
-
         if is_train.sum() < 3 or (~is_train).sum() < 1:
-            # deterministic-ish random fallback per product
             seed = abs(hash(str(sub_clean.get("product", "?").iloc[0]))) % (2**32 - 1)
             rng = np.random.default_rng(self.random_state or seed)
             is_train = pd.Series(
                 rng.random(len(sub_clean)) >= self.test_size, index=sub_clean.index
             )
-            if is_train.sum() < 3:  # last resort: all train
+            if is_train.sum() < 3:
                 is_train[:] = True
 
-        sub_clean["split"] = np.where(is_train, "train", "test")
-        # if self.verbose:
-        #     method = "time" if used_time_split else "random"
-        # _p(
-        #     f"[split] {method} | train={int(is_train.sum())}, test={int((~is_train).sum())}"
-        # )
+        return is_train, used_time_split
 
-        # --- build X (3 columns), y, w
+    def _mdm_build_features(self, sub_clean: pd.DataFrame):
         price = sub_clean["price"].to_numpy(dtype=float)
-
-        # discount: fill NA with 0, clip to sane bounds
         if "deal_discount_percent" in sub_clean.columns:
             disc = pd.to_numeric(
                 sub_clean["deal_discount_percent"], errors="coerce"
@@ -1103,8 +1077,6 @@ class GAMModeler:
             disc = disc.clip(lower=-100.0, upper=100.0).to_numpy(dtype=float)
         else:
             disc = np.zeros(len(sub_clean), dtype=float)
-
-        # event factor: integer codes; if missing, use 0
         if "event_encoded" in sub_clean.columns:
             evt = (
                 pd.to_numeric(sub_clean["event_encoded"], errors="coerce")
@@ -1113,17 +1085,10 @@ class GAMModeler:
             )
         else:
             evt = np.zeros(len(sub_clean), dtype=int)
-
         X_all = np.column_stack([price, disc, evt])
         y_all = sub_clean["shipped_units"].to_numpy(dtype=float)
         w_all = sub_clean["wt"].to_numpy(dtype=float)
-
-        # --- slice train/test
-        X_tr = X_all[is_train.values]
-        y_tr = y_all[is_train.values]
-        w_tr = w_all[is_train.values]
-
-        return sub_clean, X_tr, y_tr, w_tr, X_all
+        return X_all, y_all, w_all
 
     def _ensure_factor_domain(
         self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8
@@ -1182,6 +1147,7 @@ class GAMModeler:
             w /= mean
         return w
 
+    # ---------- _robust_reweight (refactored) ----------
     def _robust_reweight(
         self,
         X: np.ndarray,
@@ -1193,190 +1159,290 @@ class GAMModeler:
         kfold_max: int = 5,
         huber_c: float = 1.345,
         clip_floor: float = 0.25,
-        eps: float = 1e-8,  # weight for domain-seeding rows
-        fac_col: int = 2,  # column index of event factor
+        eps: float = 1e-8,
+        fac_col: int = 2,
     ) -> np.ndarray:
-        """
-        Out-of-fold robust reweighting. Ensures every fold’s TRAIN set covers all
-        categorical levels present overall by appending epsilon-weight rows for
-        each level before fitting.
-        """
-        X = np.asarray(X, float)
-        y = np.asarray(y, float)
-        w_base = np.asarray(w_base, float)
-
-        n = len(y)
-        if n < 10:
+        X, y, w_base = (
+            np.asarray(X, float),
+            np.asarray(y, float),
+            np.asarray(w_base, float),
+        )
+        if len(y) < 10:
             return w_base
 
-        # Build epsilon rows that cover ALL factor levels seen in X
+        X_eps, y_eps, w_eps = self._rr_build_eps_rows(X, y, eps, fac_col)
+        kf = self._rr_make_kfolds(len(y), kfold_min, kfold_max)
+        yhat = self._rr_oof_predict(
+            X, y, w_base, X_eps, y_eps, w_eps, kf, expectile, fac_col
+        )
+
+        w_new = self._rr_huber(y, yhat, huber_c, clip_floor, eps_rows_mask)
+        mu = float(w_new.mean())
+        return (w_new / mu) if mu > 0 else w_new
+
+    # ---- helpers ----
+    def _rr_build_eps_rows(self, X, y, eps, fac_col):
         all_lvls = np.unique(X[:, fac_col])
         price_med = float(np.median(X[:, 0])) if X.shape[1] > 0 else 0.0
         disc_med = float(np.median(X[:, 1])) if X.shape[1] > 1 else 0.0
-
         X_eps = np.column_stack(
             [
-                np.full(all_lvls.size, price_med, dtype=float),
-                np.full(all_lvls.size, disc_med, dtype=float),
+                np.full(all_lvls.size, price_med, float),
+                np.full(all_lvls.size, disc_med, float),
                 all_lvls.astype(float),
             ]
         )
-        y_eps = np.full(all_lvls.size, float(np.median(y)), dtype=float)
-        w_eps = np.full(all_lvls.size, float(eps), dtype=float)
+        y_eps = np.full(all_lvls.size, float(np.median(y)), float)
+        w_eps = np.full(all_lvls.size, float(eps), float)
+        return X_eps, y_eps, w_eps
 
-        # OOF predictions
-        k = min(max(kfold_min, (n // 50) or kfold_min), kfold_max)
-        kf = KFold(n_splits=k, shuffle=True, random_state=self.random_state)
+    def _rr_make_kfolds(self, n, kmin, kmax):
+        k = min(max(kmin, (n // 50) or kmin), kmax)
+        return KFold(n_splits=k, shuffle=True, random_state=self.random_state)
 
-        yhat = np.full(n, np.nan, dtype=float)
-
+    def _rr_oof_predict(
+        self, X, y, w_base, X_eps, y_eps, w_eps, kf, expectile, fac_col
+    ):
+        yhat = np.full(len(y), np.nan, float)
         for tr_idx, va_idx in kf.split(X):
-            # Augment this fold's TRAIN split with ε rows to seed all categories
             X_tr = np.vstack([X[tr_idx], X_eps])
             y_tr = np.concatenate([y[tr_idx], y_eps])
             w_tr = np.concatenate([w_base[tr_idx], w_eps])
             w_tr = np.maximum(w_tr, 1e-12)
-
             tuner = GAMTuner(expectile=expectile)
+            tuner._verbose = False
             gam = tuner.fit(X_tr, y_tr, sample_weight=w_tr)
+            yhat[va_idx] = self._rr_predict_with_gam(gam, X[va_idx])
+        return yhat
 
-            Xv = X[va_idx]
-            Xv_num = gam._scaler.transform(Xv[:, gam._num_idx])
-            Xv_fac = Xv[:, gam._fac_idx]
-            Xv_s = np.column_stack([Xv_num, Xv_fac])
+    def _rr_predict_with_gam(self, gam, Xv):
+        Xv = np.asarray(Xv, float)
+        Xv_num = gam._scaler.transform(Xv[:, gam._num_idx])
+        Xv_fac = Xv[:, gam._fac_idx]
+        Xv_s = np.column_stack([Xv_num, Xv_fac])
+        return gam.predict(Xv_s)
 
-            yhat[va_idx] = gam.predict(Xv_s)
-
-        # Robust residual weighting (Huber)
-        real_mask = np.ones(n, dtype=bool) if eps_rows_mask is None else ~eps_rows_mask
+    def _rr_huber(self, y, yhat, huber_c, clip_floor, eps_rows_mask):
+        real_mask = np.ones(len(y), bool) if eps_rows_mask is None else ~eps_rows_mask
         r = y[real_mask] - yhat[real_mask]
-
         med_abs = float(np.median(np.abs(r - np.median(r))))
         s = 1.4826 * max(med_abs, 1e-9)
         z = np.abs(r) / s
-
         w_resid_real = np.where(z <= huber_c, 1.0, huber_c / z)
-        w_resid = np.ones(n, dtype=float)
+        w_resid = np.ones(len(y), float)
         w_resid[real_mask] = np.clip(w_resid_real, clip_floor, 1.0)
+        return w_resid * 1.0  # scale later
 
-        w_new = w_base * w_resid
-        mu = float(w_new.mean())
-        if mu > 0:
-            w_new /= mu
-        return w_new
+    # ---------- _fit_expectiles (refactored) ----------
 
     def _fit_expectiles(
-        self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)
+        self,
+        X_train,
+        y_train,
+        w_train,
+        X_pred,
+        qs=(0.025, 0.5, 0.975),
+        y_all=None,
+        split_mask=None,
+        taper_grid=None,
     ) -> dict:
-        out = {}
-        rng = np.random.default_rng(self.random_state)
+        # 1) seed factor domain for stability
+        X_seed, y_seed, w_seed = self._fe_seed_domain(X_train, y_train, w_train, X_pred)
 
-        # 1) seed factor domain so f(2) knows all levels present in X_pred
-        X_seed, y_seed, w_seed = self._ensure_factor_domain(
-            X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8
-        )
-        n = len(y_seed)
-
-        # 2) robust reweight on the seeded matrix (single pass)
-        w_base = w_seed if w_seed is not None else np.ones(n, dtype=float)
-        w_base = np.maximum(w_base, 1e-12)
+        # 2) robust reweighting (single pass)
         is_eps = w_seed <= 2e-8
         w_robust = self._robust_reweight(
             X_seed,
             y_seed,
             w_seed if w_seed is not None else np.ones(len(y_seed)),
-            eps_rows_mask=is_eps,  # <-- these are the epsilon rows; don't reweight them
+            eps_rows_mask=is_eps,
             expectile=0.5,
         )
 
+        # 3) fit per expectile (with optional bootstrap)
+        preds = {}
+        for q in qs:
+            preds.update(
+                self._fe_fit_one_expectile(q, X_seed, y_seed, X_pred, w_robust)
+            )
+
+        # 4) (optional) taper search, then apply taper
+        if y_all is not None and split_mask is not None:
+            best_taper = self._fe_pick_taper(
+                X_train,
+                X_pred,
+                preds,
+                y_all,
+                ~np.asarray(split_mask, bool),
+                w_train,
+                taper_grid,
+            )
+        else:
+            best_taper = None
+        preds = self._apply_edge_tapers(
+            X_train=X_train,
+            X_pred=X_pred,
+            pred_dict=preds,
+            w_train_effective=w_train,
+            **(
+                best_taper
+                or dict(
+                    lo_q=0.10,
+                    hi_q=0.90,
+                    stretch_lo=0.15,
+                    stretch_hi=0.15,
+                    k_anchor=5,
+                    scale_sds=True,
+                )
+            ),
+        )
+
+        # 5) enforce non-crossing
+        preds = self._fe_enforce_non_crossing(preds)
+        return preds
+
+    # ---- helpers ----
+    def _fe_seed_domain(self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8):
+        return self._ensure_factor_domain(
+            X_train, y_train, w_train, X_pred, fac_col=fac_col, eps=eps
+        )
+
+    def _fe_fit_one_expectile(self, q, X_seed, y_seed, X_pred, w_robust):
         def fit_once(q, boot_idx=None):
             tuner = GAMTuner(expectile=q)
             tuner._verbose = False
-            if boot_idx is None:
-                w_boot = w_robust
-            else:
-                w_b = self._bootstrap_weights(n, boot_idx)
-                w_boot = w_b * w_robust
-
+            w_boot = (
+                w_robust
+                if boot_idx is None
+                else (self._bootstrap_weights(len(y_seed), boot_idx) * w_robust)
+            )
             gam = tuner.fit(X_seed, y_seed, sample_weight=w_boot)
-
-            score = getattr(gam, "_tuning_score", float("inf"))
-            line = f"[gam BEST] expectile={q} n_price={getattr(gam,'_tuning_n_price',None)} lam≈{getattr(gam,'_tuning_lam',float('nan')):.3g} score={score:.4f}"
-            if score < getattr(self, "_gam_best_score", float("inf")):
-                self._gam_best_score = score
-                self._gam_best_line = line
-
             Xp = np.asarray(X_pred, float)
             Xp_num = gam._scaler.transform(Xp[:, gam._num_idx])
             Xp_fac = Xp[:, gam._fac_idx]
             Xp_s = np.column_stack([Xp_num, Xp_fac])
-            yhat = gam.predict(Xp_s)
-            return np.maximum(yhat, 0.0)
+            return np.maximum(gam.predict(Xp_s), 0.0)
 
-        for q in qs:
-            loops = self._bootstrap_loops_for_size(n)
-            # if self.verbose:
-            #     mode = "bootstrap" if loops > 0 else "single-fit"
-            #     _p(f"[fit] q={q} | {mode}" + (f" x{loops}" if loops else ""))
+        loops = self._bootstrap_loops_for_size(len(y_seed))
+        if loops <= 0:
+            return {f"units_pred_{q}": fit_once(q)}
+        rng = np.random.default_rng(self.random_state)
+        idx_all = np.arange(len(y_seed))
+        m = max(1, int(len(y_seed) * self.bootstrap_frac))
+        preds = []
+        target = self.bootstrap_target_rel_se
+        for i in range(loops):
+            boot_idx = rng.choice(idx_all, size=m, replace=True)
+            preds.append(fit_once(q, boot_idx=boot_idx))
+            if target and (i + 1) >= 5:
+                P = np.vstack(preds)
+                mean_vec = P.mean(axis=0)
+                se_vec = P.std(axis=0, ddof=1) / np.sqrt(i + 1)
+                rel_se = np.nanmean(se_vec / np.maximum(np.abs(mean_vec), 1e-8))
+                if rel_se < target:
+                    break
+        P = np.vstack(preds)
+        out = {
+            f"units_pred_{q}": P.mean(axis=0),
+            f"units_pred_{q}_sd": P.std(axis=0, ddof=1),
+        }
+        return out
 
-            if loops <= 0:
-                out[f"units_pred_{q}"] = fit_once(q, boot_idx=None)
-                self._log_bootstrap_done(q, y_seed, out[f"units_pred_{q}"])
-                continue
+    def _fe_pick_taper(
+        self, X_train, X_pred, base_pred_dict, y_all, mask_train, w_train, grid
+    ):
+        # very small, safe defaults if grid not provided
+        if grid is None:
+            grid = {
+                "lo_q": [0.05, 0.10, 0.15],
+                "hi_q": [0.85, 0.90, 0.95],
+                "stretch_lo": [0.10, 0.15, 0.25],
+                "stretch_hi": [0.10, 0.15, 0.25],
+                "k_anchor": [3, 5, 7],
+                "scale_sds": [True],
+            }
+        # minimal successive-halving to avoid explosion
+        from itertools import product
 
-            idx_all = np.arange(n)
-            m = max(1, int(n * self.bootstrap_frac))
-            preds = []
-            target = self.bootstrap_target_rel_se
+        keys = list(grid.keys())
+        combos = [dict(zip(keys, vals)) for vals in product(*[grid[k] for k in keys])]
+        rng = np.random.default_rng(self.random_state or 42)
+        if len(combos) > 24:
+            combos = list(rng.choice(combos, size=24, replace=False))
 
-            for i in range(loops):
-                boot_idx = rng.choice(idx_all, size=m, replace=True)
-                preds.append(fit_once(q, boot_idx=boot_idx))
+        def score(params):
+            trial = {
+                k: (v.copy() if isinstance(v, np.ndarray) else v)
+                for k, v in base_pred_dict.items()
+            }
+            trial = self._apply_edge_tapers(
+                X_train,
+                X_pred,
+                trial,
+                w_train,
+                lo_q=params["lo_q"],
+                hi_q=params["hi_q"],
+                stretch_lo=params["stretch_lo"],
+                stretch_hi=params["stretch_hi"],
+                k_anchor=params["k_anchor"],
+                scale_sds=params["scale_sds"],
+            )
+            return self._fe_taper_score(trial, y_all, mask_train)
 
-                if target and (i + 1) >= 5:
-                    P = np.vstack(preds)
-                    mean_vec = P.mean(axis=0)
-                    se_vec = P.std(axis=0, ddof=1) / np.sqrt(i + 1)
-                    rel_se = np.nanmean(se_vec / np.maximum(np.abs(mean_vec), 1e-8))
-                    if rel_se < target:
-                        # if self.verbose:
-                        #     _p(
-                        #         f"[bootstrap] q={q} early stop {i+1}/{loops} (rel_se≈{rel_se:.3f})"
-                        #     )
-                        break
-            # self._log_bootstrap_start(q, loops)
+        best, bestp = np.inf, None
+        for p in combos:
+            sc = score(p)
+            if sc < best:
+                best, bestp = sc, p
+        return bestp
 
-            P = np.vstack(preds)
-            out[f"units_pred_{q}"] = P.mean(axis=0)
-            out[f"units_pred_{q}_sd"] = P.std(axis=0, ddof=1)
+    def _fe_taper_score(self, preds_dict_after, y_all, mask_train):
+        yhat = np.asarray(preds_dict_after.get("units_pred_0.5"), float)
+        y = np.asarray(y_all, float)
+        mtrain = np.asarray(mask_train, bool)
+        if yhat.size != y.size or (~np.isfinite(yhat)).any():
+            return np.inf
+        rmse = float(np.sqrt(np.mean((y[mtrain] - yhat[mtrain]) ** 2)))
 
-        # w_eff = w_robust[: len(X_train)] if w_robust is not None else None
+        # jitter penalty
+        def _avg_abs_second_diff(z):
+            if z.size < 5:
+                return 0.0
+            d2 = np.diff(z, 2)
+            denom = max(np.median(np.abs(z)), 1e-8)
+            return float(np.mean(np.abs(d2)) / denom)
 
-        # taper using TRAIN prices to define the anchor
-        out = self._apply_edge_tapers(
-            X_train=X_train,
-            X_pred=X_pred,
-            pred_dict=out,
-            w_train_effective=w_train,  # aligned with X_train
-            lo_q=0.10,
-            hi_q=0.90,
-            stretch_lo=0.15,
-            stretch_hi=0.15,
-            scale_sds=True,
-        )
+        jitter = _avg_abs_second_diff(yhat)
+        # edge-lift penalty
+        n = len(yhat)
+        if n >= 20:
+            k = max(1, n // 20)
+            left = np.mean(yhat[:k])
+            right = np.mean(yhat[-k:])
+            core = yhat[k:-k] if (n - 2 * k) > 5 else yhat
+            core_med = float(np.median(core))
+            lift = max(0.0, left / core_med - 1.0) + max(0.0, right / core_med - 1.0)
+            edge_pen = 0.5 * lift
+        else:
+            edge_pen = 0.0
+        return rmse * (1 + 0.6 * jitter + 0.8 * edge_pen)
 
-        # 3) non-crossing quantiles (unchanged)
+    def _fe_enforce_non_crossing(self, pred_dict: dict) -> dict:
         qkeys = sorted(
-            [k for k in out if k.startswith("units_pred_") and not k.endswith("_sd")],
+            [
+                k
+                for k in pred_dict
+                if k.startswith("units_pred_") and not k.endswith("_sd")
+            ],
             key=lambda k: float(k.replace("units_pred_", "")),
         )
-        if qkeys:
-            P = np.vstack([out[k] for k in qkeys])
-            P_nc = np.maximum.accumulate(P, axis=0)
-            for i, k in enumerate(qkeys):
-                out[k] = np.maximum(P_nc[i], 0.0)
-
-        return out
+        if not qkeys:
+            return pred_dict
+        P = np.vstack([pred_dict[k] for k in qkeys])
+        P_nc = np.maximum.accumulate(P, axis=0)
+        for i, k in enumerate(qkeys):
+            pred_dict[k] = np.maximum(P_nc[i], 0.0)
+        return pred_dict
 
     def _assemble_group_results(
         self, sub_clean: pd.DataFrame, preds: dict
@@ -1495,96 +1561,25 @@ class GAMModeler:
         k_anchor: int = 5,
         scale_sds: bool = True,
     ):
-        """
-        Post-prediction guardrail for BOTH edges.
-        For x < lo_anchor, linearly ramp units -> 0 by x_left0.
-        For x > hi_anchor, linearly ramp units -> 0 by x_right0.
-        Anchors come from TRAIN price quantiles (weighted if weights provided).
-        """
-
-        def _wquantile(v, q, w=None):
-            v = np.asarray(v, float)
-            if w is None:
-                w = np.ones_like(v)
-            else:
-                w = np.asarray(w, float)
-                if w.shape[0] != v.shape[0]:
-                    w = np.ones_like(v)
-            ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
-            if not ok.any():
-                return float("nan")
-            v, w = v[ok], w[ok]
-            order = np.argsort(v)
-            v, w = v[order], w[order]
-            cw = np.cumsum(w)
-            cutoff = float(q) * float(cw[-1])
-            return float(v[np.searchsorted(cw, cutoff, side="left")])
-
-        X_train = np.asarray(X_train, float)
-        X_pred = np.asarray(X_pred, float)
-        w_eff = (
-            None if w_train_effective is None else np.asarray(w_train_effective, float)
-        )
-
-        px_tr = X_train[:, 0]
-        px_pr = X_pred[:, 0]
+        px_tr = np.asarray(X_train, float)[:, 0]
+        px_pr = np.asarray(X_pred, float)[:, 0]
         pr = float(px_tr.max() - px_tr.min())
         if not np.isfinite(pr) or pr <= 0:
             return pred_dict
 
-        # anchors from TRAIN prices
-        lo_anchor = _wquantile(px_tr, lo_q, w_eff)
-        hi_anchor = _wquantile(px_tr, hi_q, w_eff)
+        lo_anchor, hi_anchor = self._tap_anchors(px_tr, w_train_effective, lo_q, hi_q)
         if not (
             np.isfinite(lo_anchor) and np.isfinite(hi_anchor) and hi_anchor > lo_anchor
         ):
             return pred_dict
 
-        # taper endpoints (units -> 0)
-        x_left0 = lo_anchor - stretch_lo * pr
-        x_right0 = hi_anchor + stretch_hi * pr
-        if x_right0 <= hi_anchor:
-            x_right0 = hi_anchor + 1e-6
-        if x_left0 >= lo_anchor:
-            x_left0 = lo_anchor - 1e-6
-
-        # masks & linear ramps [1 -> 0]
-        mL = px_pr <= lo_anchor  # include the anchor
-        mR = px_pr >= hi_anchor
-        L = np.zeros_like(px_pr, float)
-        R = np.zeros_like(px_pr, float)
-        if np.any(mL):
-            L[mL] = np.clip((px_pr[mL] - x_left0) / (lo_anchor - x_left0), 0.0, 1.0)
-        if np.any(mR):
-            R[mR] = np.clip((x_right0 - px_pr[mR]) / (x_right0 - hi_anchor), 0.0, 1.0)
-
-        # choose anchor levels from k nearest points just inside each edge
-        def _nearest_inside_indices(x, anchor, side, k):
-            if side == "left":
-                inside = np.where(x >= anchor)[0]  # just inside the LEFT edge
-                if inside.size:
-                    # take the first k (closest to anchor from inside)
-                    return inside[:k]
-                # fallback: nearest index to anchor
-                j = np.searchsorted(x, anchor, side="left")
-                j = min(max(j, 0), len(x) - 1)
-                return np.array([j], int)
-            else:
-                inside = np.where(x <= anchor)[0]  # just inside the RIGHT edge
-                if inside.size:
-                    # take the last k (closest to anchor from inside)
-                    return inside[max(0, inside.size - k) :]
-                j = np.searchsorted(x, anchor, side="right") - 1
-                j = min(max(j, 0), len(x) - 1)
-                return np.array([j], int)
-
-        # NOTE: px_pr is already in ascending price order in your pipeline
-        L_anchor_idx = _nearest_inside_indices(
-            px_pr, lo_anchor, side="left", k=k_anchor
+        x_left0, x_right0 = self._tap_endpoints(
+            px_tr, lo_anchor, hi_anchor, stretch_lo, stretch_hi
         )
-        R_anchor_idx = _nearest_inside_indices(
-            px_pr, hi_anchor, side="right", k=k_anchor
-        )
+        mL, mR, L, R = self._tap_ramps(px_pr, lo_anchor, hi_anchor, x_left0, x_right0)
+
+        L_idx = self._tap_anchor_indices(px_pr, lo_anchor, side="left", k=k_anchor)
+        R_idx = self._tap_anchor_indices(px_pr, hi_anchor, side="right", k=k_anchor)
 
         qkeys = sorted(
             [
@@ -1594,47 +1589,25 @@ class GAMModeler:
             ],
             key=lambda k: float(k.replace("units_pred_", "")),
         )
-
         for k in qkeys:
             y = np.asarray(pred_dict[k], float)
-
-            yL = float(np.median(y[L_anchor_idx])) if L_anchor_idx.size else 0.0
-            yR = float(np.median(y[R_anchor_idx])) if R_anchor_idx.size else 0.0
-
-            capL = np.maximum(
-                yL * L, 0.0
-            )  # L=1 at lo_anchor -> yL; L=0 at x_left0 -> 0
-            capR = np.maximum(
-                yR * R, 0.0
-            )  # R=1 at hi_anchor -> yR; R=0 at x_right0 -> 0
-
-            y_new = y.copy()
-            if np.any(mL):
-                y_new[mL] = np.minimum(y_new[mL], capL[mL])
-            if np.any(mR):
-                y_new[mR] = np.minimum(y_new[mR], capR[mR])
-
-            # monotone edge clamp
-            if np.any(mR):
-                idxR = np.where(mR)[0]
-                y_new[idxR] = np.minimum.accumulate(y_new[idxR])
-            if np.any(mL):
-                idxL = np.where(mL)[0]
-                y_new[idxL] = np.minimum.accumulate(y_new[idxL][::-1])[::-1]
-
-            # write back
-            shrink = np.ones_like(y_new)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                shrink = np.minimum(y_new / np.maximum(y, 1e-9), 1.0)
+            y_new, shrink = self._tap_apply_one(y, mL, mR, L, R, L_idx, R_idx)
             pred_dict[k] = np.maximum(y_new, 0.0)
-
             if scale_sds:
                 sk = f"{k}_sd"
                 if sk in pred_dict:
                     sd = np.asarray(pred_dict[sk], float)
                     pred_dict[sk] = np.maximum(sd * shrink, 0.0)
 
-        # re-enforce non-crossing
+        # enforce non-crossing again
+        qkeys = sorted(
+            [
+                k
+                for k in pred_dict
+                if k.startswith("units_pred_") and not k.endswith("_sd")
+            ],
+            key=lambda k: float(k.replace("units_pred_", "")),
+        )
         if qkeys:
             P = np.vstack([pred_dict[k] for k in qkeys])
             P_nc = np.maximum.accumulate(P, axis=0)
@@ -1647,8 +1620,89 @@ class GAMModeler:
             "x_left0": float(x_left0),
             "x_right0": float(x_right0),
         }
-
         return pred_dict
+
+    # ---- helpers ----
+    def _tap_wquantile(self, v, q, w=None) -> float:
+        v = np.asarray(v, float)
+        if w is None:
+            w = np.ones_like(v)
+        else:
+            w = np.asarray(w, float)
+            if w.shape[0] != v.shape[0]:
+                w = np.ones_like(v)
+        ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+        if not ok.any():
+            return float("nan")
+        v, w = v[ok], w[ok]
+        order = np.argsort(v)
+        v, w = v[order], w[order]
+        cw = np.cumsum(w)
+        cutoff = float(q) * float(cw[-1])
+        return float(v[np.searchsorted(cw, cutoff, side="left")])
+
+    def _tap_anchors(self, px_tr, w_eff, lo_q, hi_q):
+        return (
+            self._tap_wquantile(px_tr, lo_q, w_eff),
+            self._tap_wquantile(px_tr, hi_q, w_eff),
+        )
+
+    def _tap_endpoints(self, px_tr, lo_anchor, hi_anchor, stretch_lo, stretch_hi):
+        pr = float(px_tr.max() - px_tr.min())
+        x_left0 = lo_anchor - stretch_lo * pr
+        x_right0 = hi_anchor + stretch_hi * pr
+        if x_right0 <= hi_anchor:
+            x_right0 = hi_anchor + 1e-6
+        if x_left0 >= lo_anchor:
+            x_left0 = lo_anchor - 1e-6
+        return x_left0, x_right0
+
+    def _tap_ramps(self, px_pr, lo_anchor, hi_anchor, x_left0, x_right0):
+        mL = px_pr <= lo_anchor
+        mR = px_pr >= hi_anchor
+        L = np.zeros_like(px_pr, float)
+        R = np.zeros_like(px_pr, float)
+        if np.any(mL):
+            L[mL] = np.clip((px_pr[mL] - x_left0) / (lo_anchor - x_left0), 0.0, 1.0)
+        if np.any(mR):
+            R[mR] = np.clip((x_right0 - px_pr[mR]) / (x_right0 - hi_anchor), 0.0, 1.0)
+        return mL, mR, L, R
+
+    def _tap_anchor_indices(self, px_pr, anchor, side, k):
+        if side == "left":
+            inside = np.where(px_pr >= anchor)[0]
+            if inside.size:
+                return inside[:k]
+            j = np.searchsorted(px_pr, anchor, side="left")
+            j = min(max(j, 0), len(px_pr) - 1)
+            return np.array([j], int)
+        else:
+            inside = np.where(px_pr <= anchor)[0]
+            if inside.size:
+                return inside[max(0, inside.size - k) :]
+            j = np.searchsorted(px_pr, anchor, side="right") - 1
+            j = min(max(j, 0), len(px_pr) - 1)
+            return np.array([j], int)
+
+    def _tap_apply_one(self, y, mL, mR, L, R, L_idx, R_idx):
+        yL = float(np.median(y[L_idx])) if L_idx.size else 0.0
+        yR = float(np.median(y[R_idx])) if R_idx.size else 0.0
+        capL = np.maximum(yL * L, 0.0)
+        capR = np.maximum(yR * R, 0.0)
+        y_new = y.copy()
+        if np.any(mL):
+            y_new[mL] = np.minimum(y_new[mL], capL[mL])
+        if np.any(mR):
+            y_new[mR] = np.minimum(y_new[mR], capR[mR])
+        if np.any(mR):
+            idxR = np.where(mR)[0]
+            y_new[idxR] = np.minimum.accumulate(y_new[idxR])
+        if np.any(mL):
+            idxL = np.where(mL)[0]
+            y_new[idxL] = np.minimum.accumulate(y_new[idxL][::-1])[::-1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            shrink = np.minimum(y_new / np.maximum(y, 1e-9), 1.0)
+        return y_new, shrink
 
     def run(self) -> pd.DataFrame:
         """
@@ -2071,7 +2125,6 @@ class PricingPipeline:
         )
 
 
-# --------------------------- viz ---------------------------
 class viz:
     def __init__(self, template="lux"):
         templates = [

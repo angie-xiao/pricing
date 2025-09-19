@@ -100,7 +100,7 @@ class Cache:
         pricing_file: str = "pricing.csv",
         product_file: str = "products.csv",
         top_n: int = 10,
-        force_rebuild: bool = True
+        force_rebuild: bool = True,
     ) -> Dict[str, pd.DataFrame]:
 
         cache_dir = os.path.join(base_dir, ".cache")
@@ -108,23 +108,25 @@ class Cache:
 
         pricing_path = os.path.join(base_dir, data_folder, pricing_file)
         product_path = os.path.join(base_dir, data_folder, product_file)
-        sig = Cache.files_sig([pricing_path, product_path], top_n=top_n, 
-                            version=Cache.code_sig())
+        sig = Cache.files_sig(
+            [pricing_path, product_path], top_n=top_n, version=Cache.code_sig()
+        )
 
         cache_fp = os.path.join(cache_dir, f"frames_{sig}.pkl")
 
         # Force rebuild or use cache if available
         if force_rebuild or not os.path.exists(cache_fp):
             from built_in_logic import PricingPipeline
+
             frames = PricingPipeline.from_csv_folder(
                 base_dir, data_folder, pricing_file, product_file, top_n
             )
-            
+
             # Save to cache
             if not force_rebuild:
                 with open(cache_fp, "wb") as f:
                     pickle.dump(frames, f)
-                    
+
             return frames
 
         # Load from cache
@@ -518,37 +520,49 @@ class Metrics:
         if y_true.size == 0:
             return "—", ""
 
+        # Calculate RMSE
         rmse_val = np.sqrt(mean_squared_error(y_true, y_pred))
+
+        # Calculate average revenue
         avg_rev = float(np.mean(y_true)) if y_true.size else np.nan
+
+        # Calculate percentage error (pct_err)
         pct_err = (rmse_val / avg_rev * 100.0) if avg_rev else np.nan
-        return f"±${rmse_val:,.0f}", (
+
+        # Format the output without $ for RMSE and with percentage error
+        rmse_formatted = f"±${rmse_val:,.0f}"
+        pct_err_formatted = (
             f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else ""
         )
-        
+
+        return rmse_formatted, pct_err_formatted
+
     @staticmethod
-    def update_elasticity_kpi_by_product(product_name: str, elast_df: pd.DataFrame) -> Tuple[str, str]:
+    def update_elasticity_kpi_by_product(
+        product_name: str, elast_df: pd.DataFrame
+    ) -> Tuple[str, str]:
         try:
             row = elast_df.loc[elast_df["product"] == product_name]
             if row.empty or "ratio" not in row:
                 return "—", ""
-                
+
             ratio = float(row["ratio"].iloc[0])
-            
+
             # Use elasticity_score instead of pct
             elasticity_score = float(row["elasticity_score"].iloc[0])
             value_text = f"{ratio:,.2f}"
-            
+
             # Calculate elasticity tier
             elasticity_tier = int(round(elasticity_score))
             top_share = max(1, elasticity_tier)
-            
+
             subtext = (
                 "Top ~{0}% most ELASTIC".format(top_share)
                 if elasticity_score >= 50
                 else "Top ~{0}% most INELASTIC".format(top_share)
             )
             return value_text, subtext
-            
+
         except Exception:
             return "—", ""
 
@@ -641,23 +655,23 @@ class Scenario:
                 # Find nearest price point
                 idx = (prod_curve["asp"] - curr_price).abs().idxmin()
                 daily_units_curr = float(prod_curve.loc[idx, "units_pred_0.5"])
-                
+
                 # Calculate daily difference and annualize
                 units_diff_annual = (daily_units_best - daily_units_curr) * 365
                 rev_best_annual = daily_rev_best * 365
-                
+
                 return (
                     Formatters.signed_units(units_diff_annual),
-                    Formatters.signed_money(rev_best_annual)
+                    Formatters.signed_money(rev_best_annual),
                 )
-            
+
             # If we can't get current price predictions, just show annualized recommended values
             units_best_annual = daily_units_best * 365
             rev_best_annual = daily_rev_best * 365
-            
+
             return (
                 Formatters.signed_units(units_best_annual),
-                Formatters.signed_money(rev_best_annual)
+                Formatters.signed_money(rev_best_annual),
             )
 
         except Exception as e:
@@ -857,51 +871,56 @@ class OverviewHelpers:
         """Enhanced scenario table with weighted predictions"""
         if filt is None or filt.empty:
             return []
-        
+
         scenarios = []
-        
+
         # Add recommended scenarios
-        scenarios.extend([
-            {
-                "case": "Conservative",
-                "price": f"${filt.loc[filt['revenue_pred_0.025'].idxmax(), 'price']:.2f}",
-                "revenue": f"${filt['revenue_pred_0.025'].max():,.0f}"
-            },
-            {
-                "case": "Expected",
-                "price": f"${filt.loc[filt['revenue_pred_0.5'].idxmax(), 'price']:.2f}",
-                "revenue": f"${filt['revenue_pred_0.5'].max():,.0f}"
-            },
-            {
-                "case": "Optimistic",
-                "price": f"${filt.loc[filt['revenue_pred_0.975'].idxmax(), 'price']:.2f}",
-                "revenue": f"${filt['revenue_pred_0.975'].max():,.0f}"
-            }
-        ])
-        
+        scenarios.extend(
+            [
+                {
+                    "case": "Conservative",
+                    "price": f"${filt.loc[filt['revenue_pred_0.025'].idxmax(), 'price']:.2f}",
+                    "revenue": f"${filt['revenue_pred_0.025'].max():,.0f}",
+                },
+                {
+                    "case": "Expected",
+                    "price": f"${filt.loc[filt['revenue_pred_0.5'].idxmax(), 'price']:.2f}",
+                    "revenue": f"${filt['revenue_pred_0.5'].max():,.0f}",
+                },
+                {
+                    "case": "Optimistic",
+                    "price": f"${filt.loc[filt['revenue_pred_0.975'].idxmax(), 'price']:.2f}",
+                    "revenue": f"${filt['revenue_pred_0.975'].max():,.0f}",
+                },
+            ]
+        )
+
         # Add weighted prediction if available
         if include_weighted and "weighted_pred" in filt.columns:
             weighted_best = filt.loc[filt["weighted_pred"].idxmax()]
-            scenarios.insert(1, {
-                "case": "Recommended (Weighted)",
-                "price": f"${weighted_best['price']:.2f}",
-                "revenue": f"${weighted_best['revenue_pred_0.5']:,.0f}"
-            })
-        
+            scenarios.insert(
+                1,
+                {
+                    "case": "Recommended (Weighted)",
+                    "price": f"${weighted_best['price']:.2f}",
+                    "revenue": f"${weighted_best['revenue_pred_0.5']:,.0f}",
+                },
+            )
+
         # Insert current price scenario at the beginning if available
         if "current_price" in filt.columns:
             current_row = filt.iloc[0]  # Get first row for current scenario
-            scenarios.insert(0, {
-                "case": "Current Price",
-                "price": f"${current_row['current_price']:.2f}",
-                "revenue": f"${current_row['revenue_pred_0.5']:,.0f}"
-            })
-            
+            scenarios.insert(
+                0,
+                {
+                    "case": "Current Price",
+                    "price": f"${current_row['current_price']:.2f}",
+                    "revenue": f"${current_row['revenue_pred_0.5']:,.0f}",
+                },
+            )
+
         return scenarios
 
-        
-        
-        
     @staticmethod
     def annualized_kpis(
         asin: str,
@@ -912,12 +931,6 @@ class OverviewHelpers:
         return Scenario.annualized_kpis_signed(
             asin, best50_df, curr_price_df, all_gam_results
         )
-
-    @staticmethod
-    def fit_and_coverage(filt_df: pd.DataFrame) -> Tuple[str, str, Any]:
-        fit_val, fit_sub = Metrics.model_fit_units(filt_df)
-        cov = Notes.coverage(filt_df)
-        return fit_val, fit_sub, cov
 
 
 # =====================================================================
@@ -1013,9 +1026,7 @@ def scenario_table(prod_df):
 
 
 def annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam):
-    return Scenario.annualized_kpis_signed(
-        asin, best50_df, curr_price_df, all_gam
-    )
+    return Scenario.annualized_kpis_signed(asin, best50_df, curr_price_df, all_gam)
 
 
 def robustness_badge(prod_df):

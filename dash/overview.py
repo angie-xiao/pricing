@@ -2,17 +2,18 @@
 from dash import html, dcc, Input, Output, dash_table
 import dash_bootstrap_components as dbc
 from helpers import (
-    Style,  
-    OverviewUI as UI, 
-    Metrics,  
-    Scenario, 
-    Notes, 
-    OverviewHelpers as OH, 
+    Style,
+    OverviewUI as UI,
+    Metrics,
+    Scenario,
+    Notes,
+    OverviewHelpers as OH,
 )
 
 # constants previously imported directly
 OVERVIEW_ACCENT = Style.OVERVIEW_ACCENT
-    
+
+
 def register_callbacks(
     app,
     price_quant_df,
@@ -72,20 +73,19 @@ def register_callbacks(
 
             # Scenario table (combined revenue + units)
             scenario_data = OH.scenario_records(
-                filt, 
-                include_weighted=True  # Add parameter to include weighted predictions
+                filt,
+                include_weighted=True,  # Add parameter to include weighted predictions
             )
-            
+
             # Annualized KPI deltas (use pipeline's annual_factor)
             du_ann, rev_best_ann = OH.annualized_kpis(
-                asin,
-                best50_optimal_pricing_df,
-                curr_price_df,
-                all_gam_results
+                asin, best50_optimal_pricing_df, curr_price_df, all_gam_results
             )
 
             # Fit & coverage
-            fit_val, fit_sub, cov = OH.fit_and_coverage(filt)
+            # fit_val, fit_sub, cov = OH.fit_and_coverage(filt)
+            fit_val, fit_sub = Metrics.model_fit_units(filt)
+            cov = Notes.coverage(filt)
 
             return (
                 "",  # card_title_date_range (title is in layout)
@@ -202,7 +202,7 @@ def layout(products_lookup):
                     ),
                     UI.kpi_card(
                         "card_title_fit_snap",
-                        "Model Fit (Daily Revenue)",
+                        "Model Fit on Daily Revenue (RMSE)",
                         "fit_value_snap",
                         bg="#eef2fa",
                         id_subtext="fit-subtext",

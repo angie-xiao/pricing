@@ -162,10 +162,10 @@ cd dash
 pyenv install 3.11.7
 pyenv global 3.11.7
 python -m venv .pricing-venv
-source ../pricing-venv/bin/activate      # activate
-python3 app.py                           # run
+source ../.venv/bin/activate              # activate
+python3 app.py                            # run
 
-# ------------- winsows -------------
+# ------------- windows -------------
 ../.venv/Scripts/activate                 # activate
  py app.py                                # run
 

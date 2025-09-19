@@ -10,6 +10,9 @@
 *.pricing-venv
 
 # ---------- folders ----------
+# model
+__pycache__/
+
 # cache
 .cache/
 

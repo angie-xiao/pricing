@@ -1,4 +1,4 @@
-# + event info
+# grid for taper coeffs?
 
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
@@ -14,8 +14,9 @@ import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
 
 # ML
-from pygam import ExpectileGAM, s
+from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from pygam import ExpectileGAM, s, f
 
 # local import
 from helpers import DataEng
@@ -24,6 +25,46 @@ from helpers import DataEng
 def _p(msg: str):
     """Timestamped console print with flush."""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+class ElasticityAnalyzer:
+    @staticmethod
+    def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
+        eps = 1e-9
+        elasticity = (
+            topsellers.groupby("product")
+            .agg(
+                asp_max=("price", "max"),
+                asp_min=("price", "min"),
+                shipped_units_max=("shipped_units", "max"),
+                shipped_units_min=("shipped_units", "min"),
+                product_count=("product", "count"),
+            )
+            .reset_index()
+        )
+
+        # Calculate elasticity metrics
+        elasticity["pct_change_price"] = 100.0 * (
+            np.log(np.maximum(elasticity["asp_max"], eps))
+            - np.log(np.maximum(elasticity["asp_min"], eps))
+        )
+        elasticity["pct_change_qty"] = 100.0 * (
+            np.log(np.maximum(elasticity["shipped_units_max"], eps))
+            - np.log(np.maximum(elasticity["shipped_units_min"], eps))
+        )
+
+        # Calculate price elasticity ratio
+        elasticity["ratio"] = elasticity["pct_change_qty"] / np.where(
+            elasticity["pct_change_price"] == 0, np.nan, elasticity["pct_change_price"]
+        )
+
+        # Add normalized elasticity score (0-100)
+        elasticity["elasticity_score"] = 100 * (1 - elasticity["ratio"].rank(pct=True))
+
+        # Add confidence metric based on data points
+        elasticity["confidence"] = np.minimum(100, elasticity["product_count"] / 5)
+
+        return elasticity.sort_values("ratio", ascending=False).reset_index(drop=True)
 
 
 class DataEngineer:
@@ -130,33 +171,46 @@ class DataEngineer:
         elasticity_df: pd.DataFrame = None,
     ) -> np.ndarray:
         """
-        Create weights based on time decay, price outliers, and elasticity
+        blends several signals into one bounded, normalized weight per row:
+            (1) Recency: newer data gets more say (time-decay).
+            (2) Tail/outlier signal: points far from the median price get some extra attention (your original “tail strength”).
+            (3) Rarity: prices that appear rarely get a bounded bonus (our new _rarity_multiplier).
+            (4) Elasticity level (optional): product-level knob that scales all rows for that product slightly up/down.
+        Then clips extremes and renormalizes - so no point overwhelms the fit.
         """
-        # If parameters not provided, do grid search
+
+        # grid-search fallback as you have
         if tail_strength is None or tail_p is None:
             tail_strength, tail_p, _ = self._grid_search_weights(sub)
 
-        # Time decay weights
+        # 1) time-decay
         decayed_df = self._time_decay(sub)
-        w = decayed_df["time_decay_weight"].values
+        w = decayed_df["time_decay_weight"].values.astype(float)
 
-        # Modify the outlier adjustment formula
-        if tail_strength > 0:
+        # 2) (optional) de-emphasized tail boost to avoid double-counting
+        use_tail_boost = False
+
+        if use_tail_boost and tail_strength > 0:
             asp = sub["price"].values.astype(float)
             q25, q75 = np.percentile(asp, [25, 75])
             iqr = q75 - q25 if q75 > q25 else 1.0
-
-            # Add a cap to relative distance calculation
             rel_dist = np.abs(asp - np.median(asp)) / iqr
-            max_dist = 1.5  # Reduce from 2.0 to 1.5
+            rel_dist = np.minimum(rel_dist, 1.5)
+            w_tail = 1.0 + (tail_strength * 0.35) * rel_dist ** (tail_p * 0.6)
+            w *= 0.5 * w_tail + 0.5
 
-            # Add dampening factor and reduce power
-            dampening = 0.7
-            w *= 1.0 + (tail_strength * dampening) * np.minimum(rel_dist, max_dist) ** (
-                tail_p * 0.8
-            )
+        # 3) bounded rarity bonus (density-aware, capped)
+        rarity_mult = self._rarity_multiplier(
+            sub["price"].to_numpy(float),
+            smooth=5,
+            cap=1.25,
+            beta=0.35,
+            tails_only=True,
+            tail_q=0.10,
+        )
+        w *= rarity_mult
 
-        # Incorporate elasticity if available
+        # 4) product elasticity factor
         if elasticity_df is not None:
             product = sub["product"].iloc[0]
             elasticity_score = (
@@ -166,12 +220,16 @@ class DataEngineer:
                 if product in elasticity_df["product"].values
                 else 50
             )
+            w *= 0.8 + 0.4 * elasticity_score / 100.0
 
-            # Scale factor based on elasticity (0.8 to 1.2)
-            elasticity_factor = 0.8 + (0.4 * elasticity_score / 100)
-            w *= elasticity_factor
+        # 5) local leverage cap, then global safety + normalize
+        w = self._cap_local_leverage(
+            w, sub["price"].to_numpy(float), window=7, lcap=1.4
+        )
+        w = np.clip(w, 0.25, 2.5)
+        w = w / w.mean() if w.size else w
 
-        return w / np.mean(w) if w.size > 0 else w
+        return w
 
     def _days_at_price(self, df) -> pd.DataFrame:
         """
@@ -207,6 +265,90 @@ class DataEngineer:
         res["product_encoded"] = le.fit_transform(res["product"])
 
         return res
+
+    @staticmethod
+    def _rarity_multiplier(
+        prices: np.ndarray,
+        bin_width: float | None = None,  # None = auto (Freedman–Diaconis)
+        smooth: int = 5,  # stronger smoothing
+        cap: float = 1.25,  # tighter cap than 1.35
+        beta: float = 0.35,  # softer curvature
+        tails_only: bool = True,  # <— NEW: only weight the tails
+        tail_q: float = 0.10,  # 10% tails by default
+    ) -> np.ndarray:
+        """
+        find out distribution density - assign bigger bonus points to rare points
+        -> (1/density)^beta -> normalize -> clip.
+        - Auto bin width via Freedman-Diaconis unless provided.
+        - Capping via light smoothing of bin counts to avoid single-bin spikes.
+        - Normalized to mean=1 so it only redistributes mass.
+
+        Returns
+            a multiplicative weight per observation that is higher in
+            low-density (rare) price regions and lower in dense regions,
+            but bounded to avoid domination by singletons.
+        """
+        p = np.asarray(prices, dtype=float).ravel()
+        n = p.size
+        if n == 0 or np.allclose(p, p[0]):
+            return np.ones_like(p)
+
+        # define safe interior (no rarity bonus there)
+        if tails_only:
+            lo, hi = np.quantile(p, [tail_q, 1.0 - tail_q])
+            in_core = (p >= lo) & (p <= hi)
+        else:
+            in_core = np.zeros_like(p, dtype=bool)
+
+        # Freedman–Diaconis bin width with guardrails
+        if bin_width is None:
+            q25, q75 = np.percentile(p, [25, 75])
+            iqr = max(q75 - q25, 1e-9)
+            bw = 2.0 * iqr / np.cbrt(n)
+            span = max(p.max() - p.min(), 1e-6)
+            bw = np.clip(bw, span / 80, span / 25)
+        else:
+            bw = float(bin_width)
+
+        edges = np.arange(p.min() - 1e-9, p.max() + bw + 1e-9, bw)
+        counts, edges = np.histogram(p, bins=edges)
+
+        if smooth and smooth > 1:
+            k = smooth + (smooth % 2 == 0)  # force odd
+            kernel = np.ones(k, dtype=float) / k
+            counts = np.convolve(counts, kernel, mode="same")
+
+        counts = np.maximum(counts, 1e-12)
+        idx = np.clip(np.digitize(p, edges) - 1, 0, len(counts) - 1)
+        c = counts[idx]
+
+        raw = (1.0 / c) ** float(beta)
+        raw /= np.mean(raw)
+
+        mult = np.clip(raw, 1.0 / float(cap), float(cap))
+        # disable rarity inside the core band
+        mult[in_core] = 1.0
+        return mult
+
+    @staticmethod
+    def _cap_local_leverage(
+        w: np.ndarray, prices: np.ndarray, window: int = 7, lcap: float = 1.4
+    ) -> np.ndarray:
+        """Limit each point's weight to <= lcap × local-mean(weight) in price order."""
+        w = np.asarray(w, dtype=float)
+        x = np.asarray(prices, dtype=float)
+        order = np.argsort(x)
+        ws = w[order].copy()
+        m = max(1, window // 2)
+        n = len(ws)
+        for i in range(n):
+            lo, hi = max(0, i - m), min(n, i + m + 1)
+            mu = float(ws[lo:hi].mean())
+            if mu > 0:
+                ws[i] = min(ws[i], lcap * mu)
+        out = np.empty_like(ws)
+        out[order] = ws
+        return out
 
     def prepare(self) -> pd.DataFrame:
         """ """
@@ -319,100 +461,48 @@ class DataEngineer:
         return res
 
 
-class ElasticityAnalyzer:
-    @staticmethod
-    def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
-        eps = 1e-9
-        elasticity = (
-            topsellers.groupby("product")
-            .agg(
-                asp_max=("price", "max"),
-                asp_min=("price", "min"),
-                shipped_units_max=("shipped_units", "max"),
-                shipped_units_min=("shipped_units", "min"),
-                product_count=("product", "count"),
-            )
-            .reset_index()
-        )
-
-        # Calculate elasticity metrics
-        elasticity["pct_change_price"] = 100.0 * (
-            np.log(np.maximum(elasticity["asp_max"], eps))
-            - np.log(np.maximum(elasticity["asp_min"], eps))
-        )
-        elasticity["pct_change_qty"] = 100.0 * (
-            np.log(np.maximum(elasticity["shipped_units_max"], eps))
-            - np.log(np.maximum(elasticity["shipped_units_min"], eps))
-        )
-
-        # Calculate price elasticity ratio
-        elasticity["ratio"] = elasticity["pct_change_qty"] / np.where(
-            elasticity["pct_change_price"] == 0, np.nan, elasticity["pct_change_price"]
-        )
-
-        # Add normalized elasticity score (0-100)
-        elasticity["elasticity_score"] = 100 * (1 - elasticity["ratio"].rank(pct=True))
-
-        # Add confidence metric based on data points
-        elasticity["confidence"] = np.minimum(100, elasticity["product_count"] / 5)
-
-        return elasticity.sort_values("ratio", ascending=False).reset_index(drop=True)
-
-
 class GAMTuner:
-
     def __init__(self, expectile=0.5, lam_grid=None, n_splines_grid=None):
-        """
-        params
-            expectile
-            lam_grid
-            n_splines_grid
-        """
         self.expectile = expectile
-        # Expanded lambda grid for better smoothing control
         self.lam_grid = (
-            np.logspace(-5, 5, 20) if lam_grid is None else np.array(lam_grid)
+            np.logspace(-4, 7, 24) if lam_grid is None else np.array(lam_grid)
         )
-        # More flexible spline options
-        self.n_splines_grid = n_splines_grid or [20, 30, 40]
+        self.n_splines_grid = n_splines_grid or [15, 25, 35]
 
     def fit(self, X: np.ndarray, y: np.ndarray, sample_weight=None):
-        scaler_X = StandardScaler()
-        Xs = scaler_X.fit_transform(X.reshape(-1, 1).astype(float))
-        best_gam = None
-        best_score = float("inf")
-        best_ns = None
+        # scale numeric cols 0,1; leave factor col 2 unscaled
+        X = np.asarray(X, float)
+        num_idx = [0, 1]
+        fac_idx = [2]
+        scaler = StandardScaler()
+        X_num = scaler.fit_transform(X[:, num_idx])
+        X_fac = X[:, fac_idx]
+        Xs = np.column_stack([X_num, X_fac])
 
-        if getattr(self, "_verbose", False):
-            lam_len = (
-                len(self.lam_grid)
-                if isinstance(self.lam_grid, (list, np.ndarray))
-                else "?"
-            )
-            _p(
-                f"[fit] expectile={self.expectile} | n={len(Xs)} | splines={self.n_splines_grid} | lam={lam_len}"
-            )
-
+        best_gam, best_score, best_ns = None, float("inf"), None
         yf = y.astype(float)
 
-        # normalized weights for scoring (gridsearch still uses original weights)
+        # normalized weights for scoring only
         sw = None
         if sample_weight is not None:
-            sw = np.asarray(sample_weight, dtype=float)
+            sw = np.asarray(sample_weight, float)
             sw[~np.isfinite(sw)] = 0.0
-            sw_sum = sw.sum()
-            sw = (sw / sw_sum) if sw_sum > 0 else None
+            ssum = sw.sum()
+            sw = (sw / ssum) if ssum > 0 else None
 
-        for n_splines in self.n_splines_grid:
-            terms = s(0, basis="ps", n_splines=n_splines)
+        for n_price in self.n_splines_grid:
+            # moderate splines for discount too
+            terms = (
+                s(0, basis="ps", n_splines=n_price)
+                + s(1, basis="ps", n_splines=15)
+                + f(2)
+            )
             gam = ExpectileGAM(terms, expectile=self.expectile, fit_intercept=True)
             try:
                 gam = gam.gridsearch(
                     Xs, yf, lam=self.lam_grid, weights=sample_weight, progress=False
                 )
                 y_pred = gam.predict(Xs)
-
-                # Weighted RMSE (no deviance call)
                 resid2 = (yf - y_pred) ** 2
                 mse = (
                     float((resid2 * sw).sum())
@@ -421,30 +511,28 @@ class GAMTuner:
                 )
                 rmse = np.sqrt(mse)
 
-                # penalize overly wiggly funcs to prevent extrapolating
+                # stronger smoothness penalty to suppress wiggles
                 denom = max(np.mean(np.abs(y_pred)), 1e-9)
-                smoothness_penalty = float(np.mean(np.abs(np.diff(y_pred, 2))) / denom)
-                score = rmse * (1 + 0.2 * smoothness_penalty)
+                smoothness = float(np.mean(np.abs(np.diff(y_pred, 2))) / denom)
+                score = rmse * (1 + 0.8 * smoothness)
 
                 if score < best_score:
-                    best_score = score
-                    best_gam = gam
-                    best_ns = n_splines
+                    best_score, best_gam, best_ns = score, gam, n_price
             except Exception:
-                # swallow per-spline errors silently to avoid noise
                 continue
 
         if best_gam is None:
-            terms = s(0, basis="ps", n_splines=25)
+            terms = (
+                s(0, basis="ps", n_splines=25) + s(1, basis="ps", n_splines=15) + f(2)
+            )
             best_gam = ExpectileGAM(terms, expectile=self.expectile).fit(
                 Xs, yf, weights=sample_weight
             )
-            best_ns = 25
 
-        if getattr(self, "_verbose", False):
-            _p(f"[fit] done | best_n_splines={best_ns} | score={best_score:.4f}")
-
-        best_gam._scaler_X = scaler_X
+        # stash scaler & num/fac layout for prediction
+        best_gam._scaler = scaler
+        best_gam._num_idx = num_idx
+        best_gam._fac_idx = fac_idx
         return best_gam
 
 
@@ -525,56 +613,66 @@ class GAMModeler:
         ]
 
     def _make_design_matrix(self, sub: pd.DataFrame):
+        """
+        Build the per-product design matrix and sample weights.
+
+        Features (columns in X):
+        - col 0: price  (float, numeric; scaled later)
+        - col 1: deal_discount_percent (float; NA->0; scaled later)
+        - col 2: event_encoded (int categorical; used via f(2) in pyGAM)
+
+        Returns
+        sub_clean, X_train, y_train, w_train, X_all
+        or (None, None, None, None, None) if not enough data.
+        """
         if sub is None or sub.empty:
             return None, None, None, None, None
 
-        # Essentials only
-        if self.verbose:
-            p = (
-                str(sub["product"].iloc[0])
-                if "product" in sub.columns and len(sub)
-                else "?"
-            )
-            _p(f"[model] {p}: rows={len(sub)}, unique_prices={sub['price'].nunique()}")
-
+        # --- sort by price for stable diagnostics; modeling doesn’t require it
         sub = sub.sort_values("price").reset_index(drop=True)
 
-        # Build weights (grid search message is already compact inside DataEngineer)
+        # --- build per-row weights (time decay + rarity, etc.)
         if self.use_grid_search:
             best_tail_strength, best_tail_p, _ = self.engineer._grid_search_weights(
                 sub, param_grid=self.custom_grid
             )
             w = self.engineer._make_weights(
-                sub, tail_strength=best_tail_strength, tail_p=best_tail_p
+                sub,
+                tail_strength=best_tail_strength,
+                tail_p=best_tail_p,
+                elasticity_df=self.elasticity_df,  # ok if None
             )
         else:
+            # simple fallback: recency + volume + inverse price-density
             de = DataEngineer(None, None)
             sub_decayed = de._time_decay(sub)
-            time_decay_weight = sub_decayed["time_decay_weight"]
-            volume = sub["shipped_units"]
-            volume_weight = np.log1p(volume) / np.log1p(volume.max())
-            price_range = sub["price"].max() - sub["price"].min()
-            if price_range > 0:
-                price_counts = sub["price"].value_counts()
-                price_density = sub["price"].map(price_counts) / len(sub)
-                price_weight = 1 / (price_density + 0.1)
+            time_decay_weight = sub_decayed["time_decay_weight"].astype(float)
+
+            vol = sub["shipped_units"].astype(float)
+            volume_weight = np.log1p(vol) / np.log1p(max(vol.max(), 1.0))
+
+            if sub["price"].max() > sub["price"].min():
+                dens = sub["price"].map(sub["price"].value_counts()) / len(sub)
+                price_weight = 1.0 / (dens + 0.1)
                 price_weight = price_weight / price_weight.max()
             else:
                 price_weight = pd.Series(1.0, index=sub.index)
-            w = time_decay_weight * 0.4 + volume_weight * 0.4 + price_weight * 0.2
+
+            w = 0.4 * time_decay_weight + 0.4 * volume_weight + 0.2 * price_weight
             w = w / w.mean()
 
         sub = pd.concat([sub, pd.Series(w, name="wt", index=sub.index)], axis=1)
+
+        # --- minimal cleanliness & sufficiency checks
         sub_clean = sub.dropna(subset=["price", "shipped_units"]).copy()
         if sub_clean.shape[0] < 5 or sub_clean["price"].nunique() < 3:
             if self.verbose:
                 _p("[split] insufficient data; skip")
             return None, None, None, None, None
 
-        # Time-aware split (or random fallback)
+        # --- time-aware train/test split (fallback to random if necessary)
         is_train = pd.Series(True, index=sub_clean.index)
         used_time_split = False
-        cutoff = None
         if self.split_by_date and "order_date" in sub_clean.columns:
             dates = pd.to_datetime(sub_clean["order_date"], errors="coerce")
             if dates.notna().sum() >= 5:
@@ -583,32 +681,194 @@ class GAMModeler:
                 used_time_split = True
 
         if is_train.sum() < 3 or (~is_train).sum() < 1:
-            seed = abs(hash(str(sub_clean["product"].iloc[0]))) % (2**32 - 1)
+            # deterministic-ish random fallback per product
+            seed = abs(hash(str(sub_clean.get("product", "?").iloc[0]))) % (2**32 - 1)
             rng = np.random.default_rng(self.random_state or seed)
             is_train = pd.Series(
                 rng.random(len(sub_clean)) >= self.test_size, index=sub_clean.index
             )
-            if is_train.sum() < 3:
+            if is_train.sum() < 3:  # last resort: all train
                 is_train[:] = True
 
         sub_clean["split"] = np.where(is_train, "train", "test")
-
         if self.verbose:
             method = "time" if used_time_split else "random"
             _p(
                 f"[split] {method} | train={int(is_train.sum())}, test={int((~is_train).sum())}"
             )
 
-        X_all = sub_clean[["price"]].to_numpy(dtype=float)
+        # --- build X (3 columns), y, w
+        price = sub_clean["price"].to_numpy(dtype=float)
+
+        # discount: fill NA with 0, clip to sane bounds
+        if "deal_discount_percent" in sub_clean.columns:
+            disc = pd.to_numeric(
+                sub_clean["deal_discount_percent"], errors="coerce"
+            ).fillna(0.0)
+            disc = disc.clip(lower=-100.0, upper=100.0).to_numpy(dtype=float)
+        else:
+            disc = np.zeros(len(sub_clean), dtype=float)
+
+        # event factor: integer codes; if missing, use 0
+        if "event_encoded" in sub_clean.columns:
+            evt = (
+                pd.to_numeric(sub_clean["event_encoded"], errors="coerce")
+                .fillna(0)
+                .to_numpy(dtype=int)
+            )
+        else:
+            evt = np.zeros(len(sub_clean), dtype=int)
+
+        X_all = np.column_stack([price, disc, evt])
         y_all = sub_clean["shipped_units"].to_numpy(dtype=float)
         w_all = sub_clean["wt"].to_numpy(dtype=float)
-        return (
-            sub_clean,
-            X_all[is_train.values],
-            y_all[is_train.values],
-            w_all[is_train.values],
-            X_all,
+
+        # --- slice train/test
+        X_tr = X_all[is_train.values]
+        y_tr = y_all[is_train.values]
+        w_tr = w_all[is_train.values]
+
+        return sub_clean, X_tr, y_tr, w_tr, X_all
+
+    def _ensure_factor_domain(
+        self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8
+    ):
+        """
+        Make sure all categories present in X_pred[:, fac_col] exist in the
+        training design given to pyGAM. If missing, append one pseudo-row per
+        missing level with tiny weight (eps).
+        """
+        xt = np.asarray(X_train)
+        xp = np.asarray(X_pred)
+
+        train_lvls = np.unique(xt[:, fac_col])
+        pred_lvls = np.unique(xp[:, fac_col])
+        missing = np.setdiff1d(pred_lvls, train_lvls)
+
+        if missing.size == 0:
+            return X_train, y_train, w_train
+
+        # use medians for numeric columns as placeholders
+        price_med = np.median(xt[:, 0].astype(float)) if xt.shape[1] > 0 else 0.0
+        disc_med = np.median(xt[:, 1].astype(float)) if xt.shape[1] > 1 else 0.0
+
+        X_extra = np.column_stack(
+            [
+                np.full(missing.size, price_med, dtype=float),
+                np.full(missing.size, disc_med, dtype=float),
+                missing.astype(float),  # factor column
+            ]
         )
+
+        y_extra = np.full(
+            missing.size, np.median(y_train) if len(y_train) else 0.0, dtype=float
+        )
+        if w_train is None:
+            w_train = np.ones(len(y_train), dtype=float)
+
+        w_extra = np.full(missing.size, float(eps), dtype=float)
+
+        X_aug = np.vstack([xt, X_extra])
+        y_aug = np.concatenate([y_train, y_extra])
+        w_aug = np.concatenate([w_train, w_extra])
+        return X_aug, y_aug, w_aug
+
+    @staticmethod
+    def _bootstrap_weights(n_rows: int, sample_idx: np.ndarray) -> np.ndarray:
+        """
+        Return a length-n_rows vector: counts of how many times each row was drawn.
+        If you want classical bootstrap behavior, use this as multiplicative
+        weights (and multiply by the original sample weights).
+        """
+        w = np.bincount(sample_idx, minlength=n_rows).astype(float)
+        # keep the average weight ~1 for numeric stability
+        mean = w.mean()
+        if mean > 0:
+            w /= mean
+        return w
+
+    def _robust_reweight(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        w_base: np.ndarray,
+        eps_rows_mask: np.ndarray | None = None,
+        expectile: float = 0.5,
+        kfold_min: int = 3,
+        kfold_max: int = 5,
+        huber_c: float = 1.345,
+        clip_floor: float = 0.25,
+        eps: float = 1e-8,  # weight for domain-seeding rows
+        fac_col: int = 2,  # column index of event factor
+    ) -> np.ndarray:
+        """
+        Out-of-fold robust reweighting. Ensures every fold’s TRAIN set covers all
+        categorical levels present overall by appending epsilon-weight rows for
+        each level before fitting.
+        """
+        X = np.asarray(X, float)
+        y = np.asarray(y, float)
+        w_base = np.asarray(w_base, float)
+
+        n = len(y)
+        if n < 10:
+            return w_base
+
+        # Build epsilon rows that cover ALL factor levels seen in X
+        all_lvls = np.unique(X[:, fac_col])
+        price_med = float(np.median(X[:, 0])) if X.shape[1] > 0 else 0.0
+        disc_med = float(np.median(X[:, 1])) if X.shape[1] > 1 else 0.0
+
+        X_eps = np.column_stack(
+            [
+                np.full(all_lvls.size, price_med, dtype=float),
+                np.full(all_lvls.size, disc_med, dtype=float),
+                all_lvls.astype(float),
+            ]
+        )
+        y_eps = np.full(all_lvls.size, float(np.median(y)), dtype=float)
+        w_eps = np.full(all_lvls.size, float(eps), dtype=float)
+
+        # OOF predictions
+        k = min(max(kfold_min, (n // 50) or kfold_min), kfold_max)
+        kf = KFold(n_splits=k, shuffle=True, random_state=self.random_state)
+
+        yhat = np.full(n, np.nan, dtype=float)
+
+        for tr_idx, va_idx in kf.split(X):
+            # Augment this fold's TRAIN split with ε rows to seed all categories
+            X_tr = np.vstack([X[tr_idx], X_eps])
+            y_tr = np.concatenate([y[tr_idx], y_eps])
+            w_tr = np.concatenate([w_base[tr_idx], w_eps])
+            w_tr = np.maximum(w_tr, 1e-12)
+
+            tuner = GAMTuner(expectile=expectile)
+            gam = tuner.fit(X_tr, y_tr, sample_weight=w_tr)
+
+            Xv = X[va_idx]
+            Xv_num = gam._scaler.transform(Xv[:, gam._num_idx])
+            Xv_fac = Xv[:, gam._fac_idx]
+            Xv_s = np.column_stack([Xv_num, Xv_fac])
+
+            yhat[va_idx] = gam.predict(Xv_s)
+
+        # Robust residual weighting (Huber)
+        real_mask = np.ones(n, dtype=bool) if eps_rows_mask is None else ~eps_rows_mask
+        r = y[real_mask] - yhat[real_mask]
+
+        med_abs = float(np.median(np.abs(r - np.median(r))))
+        s = 1.4826 * max(med_abs, 1e-9)
+        z = np.abs(r) / s
+
+        w_resid_real = np.where(z <= huber_c, 1.0, huber_c / z)
+        w_resid = np.ones(n, dtype=float)
+        w_resid[real_mask] = np.clip(w_resid_real, clip_floor, 1.0)
+
+        w_new = w_base * w_resid
+        mu = float(w_new.mean())
+        if mu > 0:
+            w_new /= mu
+        return w_new
 
     def _fit_expectiles(
         self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)
@@ -616,40 +876,63 @@ class GAMModeler:
         out = {}
         rng = np.random.default_rng(self.random_state)
 
-        def fit_once(q, idx):
+        # 1) seed factor domain so f(2) knows all levels present in X_pred
+        X_seed, y_seed, w_seed = self._ensure_factor_domain(
+            X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8
+        )
+        n = len(y_seed)
+
+        # 2) robust reweight on the seeded matrix (single pass)
+        w_base = w_seed if w_seed is not None else np.ones(n, dtype=float)
+        w_base = np.maximum(w_base, 1e-12)
+        is_eps = w_seed <= 2e-8
+        w_robust = self._robust_reweight(
+            X_seed,
+            y_seed,
+            w_seed if w_seed is not None else np.ones(len(y_seed)),
+            eps_rows_mask=is_eps,  # <-- these are the epsilon rows; don't reweight them
+            expectile=0.5,
+        )
+
+        def fit_once(q, boot_idx=None):
             tuner = GAMTuner(expectile=q)
             tuner._verbose = self.verbose
-            gam = tuner.fit(
-                X_train[idx],
-                y_train[idx],
-                sample_weight=(None if w_train is None else w_train[idx]),
-            )
-            yhat = gam.predict(gam._scaler_X.transform(X_pred))
+            if boot_idx is None:
+                w_boot = w_robust
+            else:
+                w_b = self._bootstrap_weights(n, boot_idx)
+                w_boot = w_b * w_robust
+
+            gam = tuner.fit(X_seed, y_seed, sample_weight=w_boot)
+
+            Xp = np.asarray(X_pred, float)
+            Xp_num = gam._scaler.transform(Xp[:, gam._num_idx])
+            Xp_fac = Xp[:, gam._fac_idx]
+            Xp_s = np.column_stack([Xp_num, Xp_fac])
+            yhat = gam.predict(Xp_s)
             return np.maximum(yhat, 0.0)
 
-        n_train = len(X_train)
         for q in qs:
-            loops = self._bootstrap_loops_for_size(n_train)
+            loops = self._bootstrap_loops_for_size(n)
             if self.verbose:
                 mode = "bootstrap" if loops > 0 else "single-fit"
                 _p(f"[fit] q={q} | {mode}" + (f" x{loops}" if loops else ""))
 
             if loops <= 0:
-                out[f"units_pred_{q}"] = fit_once(q, np.arange(n_train))
+                out[f"units_pred_{q}"] = fit_once(q, boot_idx=None)
                 continue
 
-            idx_all = np.arange(n_train)
-            m = max(1, int(n_train * self.bootstrap_frac))
+            idx_all = np.arange(n)
+            m = max(1, int(n * self.bootstrap_frac))
             preds = []
             target = self.bootstrap_target_rel_se
 
             for i in range(loops):
-                sample_idx = rng.choice(idx_all, size=m, replace=True)
-                preds.append(fit_once(q, sample_idx))
+                boot_idx = rng.choice(idx_all, size=m, replace=True)
+                preds.append(fit_once(q, boot_idx=boot_idx))
 
-                # early stop after a few iterations if relative SE is small
                 if target and (i + 1) >= 5:
-                    P = np.vstack(preds)  # [i+1, n_pred]
+                    P = np.vstack(preds)
                     mean_vec = P.mean(axis=0)
                     se_vec = P.std(axis=0, ddof=1) / np.sqrt(i + 1)
                     rel_se = np.nanmean(se_vec / np.maximum(np.abs(mean_vec), 1e-8))
@@ -663,6 +946,33 @@ class GAMModeler:
             P = np.vstack(preds)
             out[f"units_pred_{q}"] = P.mean(axis=0)
             out[f"units_pred_{q}_sd"] = P.std(axis=0, ddof=1)
+
+        # w_eff = w_robust[: len(X_train)] if w_robust is not None else None
+
+        # taper using TRAIN prices to define the anchor
+        out = self._apply_edge_tapers(
+            X_train=X_train,
+            X_pred=X_pred,
+            pred_dict=out,
+            w_train_effective=w_train,  # aligned with X_train
+            lo_q=0.10,
+            hi_q=0.90,
+            stretch_lo=0.15,
+            stretch_hi=0.15,
+            scale_sds=True,
+        )
+
+        # 3) non-crossing quantiles (unchanged)
+        qkeys = sorted(
+            [k for k in out if k.startswith("units_pred_") and not k.endswith("_sd")],
+            key=lambda k: float(k.replace("units_pred_", "")),
+        )
+        if qkeys:
+            P = np.vstack([out[k] for k in qkeys])
+            P_nc = np.maximum.accumulate(P, axis=0)
+            for i, k in enumerate(qkeys):
+                out[k] = np.maximum(P_nc[i], 0.0)
+
         return out
 
     def _assemble_group_results(
@@ -769,20 +1079,202 @@ class GAMModeler:
 
         return df
 
-    # --------- main ---------
+    def _apply_edge_tapers(
+        self,
+        X_train: np.ndarray,
+        X_pred: np.ndarray,
+        pred_dict: dict,
+        w_train_effective: np.ndarray | None = None,
+        lo_q: float = 0.10,
+        hi_q: float = 0.90,
+        stretch_lo: float = 0.15,
+        stretch_hi: float = 0.15,
+        k_anchor: int = 5,
+        scale_sds: bool = True,
+    ):
+        """
+        Post-prediction guardrail for BOTH edges.
+        For x < lo_anchor, linearly ramp units -> 0 by x_left0.
+        For x > hi_anchor, linearly ramp units -> 0 by x_right0.
+        Anchors come from TRAIN price quantiles (weighted if weights provided).
+        """
+
+        def _wquantile(v, q, w=None):
+            v = np.asarray(v, float)
+            if w is None:
+                w = np.ones_like(v)
+            else:
+                w = np.asarray(w, float)
+                if w.shape[0] != v.shape[0]:
+                    w = np.ones_like(v)
+            ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+            if not ok.any():
+                return float("nan")
+            v, w = v[ok], w[ok]
+            order = np.argsort(v)
+            v, w = v[order], w[order]
+            cw = np.cumsum(w)
+            cutoff = float(q) * float(cw[-1])
+            return float(v[np.searchsorted(cw, cutoff, side="left")])
+
+        X_train = np.asarray(X_train, float)
+        X_pred = np.asarray(X_pred, float)
+        w_eff = (
+            None if w_train_effective is None else np.asarray(w_train_effective, float)
+        )
+
+        px_tr = X_train[:, 0]
+        px_pr = X_pred[:, 0]
+        pr = float(px_tr.max() - px_tr.min())
+        if not np.isfinite(pr) or pr <= 0:
+            return pred_dict
+
+        # anchors from TRAIN prices
+        lo_anchor = _wquantile(px_tr, lo_q, w_eff)
+        hi_anchor = _wquantile(px_tr, hi_q, w_eff)
+        if not (
+            np.isfinite(lo_anchor) and np.isfinite(hi_anchor) and hi_anchor > lo_anchor
+        ):
+            return pred_dict
+
+        # taper endpoints (units -> 0)
+        x_left0 = lo_anchor - stretch_lo * pr
+        x_right0 = hi_anchor + stretch_hi * pr
+        if x_right0 <= hi_anchor:
+            x_right0 = hi_anchor + 1e-6
+        if x_left0 >= lo_anchor:
+            x_left0 = lo_anchor - 1e-6
+
+        # masks & linear ramps [1 -> 0]
+        mL = px_pr <= lo_anchor  # include the anchor
+        mR = px_pr >= hi_anchor
+        L = np.zeros_like(px_pr, float)
+        R = np.zeros_like(px_pr, float)
+        if np.any(mL):
+            L[mL] = np.clip((px_pr[mL] - x_left0) / (lo_anchor - x_left0), 0.0, 1.0)
+        if np.any(mR):
+            R[mR] = np.clip((x_right0 - px_pr[mR]) / (x_right0 - hi_anchor), 0.0, 1.0)
+
+        # choose anchor levels from k nearest points just inside each edge
+        def _nearest_inside_indices(x, anchor, side, k):
+            if side == "left":
+                inside = np.where(x >= anchor)[0]  # just inside the LEFT edge
+                if inside.size:
+                    # take the first k (closest to anchor from inside)
+                    return inside[:k]
+                # fallback: nearest index to anchor
+                j = np.searchsorted(x, anchor, side="left")
+                j = min(max(j, 0), len(x) - 1)
+                return np.array([j], int)
+            else:
+                inside = np.where(x <= anchor)[0]  # just inside the RIGHT edge
+                if inside.size:
+                    # take the last k (closest to anchor from inside)
+                    return inside[max(0, inside.size - k) :]
+                j = np.searchsorted(x, anchor, side="right") - 1
+                j = min(max(j, 0), len(x) - 1)
+                return np.array([j], int)
+
+        # NOTE: px_pr is already in ascending price order in your pipeline
+        L_anchor_idx = _nearest_inside_indices(
+            px_pr, lo_anchor, side="left", k=k_anchor
+        )
+        R_anchor_idx = _nearest_inside_indices(
+            px_pr, hi_anchor, side="right", k=k_anchor
+        )
+
+        qkeys = sorted(
+            [
+                k
+                for k in pred_dict
+                if k.startswith("units_pred_") and not k.endswith("_sd")
+            ],
+            key=lambda k: float(k.replace("units_pred_", "")),
+        )
+
+        for k in qkeys:
+            y = np.asarray(pred_dict[k], float)
+
+            yL = float(np.median(y[L_anchor_idx])) if L_anchor_idx.size else 0.0
+            yR = float(np.median(y[R_anchor_idx])) if R_anchor_idx.size else 0.0
+
+            capL = np.maximum(
+                yL * L, 0.0
+            )  # L=1 at lo_anchor -> yL; L=0 at x_left0 -> 0
+            capR = np.maximum(
+                yR * R, 0.0
+            )  # R=1 at hi_anchor -> yR; R=0 at x_right0 -> 0
+
+            y_new = y.copy()
+            if np.any(mL):
+                y_new[mL] = np.minimum(y_new[mL], capL[mL])
+            if np.any(mR):
+                y_new[mR] = np.minimum(y_new[mR], capR[mR])
+
+            # monotone edge clamp
+            if np.any(mR):
+                idxR = np.where(mR)[0]
+                y_new[idxR] = np.minimum.accumulate(y_new[idxR])
+            if np.any(mL):
+                idxL = np.where(mL)[0]
+                y_new[idxL] = np.minimum.accumulate(y_new[idxL][::-1])[::-1]
+
+            # write back
+            shrink = np.ones_like(y_new)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                shrink = np.minimum(y_new / np.maximum(y, 1e-9), 1.0)
+            pred_dict[k] = np.maximum(y_new, 0.0)
+
+            if scale_sds:
+                sk = f"{k}_sd"
+                if sk in pred_dict:
+                    sd = np.asarray(pred_dict[sk], float)
+                    pred_dict[sk] = np.maximum(sd * shrink, 0.0)
+
+        # re-enforce non-crossing
+        if qkeys:
+            P = np.vstack([pred_dict[k] for k in qkeys])
+            P_nc = np.maximum.accumulate(P, axis=0)
+            for i, k in enumerate(qkeys):
+                pred_dict[k] = np.maximum(P_nc[i], 0.0)
+
+        pred_dict["_edge_taper_info"] = {
+            "lo_anchor": float(lo_anchor),
+            "hi_anchor": float(hi_anchor),
+            "x_left0": float(x_left0),
+            "x_right0": float(x_right0),
+        }
+
+        if getattr(self, "verbose", False):
+            nL = int((px_pr <= lo_anchor).sum())
+            nR = int((px_pr >= hi_anchor).sum())
+            _p(
+                f"[taper] lo={lo_anchor:.2f} hi={hi_anchor:.2f} | left_pts={nL} right_pts={nR} | "
+                f"L_anchor_len={len(L_anchor_idx)} R_anchor_len={len(R_anchor_idx)}"
+            )
+
+        return pred_dict
+
     def run(self) -> pd.DataFrame:
+        """
+        Train per product, predict expectiles, assemble results, and postprocess.
+        """
         all_results = []
+
         for product_name, sub in self.topsellers.groupby("product"):
             if self.verbose:
                 _p(f"[start] {product_name}")
+
             sub_clean, X_tr, y_tr, w_tr, X_pred = self._make_design_matrix(sub)
             if sub_clean is None:
                 if self.verbose:
                     _p(f"[skip] {product_name}")
                 continue
+
             preds = self._fit_expectiles(X_tr, y_tr, w_tr, X_pred)
             group_df = self._assemble_group_results(sub_clean, preds)
             all_results.append(group_df)
+
             if self.verbose:
                 _p(f"[done] {product_name} | rows_out={len(group_df)}")
 

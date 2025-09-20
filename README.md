@@ -3,7 +3,6 @@
 > A zero-to-run guide for first-time users: install Python, set up a virtual environment, install libraries, load your data, and launch the Dash app locally.
 
 ## Content Table
-
 - [Dashboard Pricing Dashboard](#dashboard-pricing-dashboard)
   - [Content Table](#content-table)
   - [1. What’s In This Repo](#1-whats-in-this-repo)

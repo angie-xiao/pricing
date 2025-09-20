@@ -1,42 +1,43 @@
-# Dashboard Pricing Dashboard
+# Optima - Pricing Dashboard
 
 > A zero-to-run guide for first-time users: install Python, set up a virtual environment, install libraries, load your data, and launch the Dash app locally.
 
 ## Content Table
-- [Dashboard Pricing Dashboard](#dashboard-pricing-dashboard)
+- [Optima - Pricing Dashboard](#optima---pricing-dashboard)
   - [Content Table](#content-table)
   - [1. What’s In This Repo](#1-whats-in-this-repo)
     - [1.1 Core modules the app imports](#11-core-modules-the-app-imports)
     - [1.2 Key libraries used](#12-key-libraries-used)
-  - [2. Installation Guide](#2-installation-guide)
-    - [2.1: Install Python](#21-install-python)
-    - [2.2: Clone from GitHub from terminal](#22-clone-from-github-from-terminal)
-    - [2.3: Set up virtual environment \& install necessary libraries](#23-set-up-virtual-environment--install-necessary-libraries)
-  - [3. Data Requirements](#3-data-requirements)
-    - [3.1 External Data Requirements](#31-external-data-requirements)
-      - [3.1.2 Pricing dataset:](#312-pricing-dataset)
-      - [3.1.2 Product categorization:](#312-product-categorization)
-    - [3.2 Internal (Amazon) workflow:](#32-internal-amazon-workflow)
-      - [3.2.1 Repo Structure Review](#321-repo-structure-review)
-      - [3.2.2 Acquire Data](#322-acquire-data)
-  - [4. Setup \& Run locally](#4-setup--run-locally)
-  - [5. `pricing.sql` documentation (Amazon Internal)](#5-pricingsql-documentation-amazon-internal)
-    - [5.1 Script functoin summary](#51-script-functoin-summary)
-    - [5.2 SQL Script Documentation](#52-sql-script-documentation)
-      - [5.2.1. Base Promotion Information](#521-base-promotion-information)
-      - [5.2.2 Deal Categorization Logic](#522-deal-categorization-logic)
-      - [5.2.3 Promotion Processing](#523-promotion-processing)
-      - [5.2.4 Final Output Assembly](#524-final-output-assembly)
-  - [6. Technical Documentation](#6-technical-documentation)
-    - [6.1 Data Engineering Pipeline](#61-data-engineering-pipeline)
-      - [6.1.1 ETL](#611-etl)
-      - [6.1.2 Weighting \& Robustness](#612-weighting--robustness)
-    - [6.2 Train/Test Split](#62-traintest-split)
-    - [6.3 Modeling](#63-modeling)
-    - [6.4. Tuning](#64-tuning)
-    - [6.5 Validation (RMSE -\> business friendly)](#65-validation-rmse---business-friendly)
-    - [6.6 Quick Class/Function Roles \& Pointers](#66-quick-classfunction-roles--pointers)
+  - [2. Data Requirements](#2-data-requirements)
+    - [2.1 External Data Requirements](#21-external-data-requirements)
+      - [2.1.1 Pricing dataset:](#211-pricing-dataset)
+      - [2.1.1 Product categorization:](#211-product-categorization)
+    - [2.2 Internal (Amazon) workflow:](#22-internal-amazon-workflow)
+      - [2.2.1 Repo Structure Review](#221-repo-structure-review)
+      - [2.2.2 Acquire Data](#222-acquire-data)
+  - [3. Installation Guide](#3-installation-guide)
+    - [3.1 Install Python](#31-install-python)
+    - [3.2 Clone from GitHub from terminal](#32-clone-from-github-from-terminal)
+    - [3.3 Set up virtual environment \& install necessary libraries](#33-set-up-virtual-environment--install-necessary-libraries)
+    - [3.4 Setup \& Run locally](#34-setup--run-locally)
+  - [4. `pricing.sql` documentation (Amazon Internal)](#4-pricingsql-documentation-amazon-internal)
+    - [4.1 Script functoin summary](#41-script-functoin-summary)
+    - [4.2 SQL Script Documentation](#42-sql-script-documentation)
+      - [4.2.1. Base Promotion Information](#421-base-promotion-information)
+      - [4.2.2 Deal Categorization Logic](#422-deal-categorization-logic)
+      - [4.2.3 Promotion Processing](#423-promotion-processing)
+      - [4.2.4 Final Output Assembly](#424-final-output-assembly)
+  - [5. Technical Documentation](#5-technical-documentation)
+    - [5.1 Data Engineering Pipeline](#51-data-engineering-pipeline)
+      - [5.1.1 ETL](#511-etl)
+      - [5.1.2 Weighting \& Robustness](#512-weighting--robustness)
+    - [5.2 Train/Test Split](#52-traintest-split)
+    - [5.3 Modeling](#53-modeling)
+    - [5.4. Tuning](#54-tuning)
+    - [5.5 Validation (RMSE -\> business friendly)](#55-validation-rmse---business-friendly)
+    - [5.6 Quick references for Classes \& Functions](#56-quick-references-for-classes--functions)
 
+---
 
 ## 1. What’s In This Repo
 
@@ -59,10 +60,57 @@ home.py
 - `plotly`, `pygam`
 
 
-## 2. Installation Guide
+## 2. Data Requirements
+
+This app supports users providing their own data to generate insights.
+- For external users, see 2.1 to format your data.
+- For Amazon internal users, see 2.2.
+
+### 2.1 External Data Requirements
+Table must include following columns (including one row of dummy data)
+
+#### 2.1.1 Pricing dataset: 
+
+  order_date  | asin        | item_name          | shipped_units | revenue_share_amt | asp    | event_name
+  ------------|-------------|--------------------|--------------|--------------------|--------|------------
+  2025-07-01   | B00ABCD | Best Dog Food   | 100         | 1299.99           | 12.99  | PD
+
+#### 2.1.1 Product categorization:
+
+  asin        | tag        | variation
+  ------------|------------|------------
+  B00ABCD | Adult Dog  | 16lb
 
 
-### 2.1: Install Python
+### 2.2 Internal (Amazon) workflow:
+
+#### 2.2.1 Repo Structure Review
+
+``` bash
+pricing/
+├── dash/                       # Dash app code
+├── data/                       # << data storage folder
+├── pricing.sql                 # << main data extraction script
+```
+#### 2.2.2 Acquire Data 
+
+Run `pricing.sql` in [workbench](https://datacentral.a2z.com/workbench). 
+
+Adjust filters (e.g. for marketplace, time window etc.) as needed.
+
+```
+pricing/
+├── dash/
+├── data/
+│   ├── pricing.csv
+│   ├── product_categorization.csv
+```
+ 
+ For the full description, see Section 4, [`pricing.sql` documentation (Amazon Internal)](#5-pricingsql-documentation-amazon-internal).
+
+## 3. Installation Guide
+
+### 3.1 Install Python
 
 Install **Python 3.11** (recommended):
 - **Windows**: install from [python.org](https://www.python.org)
@@ -70,13 +118,13 @@ Install **Python 3.11** (recommended):
 - **macOS**: `brew install python@3.11` or download from [python.org](https://www.python.org)
 
 
-### 2.2: Clone from GitHub from terminal
+### 3.2 Clone from GitHub from terminal
 
 ```bash
 git clone https://github.com/angie-xiao/pricing.git
 ```
 
-### 2.3: Set up virtual environment & install necessary libraries
+### 3.3 Set up virtual environment & install necessary libraries
 
 Windows
 ```bash
@@ -114,56 +162,7 @@ python -m pip install \
 ```
 
 
-
-## 3. Data Requirements
-
-This app supports users to provide their own data to generate insights. 
-- For external users, please refer to `Section 3.1` to make sure that your data meets the right format
-- For Amazon interal users, please refer to `Section 3.2`
-
-### 3.1 External Data Requirements
-Table must include following columns (including one row of dummy data)
-
-#### 3.1.2 Pricing dataset: 
-
-  order_date  | asin        | item_name          | shipped_units | revenue_share_amt | asp    | event_name
-  ------------|-------------|--------------------|--------------|--------------------|--------|------------
-  2025-07-01   | B00ABCD | Best Dog Food   | 100         | 1299.99           | 12.99  | PD
-
-#### 3.1.2 Product categorization:
-
-  asin        | tag        | variation
-  ------------|------------|------------
-  B00ABCD | Adult Dog  | 16lb
-
-
-### 3.2 Internal (Amazon) workflow:
-
-#### 3.2.1 Repo Structure Review
-
-``` bash
-pricing/
-├── dash/                       # Dash app code
-├── data/                       # << data storage folder
-├── pricing.sql                 # << main data extraction script
-```
-#### 3.2.2 Acquire Data 
-
-Run `pricing.sql` in [workbench](https://datacentral.a2z.com/workbench). 
-
-Adjust filters (e.g. for marketplace, time window etc.) as needed.
-
-```
-pricing/
-├── dash/
-├── data/
-│   ├── pricing.csv
-│   ├── product_categorization.csv
-```
- 
- For the full description, see Section 5, [`pricing.sql` documentation (Amazon Internal)](#5-pricingsql-documentation-amazon-internal).
-
-## 4. Setup & Run locally
+### 3.4 Setup & Run locally
 
 Remember to **ALWAYS** first activate your virtual environment before calling the main `app.py` script.
 
@@ -188,9 +187,9 @@ python app.py
 That's it! You can now access the visual results of this Dash app at http://127.0.0.1:8050 on your browser. 🎉
 
 
-## 5. `pricing.sql` documentation (Amazon Internal)
+## 4. `pricing.sql` documentation (Amazon Internal)
 
-### 5.1 Script functoin summary
+### 4.1 Script functoin summary
 
   The script enables analysis of:
   - Deal performance by event type
@@ -199,11 +198,11 @@ That's it! You can now access the visual results of this Dash app at http://127.
   - Revenue impact
   - Promotional strategy effectiveness
 
-### 5.2 SQL Script Documentation
+### 4.2 SQL Script Documentation
 
 The `pricing.sql` script analyzes promotional deal performance through the following steps:
 
-#### 5.2.1. Base Promotion Information
+#### 4.2.1. Base Promotion Information
    - Captures promotions based on user definition, e.g. -
      - region_id = 1
      - marketplace = 7
@@ -213,7 +212,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
    - Types: Best Deal, Deal of the Day, Lightning Deal, Event Deal
    - Excludes OIH promotions
 
-#### 5.2.2 Deal Categorization Logic
+#### 4.2.2 Deal Categorization Logic
 
   The script implements a sophisticated deal categorization system:
 
@@ -247,7 +246,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
         - Regular promotions
 
 
-#### 5.2.3 Promotion Processing
+#### 4.2.3 Promotion Processing
 1. **Base Promotion Extraction**
    - Captures approved/scheduled promotions
    - Types: Best Deal, Deal of the Day, Lightning Deal, Event Deal
@@ -263,7 +262,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
    - Requires minimum 3 promotions for pattern recognition
    - Consolidates promotion dates for consistency
 
-#### 5.2.4 Final Output Assembly
+#### 4.2.4 Final Output Assembly
 - Transaction Classification Logic:
   * **Critical Price Validation**: Orders are classified as BAU (Business As Usual) if:
     - Customer paid non-deal price during events (e.g., non-Prime members during Prime Day)
@@ -290,13 +289,13 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
   - Event type (BAU vs HVE)
 
     
-## 6. Technical Documentation
+## 5. Technical Documentation
 
 This section explains, in order, how raw rows become the curves and KPIs you see in the Dash app. The flow is:
 
 (1) Data wrangling → (2) Train/Test split → (3) Modeling → (4) Tuning → (5) Validation & RMSE → (6) Visualization through Dash
 
-### 6.1 Data Engineering Pipeline
+### 5.1 Data Engineering Pipeline
 
 - **Goal:**
   - turn raw transactions & product tags into a tidy, model-ready table.
@@ -305,7 +304,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - `data/pricing.csv`: asin, order_date, price, shipped_units, event_name, …
   - `data/product_categorization.csv`: asin → product label/tags
 
-#### 6.1.1 ETL
+#### 5.1.1 ETL
 - **Process:**
   1. **Normalize & merge:**
      - Clean column names, merge `pricing.csv` with product `tags` on `asin`;
@@ -335,7 +334,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
     - `product, asin, order_date, price, shipped_units, event_encoded, product_encoded, days_sold, (optional) deal_discount_percent`
 
 
-#### 6.1.2 Weighting & Robustness
+#### 5.1.2 Weighting & Robustness
 
   Each observation’s weight blends three signals, then normalizes:
 
@@ -371,7 +370,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
      - This step keeps odd spikes from steering the curve while preserving valid signal.
   
 
-### 6.2 Train/Test Split
+### 5.2 Train/Test Split
 - **Goal:** 
   - Evaluate the model on **unseen** data for each product.
 
@@ -385,7 +384,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - `split` column on the per-row frame marks `train` vs `test`.
 
 
-### 6.3 Modeling
+### 5.3 Modeling
 
 - **Goal:** 
   - Estimate the units-vs-price curve per product (with event effects).
@@ -407,7 +406,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - **Bootstrap** with early stop (targeting a relative SE) to stablize bands.
 
  
-### 6.4. Tuning
+### 5.4. Tuning
 
 - **Weight Tuner**:
   - Instead of a massive grid, a fast **random sampling + successive-halving** tuner searches over:
@@ -420,7 +419,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - Coarse search over `n_splines(price)` * `λ` (regularization) -> fine search near the best `λ`
   
 
-### 6.5 Validation (RMSE -> business friendly)
+### 5.5 Validation (RMSE -> business friendly)
 - Raw metric 
   
     $$RMSE_{units} = \sqrt{\frac{1}{N_{test}} * ∑(y_{actual} - y_{pred})^2} $$
@@ -435,7 +434,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - Dollar view (optional)
     - * Multiply unit RMSE by a representative  ASP to estimate "~$ impact / day" - clearly labeled as approximate
 
-### 6.6 Quick Class/Function Roles & Pointers
+### 5.6 Quick references for Classes & Functions 
 
 * **Data engineering (ETL + weights)**
   * `DataEngineer.prepare()`

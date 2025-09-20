@@ -7,8 +7,8 @@
 - [Dashboard Pricing Dashboard](#dashboard-pricing-dashboard)
   - [Content Table](#content-table)
   - [1. What’s In This Repo](#1-whats-in-this-repo)
-    - [1.1 Core modules the app imports:](#11-core-modules-the-app-imports)
-    - [1.2 Key libraries used:](#12-key-libraries-used)
+    - [1.1 Core modules the app imports](#11-core-modules-the-app-imports)
+    - [1.2 Key libraries used](#12-key-libraries-used)
   - [2. Installation Guide](#2-installation-guide)
     - [2.1: Install Python](#21-install-python)
     - [2.2: Clone from GitHub from terminal](#22-clone-from-github-from-terminal)
@@ -26,13 +26,22 @@
     - [5.2 SQL Script Documentation](#52-sql-script-documentation)
       - [5.2.1. Base Promotion Information](#521-base-promotion-information)
       - [5.2.2 Deal Categorization Logic](#522-deal-categorization-logic)
-      - [5.2.3. Pre-Deal Baseline Price Calculation (T4W ASP)](#523-pre-deal-baseline-price-calculation-t4w-asp)
-      - [5.2.4. Final Output](#524-final-output)
+      - [5.2.3 Promotion Processing](#523-promotion-processing)
+      - [5.2.4 Final Output Assembly](#524-final-output-assembly)
+  - [6. Technical Documentation](#6-technical-documentation)
+    - [6.1 Data Engineering Pipeline](#61-data-engineering-pipeline)
+      - [6.1.1 ETL](#611-etl)
+      - [6.1.2 Weighting \& Robustness](#612-weighting--robustness)
+    - [6.2 Train/Test Split](#62-traintest-split)
+    - [6.3 Modeling](#63-modeling)
+    - [6.4. Tuning](#64-tuning)
+    - [6.5 Validation (RMSE -\> business friendly)](#65-validation-rmse---business-friendly)
+    - [6.6 Quick Class/Function Roles \& Pointers](#66-quick-classfunction-roles--pointers)
 
 
 ## 1. What’s In This Repo
 
-### 1.1 Core modules the app imports:
+### 1.1 Core modules the app imports
 
 ```
 app.py
@@ -44,7 +53,7 @@ navbar.py
 home.py
 ```
 
-### 1.2 Key libraries used:
+### 1.2 Key libraries used
 
 - `dash`, `dash_bootstrap_components`, `dash_bootstrap_templates`
 - `pandas`, `numpy`, `scipy`, `scikit-learn`
@@ -153,6 +162,7 @@ pricing/
 │   ├── product_categorization.csv
 ```
  
+ For the full description, see Section 5, [`pricing.sql` documentation (Amazon Internal)](#5-pricingsql-documentation-amazon-internal).
 
 ## 4. Setup & Run locally
 
@@ -264,7 +274,8 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
   * This ensures accurate event attribution based on actual customer purchase behavior
 
 - Key Metrics Output:
-  * ASIN and item details
+  * ASIN and
+  * Item name
   * Order date
   * GL product group
   * Company information
@@ -282,62 +293,170 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
     
 ## 6. Technical Documentation
 
-### 6.1 Price Elasticity Modeling
+This section explains, in order, how raw rows become the curves and KPIs you see in the Dash app. The flow is:
 
-The dashboard uses a Generalized Additive Model (GAM) with sophisticated weighting mechanisms to accurately model price elasticity.
+(1) Data wrangling → (2) Train/Test split → (3) Modeling → (4) Tuning → (5) Validation & RMSE → (6) Visualization through Dash
 
-#### 6.1.1 Weighting Mechanism
+### 6.1 Data Engineering Pipeline
 
-The model employs two key weighting factors:
+- **Goal:**
+  - turn raw transactions & product tags into a tidy, model-ready table.
 
-1. **Time Decay Weights**
-   - More recent data points receive higher weights
-   - Implemented using exponential decay: `w = exp(decay_rate * days_apart)`
-   - `days_apart`: Days between order date and current date
-   - `decay_rate`: Controls decay speed (default = -0.01)
-   - Ensures model emphasizes recent market conditions
+- **Inputs:**
+  - `data/pricing.csv`: asin, order_date, price, shipped_units, event_name, …
+  - `data/product_categorization.csv`: asin → product label/tags
 
-2. **Price Outlier Weights**
-   - Prices far from median receive additional weight
-   - Calculated using relative distance from median price
-   - Controlled by two parameters:
-     - `tail_strength` (default = 1.0): Controls intensity of outlier weights
-       - 0.0: No extra weight for outliers
-       - 1.0: Strong emphasis on outliers
-     - `tail_p` (default = 0.5): Controls weight distribution shape
-       - 1.0: Linear increase with distance
-       - < 1.0: Convex curve (more weight to all non-median prices)
-       - > 1.0: Concave curve (more weight to extreme outliers)
+#### 6.1.1 ETL
+- **Process:**
+  1. **Normalize & merge:**
+     - Clean column names, merge `pricing.csv` with product `tags` on `asin`;
+     - Create unified  `product` label used for grouping.
 
-#### 6.1.2 Benefits of This Approach
+  2. **Type safety + non-negativity:**
+     - Coerce `order_date` to datetime; 
+     - Coerce `price`/`shipped_units` to numeric and clip at 0.
 
-1. **Temporal Relevance**
-   - Recent price points better reflect current market conditions
-   - Gradual decay prevents sharp cutoffs in historical data
+  3. **Price-day coverage:**
+     - Compute `days_sold` per (`asin`, `price`);
+     - Merge back so each row knows how long that ASP was live.
 
-2. **Price Range Coverage**
-   - Enhanced weight for rare price points
-   - Better captures full price-response curve
-   - Prevents model from over-fitting to common price points
+  4. **Dailyization for diagnostics:**
+     - Build a daily aggregate (by `asin`, `event_name`, `order_date`) to compute an `ASP` and daily metrics;
+     - Then join back to enrich the row grain.
 
-3. **Balanced Learning**
-   - Combines recency and price coverage
-   - Helps prevent both temporal bias and price-point bias
+  5. **Top-N focus:**
+    - Rank products by total `revenue` and keep only the top-N bestselling products. 
+      - Parameter `top_n`: configurable (default 10) - for modeling focus and speed.
 
-#### 6.1.3 Implementation
+  6. **Categorical variables encoding:**
+     - Label-encode `event_name` → `event_encoded` 
+     - ... and `product` → `product_encoded` for model inputs.
 
-```python
-def _make_weights(self, sub: pd.DataFrame, tail_strength: float = 1.0, tail_p: float = 0.5):
-    # Time decay weights
-    decayed_df = self._time_decay(sub)
-    w = decayed_df['time_decay_weight'].values
+  7. **Output: a tidy frame with:**
+    - `product, asin, order_date, price, shipped_units, event_encoded, product_encoded, days_sold, (optional) deal_discount_percent`
+
+
+#### 6.1.2 Weighting & Robustness
+
+  Each observation’s weight blends three signals, then normalizes:
+
+  1.  **Recency (time-decay)**
+
+      - Newer rows count more:
+      $$𝑤_{time} = exp*({decay\: rate} * days\: apart)$$
+
+      - `decay_rate` is tuned 
+        - typical range ≈ –0.05…–0.001
     
-    # Price outlier adjustments
-    if tail_strength > 0:
-        asp = sub["price"].values.astype(float)
-        q25, q75 = np.percentile(asp, [25, 75])
-        iqr = q75 - q25 if q75 > q25 else 1.0
-        rel_dist = np.abs(asp - np.median(asp)) / iqr
-        w *= 1.0 + tail_strength * np.minimum(rel_dist, 2.0) ** tail_p
-    
-    return w / np.mean(w) if w.size > 0 else w
+  2. **Rarity (density-aware, bounded)**
+ 
+       - Rare ASPs get a small boost to better cover the price range:
+       $$𝑤_{rarity} ∝ (1/density)^{𝛽}$$
+
+       - Uses a smoothed histogram of prices to compute a rarity multiplier
+         -  capped (e.g., ≤ 1.25).
+       - Only the tails (outside, say, 10th–90th percentiles) get this bonus to avoid double-counting the core.
+
+  3.  **Local leverage cap**
+
+        - A rolling window cap keeps any single point from dominating:
+
+      $$𝑤_{i} ≤ l_{cap} * local\: mean (𝑤) \: sorted \: by \: price $$
+
+
+  4. **(Optional) Tail boost**
+        - Distance from median price; disabled by default to avoid double-counting rarity.
+
+  5. **Robust residual reweighting (OOF Huber)**
+     - After a quick out-of-fold fit, high-residual rows are softly down-weighted (Huber).
+     - This step keeps odd spikes from steering the curve while preserving valid signal.
+  
+
+### 6.2 Train/Test Split
+- **Goal:** 
+  - Evaluate the model on **unseen** data for each product.
+
+- **How we split:**
+  - **Primary:** time-based split using a quantile cut of `order_date` (e.g., last ~20% for **test**)
+  - **Fallback:** deterministic random split when dates are too sparse
+  - Ensures both train & test have enough rows (guarded minimums)
+
+- **What gets returned**
+  - `X_train`, `y_train`, `w_train` for fit; `X_all` for prediction over the full price grid.
+  - `split` column on the per-row frame marks `train` vs `test`.
+
+
+### 6.3 Modeling
+
+- **Goal:** 
+  - Estimate the units-vs-price curve per product (with event effects).
+
+- **Model:** 
+  - **Expectile GAM** per product (e.g., at q=0.025, 0.5, & 0.975)
+    - `s(price)` (adaptive spline, #splines tuned)
+    - `s(deal_discount_percent)` (moderate spline)
+    - `f(event_encoded)` (categorical factor)
+  - Why expectiles? 
+    - It lets us fit a median curve and upper/lower bands without assuming Gaussian noise. 
+  - Fitted with the engineered `sample_weight` from 6.1.3.
+- **Stability guardrails:**
+  - **Edge tapers**: gently shrink predictions beyond the train-price anchors
+(weighted quantiles, e.g., 10%/90%), with configurable stretches.
+  - **Non-crossing bands**: enforce $q_{low} ≤ q_{med} ≤ q_{high}$
+
+- **Optional ensemble**
+  - **Bootstrap** with early stop (targeting a relative SE) to stablize bands.
+
+ 
+### 6.4. Tuning
+
+- **Weight Tuner**:
+  - Instead of a massive grid, a fast **random sampling + successive-halving** tuner searches over:
+    - `decay_rate, rarity_beta, rarity_cap, tail_q, lcap `
+    - (plus `tail_strength` &`tail_p` if tail boost is enabled).
+  - Cheap proxy scoring (constant/linear fits + dispersion penalties) → finalists → full-data check.
+  - The best set is cached and re-used automatically by `_make_weights()`.
+
+- **GAM Tuner (inside `GAMTuner`)**
+  - Coarse search over `n_splines(price)` * `λ` (regularization) -> fine search near the best `λ`
+  
+
+### 6.5 Validation (RMSE -> business friendly)
+- Raw metric 
+  
+    $$RMSE_{units} = \sqrt{\frac{1}{N_{test}} * ∑(y_{actual} - y_{pred})^2} $$
+
+- How we present it
+  - Per product (in cards/tooltips):
+    - “Typical error ≈ X units/day (held-out).”
+     - Optional % error proxy: $RMSE / max(1, median\: daily\: units)$
+  - Portfolio (Top-N)
+    - Report the **median** per-product RMSE (robust to outliers)
+    - Optionaly an **inventory-weighted** roll-up
+  - Dollar view (optional)
+    - * Multiply unit RMSE by a representative  ASP to estimate "~$ impact / day" - clearly labeled as approximate
+
+### 6.6 Quick Class/Function Roles & Pointers
+
+* **Data engineering (ETL + weights)**
+  * `DataEngineer.prepare()`
+  * `_make_weights() `
+  * ... and helpers
+
+* **Split**
+  * `_make_design_matrix() ` - adds split, returns train/test matrices
+
+* **Modeling**
+  * `GAMTuner.fit()`
+  * `GAMModeler._fit_expectiles()`
+
+* **Guardrails**
+  * `GAMModeler._apply_edge_tapers()` + non-crossing
+
+* **Tuning**
+  * `DataEngineer._grid_search_weights(); `
+  * GAMTuner for GAM smoothness
+
+* **Validation**
+  * test-set RMSE computed on rows with split == "test"; 
+  * displayed in cards/roll-ups

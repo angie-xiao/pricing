@@ -78,20 +78,34 @@ class Cache:
 
     @staticmethod
     def code_sig() -> str:
-        try:
-            import built_in_logic  # lazy import
+        """
+        Hash of: our version tag + source of _make_weights + file mtimes.
+        Any change to weighting logic or this file will bust the cache.
+        """
+        import hashlib, inspect, os, built_in_logic
 
-            try:
-                src = inspect.getsource(built_in_logic)
-                return hashlib.sha1(src.encode()).hexdigest()
-            except Exception:
-                try:
-                    p = Path(built_in_logic.__file__)
-                    return hashlib.sha1(p.read_bytes()).hexdigest()
-                except Exception:
-                    return "nocode"
+        h = hashlib.sha256()
+        # 1) explicit version tag
+        ver = getattr(built_in_logic, "WEIGHT_LOGIC_VERSION", "unknown").encode()
+        h.update(ver)
+
+        # 2) function source (most direct way to detect logic changes)
+        try:
+            src = inspect.getsource(built_in_logic._make_weights).encode()
+            h.update(src)
         except Exception:
-            return "nocode"
+            h.update(b"no-source")
+
+        # 3) file mtime as a fallback
+        try:
+            fp = inspect.getfile(built_in_logic)
+            mtime = str(os.path.getmtime(fp)).encode()
+            h.update(mtime)
+        except Exception:
+            pass
+
+        return h.hexdigest()[:12]
+
 
     @staticmethod
     def build_frames_with_cache(

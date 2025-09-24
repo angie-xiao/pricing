@@ -34,7 +34,7 @@
     - [5.2 Train/Test Split](#52-traintest-split)
     - [5.3 Modeling](#53-modeling)
     - [5.4. Tuning](#54-tuning)
-    - [5.5 Validation (RMSE -\> business friendly)](#55-validation-rmse---business-friendly)
+    - [5.5 Validation (RMSE made business friendly)](#55-validation-rmse-made-business-friendly)
     - [5.6 Quick references for Classes \& Functions](#56-quick-references-for-classes--functions)
 
 ---
@@ -191,12 +191,13 @@ That's it! You can now access the visual results of this Dash app at http://127.
 
 ### 4.1 Script functoin summary
 
-  The script enables analysis of:
+  Aside from supporting built-in logic (i.e., data engineering, modeling, tuning, visualizing etc.) of this project, data extracted by this script could also enable analysis of:
   - Deal performance by event type
   - Discount depth impact
-  - Sales lift during promotions
   - Revenue impact
   - Promotional strategy effectiveness
+
+For expected output table format, please refer to Section [4.2.4 Final Output Assembly](#424-final-output-assembly)
 
 ### 4.2 SQL Script Documentation
 
@@ -208,7 +209,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
      - marketplace = 7
      - GL = 199
      - time window = last 2 years
-   - Includes only Approved/Scheduled deals
+   - Includes only "Approved" / "Scheduled" deals
    - Types: Best Deal, Deal of the Day, Lightning Deal, Event Deal
    - Excludes OIH promotions
 
@@ -272,7 +273,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
   * This ensures accurate event attribution based on actual customer purchase behavior
 
 - Key Metrics Output:
-  * ASIN and
+  * ASIN
   * Item name
   * Order date
   * GL product group
@@ -293,7 +294,7 @@ The `pricing.sql` script analyzes promotional deal performance through the follo
 
 This section explains, in order, how raw rows become the curves and KPIs you see in the Dash app. The flow is:
 
-(1) Data wrangling → (2) Train/Test split → (3) Modeling → (4) Tuning → (5) Validation & RMSE → (6) Visualization through Dash
+> (1) Data wrangling → (2) Train/Test split → (3) Modeling → (4) Tuning → (5) Validation & RMSE → (6) Visualization through Dash
 
 ### 5.1 Data Engineering Pipeline
 
@@ -318,17 +319,22 @@ This section explains, in order, how raw rows become the curves and KPIs you see
      - Compute `days_sold` per (`asin`, `price`);
      - Merge back so each row knows how long that ASP was live.
 
-  4. **Dailyization for diagnostics:**
+  4. **Aggregate on daily granularity:**
      - Build a daily aggregate (by `asin`, `event_name`, `order_date`) to compute an `ASP` and daily metrics;
      - Then join back to enrich the row grain.
+     - The benefit of doing this is edge casing scenarios where actual purchase price doesn't match promotional price (see Section [4.2.4 Final Output Assembly](#424-final-output-assembly) for more details).
 
+  
   5. **Top-N focus:**
-    - Rank products by total `revenue` and keep only the top-N bestselling products. 
+     - Rank products by total `revenue` and keep only the top-N bestselling products. 
       - Parameter `top_n`: configurable (default 10) - for modeling focus and speed.
 
   6. **Categorical variables encoding:**
-     - Label-encode `event_name` → `event_encoded` 
-     - ... and `product` → `product_encoded` for model inputs.
+     - Label-encode categorical variables for model inputs
+       - Target columns
+         - `event_name` → `event_encoded` and
+         - `product` → `product_encoded` 
+      - e.g., BAU = 0, PD = 1, PBDD = 2, ... etc.
 
   7. **Output: a tidy frame with:**
     - `product, asin, order_date, price, shipped_units, event_encoded, product_encoded, days_sold, (optional) deal_discount_percent`
@@ -341,14 +347,15 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   1.  **Recency (time-decay)**
 
       - Newer rows count more:
-      $$𝑤_{time} = exp*({decay\: rate} * days\: apart)$$
+      $$𝑤_{time} = exp*({decay\:rate} * days\:apart)$$
 
       - `decay_rate` is tuned 
-        - typical range ≈ –0.05…–0.001
+      - typical range ≈ –0.05…–0.001
     
   2. **Rarity (density-aware, bounded)**
  
-       - Rare ASPs get a small boost to better cover the price range:
+       - Rare ASPs get a small boost to better cover the price range: 
+  
        $$𝑤_{rarity} ∝ (1/density)^{𝛽}$$
 
        - Uses a smoothed histogram of prices to compute a rarity multiplier
@@ -363,7 +370,8 @@ This section explains, in order, how raw rows become the curves and KPIs you see
 
 
   4. **(Optional) Tail boost**
-        - Distance from median price; disabled by default to avoid double-counting rarity.
+        - Distance from median price; 
+        - Disabled by default to avoid double-counting rarity.
 
   5. **Robust residual reweighting (OOF Huber)**
      - After a quick out-of-fold fit, high-residual rows are softly down-weighted (Huber).
@@ -419,7 +427,7 @@ This section explains, in order, how raw rows become the curves and KPIs you see
   - Coarse search over `n_splines(price)` * `λ` (regularization) -> fine search near the best `λ`
   
 
-### 5.5 Validation (RMSE -> business friendly)
+### 5.5 Validation (RMSE made business friendly)
 - Raw metric 
   
     $$RMSE_{units} = \sqrt{\frac{1}{N_{test}} * ∑(y_{actual} - y_{pred})^2} $$

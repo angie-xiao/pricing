@@ -1,4 +1,5 @@
 # app.py
+import os
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+FORCE_REBUILD = os.getenv("OPTIMA_FORCE_REBUILD", "0") in ("1", "true", "True")
 
 # ---------- Load data (cached) ----------
 BASE_DIR = Paths.BASE_DIR

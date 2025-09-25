@@ -1,5 +1,3 @@
-# grid for taper coeffs?
-
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 import os, random
@@ -643,6 +641,260 @@ class DataEngineer:
         return res
 
 
+class ParamSearchCV:
+    """
+    Cross-validation based parameter search for price curve modeling.
+    Uses price-based stratification and golden-section search for efficient tuning.
+    """
+
+    def __init__(
+        self,
+        n_splits: int = 4,
+        n_splines_grid: tuple = (18, 20),
+        # Remove anchor_w_grid since we're not using it
+        loglam_range: tuple = (np.log(120.0), np.log(900.0)),
+        lam_iters: int = 4,
+        expectile: float = 0.5,
+        random_state: int = 42
+    ):
+        self.n_splits = n_splits
+        self.n_splines_grid = n_splines_grid
+        # Remove anchor_w_grid
+        self.loglam_range = loglam_range
+        self.lam_iters = lam_iters
+        self.expectile = expectile
+        self.random_state = random_state
+        
+        
+    def _fit_price_curve_with_anchors(
+        self,
+        X: np.ndarray,               # shape (n, 1) price in col 0
+        y: np.ndarray,               # target (e.g., daily revenue or units)
+        w: Optional[np.ndarray] = None,     # sample weights (already clipped/normalized)
+        *,
+        expectile: float = 0.5,
+        n_splines: int = 16,
+        lam: float = 500.0,
+        max_iter: int = 6000,
+        tol: float = 2e-4,
+    ):
+        """
+        fits GAM with specific params
+        - take params (n_splines, lambda, etc.)
+        - adds anchor points to suppress boundary spikes
+        - fits a single GAM model with those exact specifications
+
+        
+        Returns 
+            a fitted ExpectileGAM.
+        """
+        if ExpectileGAM is None:
+            raise RuntimeError("pygam is required for fit_price_curve_with_anchors")
+
+        X = np.asarray(X, float)
+        y = np.asarray(y, float)
+        p = X[:, 0]
+
+        # local medians on edges
+        try:
+            q10, q90 = np.quantile(p, [0.10, 0.90])
+        except Exception:
+            q10, q90 = (np.min(p), np.max(p))
+        y_lo = float(np.median(y[p <= q10])) if np.any(p <= q10) else float(np.median(y))
+        y_hi = float(np.median(y[p >= q90])) if np.any(p >= q90) else float(np.median(y))
+
+        # anchors just outside the observed range
+        span = (p.max() - p.min()) or 1.0
+        eps = 1e-3 * span
+        X_anchor = np.array([[p.min() - eps], [p.max() + eps]], dtype=float)
+        y_anchor = np.array([y_lo, y_hi], dtype=float)
+
+        if w is None:
+            w_anchor = np.array([0.05, 0.05], dtype=float)
+            w_aug = None
+        else:
+            w = np.asarray(w, float)
+            w_anchor = np.full(2, 0.05 * float(np.mean(w)), dtype=float)
+            w_aug = np.concatenate([w, w_anchor])
+
+        X_aug = np.vstack([X, X_anchor])
+        y_aug = np.concatenate([y, y_anchor])
+
+        terms = s(0, n_splines=int(n_splines), spline_order=3)
+        gam = ExpectileGAM(terms, lam=float(lam), expectile=float(expectile),
+                        max_iter=int(max_iter), tol=float(tol))
+        gam.fit(X_aug, y_aug, weights=w_aug)
+        
+        return gam
+
+
+    def _price_bins_for_cv(self, prices: np.ndarray, n_bins: int = 5) -> np.ndarray:
+        """
+        Create stratified bins based on price quantiles for balanced CV splits.
+        
+        Args:
+            prices: Array of prices
+            n_bins: Number of bins to create
+            
+        Returns:
+            Array of bin labels (0 to n_bins-1) for each price
+        """
+        qs = np.quantile(prices, np.linspace(0, 1, n_bins + 1))
+        # Make edges strictly monotone to handle ties
+        for i in range(1, len(qs)):
+            if qs[i] <= qs[i-1]:
+                qs[i] = qs[i-1] + 1e-9
+        return np.clip(np.searchsorted(qs, prices, side="right") - 1, 0, n_bins - 1)
+
+
+    def _cv_score_anchored(self, X, y, w, *, cfg) -> float:
+        """
+        Score a parameter configuration using stratified K-fold CV.
+        
+        Args:
+            X: Features (price in first column)
+            y: Target values
+            w: Sample weights
+            cfg: Parameter configuration dictionary
+            
+        Returns:
+            Mean CV score (lower is better)
+        """
+        rng = np.random.default_rng(self.random_state)
+        X = np.asarray(X, float)
+        y = np.asarray(y, float)
+        p = X[:, 0]  # prices
+        w = None if w is None else np.asarray(w, float)
+
+        # Stratify by price bins
+        bins = self._price_bins_for_cv(p, n_bins=5)
+        idx = np.arange(len(p))
+        rng.shuffle(idx)
+
+        scores = []
+        kf = KFold(n_splits=self.n_splits, shuffle=True, random_state=self.random_state)
+
+        for train_idx, val_idx in kf.split(idx):
+            tr = idx[train_idx]
+            va = idx[val_idx]
+
+            # Fit on train fold
+            gam = self._fit_price_curve_with_anchors(
+                X[tr], y[tr],
+                None if w is None else w[tr],
+                expectile=cfg.get("expectile", self.expectile),
+                n_splines=int(cfg["n_splines"]),
+                lam=float(cfg["lam"]),
+                max_iter=int(cfg.get("max_iter", 6000)),
+                tol=float(cfg.get("tol", 2e-4))
+            )
+
+            # Score on validation fold
+            yhat = gam.predict(X[va]).astype(float)
+            resid2 = (y[va] - yhat) ** 2
+            
+            # Weighted or unweighted RMSE
+            if w is None:
+                rmse = float(np.sqrt(resid2.mean()))
+            else:
+                ww = w[va] / max(w[va].sum(), 1e-12)
+                rmse = float(np.sqrt((resid2 * ww).sum()))
+
+            # Add curvature penalty
+            order = np.argsort(X[va, 0])
+            yv = yhat[order]
+            if yv.size >= 5:
+                dd = np.abs(np.diff(yv, n=2))
+                denom = max(np.mean(np.abs(yv)), 1e-9)
+                curvature = float(np.mean(dd) / denom)
+            else:
+                curvature = 0.0
+
+            scores.append(rmse * (1.0 + 0.7 * curvature))
+
+        return float(np.mean(scores))
+
+
+    def _golden_search_loglam(self, X, y, w, *, base_cfg) -> tuple:
+        """
+        Use golden-section search to efficiently find best lambda value.
+        
+        Args:
+            X, y, w: Data and weights
+            base_cfg: Base configuration to optimize lambda for
+            
+        Returns:
+            (best_config, best_score) tuple
+        """
+        phi = (1 + 5 ** 0.5) / 2
+        invphi = 1 / phi
+        
+        a, b = float(self.loglam_range[0]), float(self.loglam_range[1])
+        
+        # Initialize interior points
+        c = b - (b - a) * invphi
+        d = a + (b - a) * invphi
+        
+        cfg_c = dict(base_cfg, lam=float(np.exp(c)))
+        sc_c = self._cv_score_anchored(X, y, w, cfg=cfg_c)
+        
+        cfg_d = dict(base_cfg, lam=float(np.exp(d)))
+        sc_d = self._cv_score_anchored(X, y, w, cfg=cfg_d)
+        
+        for _ in range(max(self.lam_iters - 1, 0)):
+            if sc_c <= sc_d:
+                b, d = d, c
+                sc_d = sc_c
+                c = b - (b - a) * invphi
+                cfg_c = dict(base_cfg, lam=float(np.exp(c)))
+                sc_c = self._cv_score_anchored(X, y, w, cfg=cfg_c)
+            else:
+                a, c = c, d
+                sc_c = sc_d
+                d = a + (b - a) * invphi
+                cfg_d = dict(base_cfg, lam=float(np.exp(d)))
+                sc_d = self._cv_score_anchored(X, y, w, cfg=cfg_d)
+                
+        if sc_c <= sc_d:
+            return cfg_c, sc_c
+        return cfg_d, sc_d
+
+
+    def fit(self, X, y, sample_weight=None, verbose=False) -> ExpectileGAM:
+        best_cfg, best_sc = None, np.inf
+        
+        for ns in self.n_splines_grid:
+            base_cfg = dict(
+                expectile=self.expectile,
+                n_splines=int(ns),
+                max_iter=6000,
+                tol=2e-4
+            )
+            
+            cfg, sc = self._golden_search_loglam(
+                X[:, [0]], y, sample_weight,
+                base_cfg=base_cfg
+            )
+            
+            # if verbose:
+            #     print(f"[search] ns={cfg['n_splines']} lam={cfg['lam']:.1f} score={sc:.3f}")
+            
+            if sc < best_sc:
+                best_sc, best_cfg = sc, cfg
+
+        # Final fit with best parameters
+        best_gam = self._fit_price_curve_with_anchors(
+            X[:, [0]], y, sample_weight,
+            expectile=best_cfg["expectile"],
+            n_splines=best_cfg["n_splines"],
+            lam=best_cfg["lam"],
+            max_iter=6000,
+            tol=2e-4
+        )
+        
+        return best_gam
+
+
 class GAMTuner:
     """
     Silent tuner for ExpectileGAM.
@@ -800,7 +1052,7 @@ class GAMModeler:
         bootstrap_frac: float = 0.8,
         random_state: int | None = 42,
         bootstrap_target_rel_se: float | None = 0.04,  # ~4% target; None to disable
-        # NEW
+        # log
         verbose: bool = False,
         log_every: int = 5,
     ):
@@ -829,9 +1081,16 @@ class GAMModeler:
         # propagate verbosity into helpers that print
         self.engineer = DataEngineer(None, None)
         self.engineer._verbose = self.verbose
-
+        
+        self.param_search = ParamSearchCV(
+            n_splits=4,
+            n_splines_grid=(18, 20),
+            loglam_range=(np.log(120.0), np.log(900.0)),
+            lam_iters=4,
+            random_state=random_state
+        )
+            
     # --------- helpers ---------
-
     def _bootstrap_loops_for_size(self, n_train: int) -> int:
         if self.n_bootstrap == 0:
             return 0
@@ -853,7 +1112,7 @@ class GAMModeler:
             "shipped_units",
         ]
 
-    # ---------- _make_design_matrix (refactored) ----------
+    # ---------- _make_design_matrix ----------
     def _make_design_matrix(self, sub: pd.DataFrame):
         """
         Orchestrates per-product design matrix construction.
@@ -892,7 +1151,6 @@ class GAMModeler:
         # Note: we intentionally return ONLY 5 items to match existing callers.
         return sub_clean, X_tr, y_tr, w_tr, X_all
 
-    # ---- helpers ----
     def _mdm_sort(self, sub: pd.DataFrame) -> pd.DataFrame:
         return sub.sort_values("price").reset_index(drop=True)
 
@@ -1112,8 +1370,7 @@ class GAMModeler:
         w_resid[real_mask] = np.clip(w_resid_real, clip_floor, 1.0)
         return w_resid * 1.0  # scale later
 
-    # ---------- _fit_expectiles (refactored) ----------
-
+    # ---------- _fit_expectiles ----------
     def _fit_expectiles(
         self,
         X_train,
@@ -1125,60 +1382,51 @@ class GAMModeler:
         split_mask=None,
         taper_grid=None,
     ) -> dict:
-        # 1) seed factor domain for stability
+        """
+        Orchestrates fitting of multiple expectiles with pre/post processing;
+        handles the overall workflow, data preparation, and post-processing.
+        """
+        # 1) Data preparation
         X_seed, y_seed, w_seed = self._fe_seed_domain(X_train, y_train, w_train, X_pred)
-
-        # 2) robust reweighting (single pass)
         is_eps = w_seed <= 2e-8
         w_robust = self._robust_reweight(
-            X_seed,
-            y_seed,
+            X_seed, y_seed,
             w_seed if w_seed is not None else np.ones(len(y_seed)),
             eps_rows_mask=is_eps,
-            expectile=0.5,
+            expectile=0.5
         )
 
-        # 3) fit per expectile (with optional bootstrap)
+        # 2) Core fitting - use _fe_fit_one_expectile for each q
         preds = {}
         for q in qs:
             preds.update(
                 self._fe_fit_one_expectile(q, X_seed, y_seed, X_pred, w_robust)
             )
 
-        # 4) (optional) taper search, then apply taper
+        # 3) Post-processing
         if y_all is not None and split_mask is not None:
             best_taper = self._fe_pick_taper(
-                X_train,
-                X_pred,
-                preds,
-                y_all,
+                X_train, X_pred, preds, y_all, 
                 ~np.asarray(split_mask, bool),
-                w_train,
-                taper_grid,
+                w_train, taper_grid
             )
         else:
             best_taper = None
+
         preds = self._apply_edge_tapers(
             X_train=X_train,
             X_pred=X_pred,
             pred_dict=preds,
             w_train_effective=w_train,
-            **(
-                best_taper
-                or dict(
-                    lo_q=0.10,
-                    hi_q=0.90,
-                    stretch_lo=0.15,
-                    stretch_hi=0.15,
-                    k_anchor=5,
-                    scale_sds=True,
-                )
-            ),
+            **(best_taper or dict(
+                lo_q=0.10, hi_q=0.90,
+                stretch_lo=0.15, stretch_hi=0.15,
+                k_anchor=5, scale_sds=True,
+            )),
         )
+        
+        return self._fe_enforce_non_crossing(preds)
 
-        # 5) enforce non-crossing
-        preds = self._fe_enforce_non_crossing(preds)
-        return preds
 
     # ---- helpers ----
     def _fe_seed_domain(self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8):
@@ -1188,28 +1436,33 @@ class GAMModeler:
 
     def _fe_fit_one_expectile(self, q, X_seed, y_seed, X_pred, w_robust):
         def fit_once(q, boot_idx=None):
-            tuner = GAMTuner(expectile=q)
-            tuner._verbose = False
+            self.param_search.expectile = q
             w_boot = (
                 w_robust
                 if boot_idx is None
                 else (self._bootstrap_weights(len(y_seed), boot_idx) * w_robust)
             )
-            gam = tuner.fit(X_seed, y_seed, sample_weight=w_boot)
-            Xp = np.asarray(X_pred, float)
-            Xp_num = gam._scaler.transform(Xp[:, gam._num_idx])
-            Xp_fac = Xp[:, gam._fac_idx]
-            Xp_s = np.column_stack([Xp_num, Xp_fac])
-            return np.maximum(gam.predict(Xp_s), 0.0)
+            
+            # Fit using only price column
+            best_gam = self.param_search.fit(
+                X_seed[:, [0]], y_seed, w_boot,  # Only price column
+                verbose=self.verbose
+            )
+            
+            # Predict using only price column
+            X_pred_price = X_pred[:, [0]]  # Extract price column
+            return np.maximum(best_gam.predict(X_pred_price), 0.0)
 
         loops = self._bootstrap_loops_for_size(len(y_seed))
         if loops <= 0:
             return {f"units_pred_{q}": fit_once(q)}
+
         rng = np.random.default_rng(self.random_state)
         idx_all = np.arange(len(y_seed))
         m = max(1, int(len(y_seed) * self.bootstrap_frac))
         preds = []
         target = self.bootstrap_target_rel_se
+
         for i in range(loops):
             boot_idx = rng.choice(idx_all, size=m, replace=True)
             preds.append(fit_once(q, boot_idx=boot_idx))
@@ -1220,13 +1473,14 @@ class GAMModeler:
                 rel_se = np.nanmean(se_vec / np.maximum(np.abs(mean_vec), 1e-8))
                 if rel_se < target:
                     break
+
         P = np.vstack(preds)
         out = {
             f"units_pred_{q}": P.mean(axis=0),
             f"units_pred_{q}_sd": P.std(axis=0, ddof=1),
         }
         return out
-
+    
     def _fe_pick_taper(
         self, X_train, X_pred, base_pred_dict, y_all, mask_train, w_train, grid
     ):
@@ -1614,202 +1868,6 @@ class GAMModeler:
 
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
         return self._postprocess_all(all_gam_results)
-
-
-
-# ---------- utilities for anchored search ----------
-def _price_bins_for_cv(self, p: np.ndarray, n_bins: int = 5) -> np.ndarray:
-    """Return integer bin labels (0..n_bins-1) by price quantiles, robust to ties."""
-    qs = np.quantile(p, np.linspace(0, 1, n_bins + 1))
-    # make edges strictly monotone
-    for i in range(1, len(qs)):
-        if qs[i] <= qs[i-1]:
-            qs[i] = qs[i-1] + 1e-9
-    return np.clip(np.searchsorted(qs, p, side="right") - 1, 0, n_bins - 1)
-
-def _cv_score_anchored(self, X, y, w, *, cfg, n_splits=4, seed=42) -> float:
-    """
-    Score one config via K-fold over price bins.
-    Score = RMSE * (1 + 0.7 * curvature), lower is better.
-    """
-    import numpy as np
-    from sklearn.model_selection import KFold
-
-    rng = np.random.default_rng(seed)
-    X = np.asarray(X, float)
-    y = np.asarray(y, float)
-    p = X[:, 0]
-    w = None if w is None else np.asarray(w, float)
-
-    # bins by price to ensure each fold covers the price range
-    bins = self._price_bins_for_cv(p, n_bins=5)
-    # shuffle within bins
-    idx = np.arange(len(p))
-    rng.shuffle(idx)
-
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    scores = []
-
-    for train_idx, val_idx in kf.split(idx):
-        tr = idx[train_idx]; va = idx[val_idx]
-
-        # fit on train
-        gam = fit_price_curve_with_anchors(
-            X[tr], y[tr], None if w is None else w[tr],
-            expectile=cfg.get("expectile", self.expectile),
-            n_splines=int(cfg["n_splines"]),
-            lam=float(cfg["lam"]),
-            max_iter=int(cfg.get("max_iter", 6000)),
-            tol=float(cfg.get("tol", 2e-4)),
-            anchor_w=float(cfg.get("anchor_w", 0.02)),
-            edge_quantile=float(cfg.get("edge_quantile", 0.10)),
-        )
-
-        # predict on val
-        yhat = gam.predict(X[va]).astype(float)
-        resid2 = (y[va] - yhat) ** 2
-        if w is None:
-            rmse = float(np.sqrt(resid2.mean()))
-        else:
-            ww = w[va] / max(w[va].sum(), 1e-12)
-            rmse = float(np.sqrt((resid2 * ww).sum()))
-
-        # curvature penalty on validation preds (sorted by price)
-        order = np.argsort(X[va, 0])
-        yv = yhat[order]
-        if yv.size >= 5:
-            dd = np.abs(np.diff(yv, n=2))
-            denom = max(np.mean(np.abs(yv)), 1e-9)
-            curvature = float(np.mean(dd) / denom)
-        else:
-            curvature = 0.0
-
-        scores.append(rmse * (1.0 + 0.7 * curvature))
-
-    return float(np.mean(scores))
-
-
-def _golden_search_loglam(self, X, y, w, *, base_cfg, loglam_lo, loglam_hi, iters=4, seed=42):
-    """
-    1D golden-section search on log(lam) around a fixed (n_splines, anchor_w).
-    
-    Returns 
-        (best_cfg, best_score).
-    """
-    import numpy as np
-    phi = (1 + 5 ** 0.5) / 2
-    invphi = 1 / phi
-
-    a, b = float(loglam_lo), float(loglam_hi)
-    # initialize interior points
-    c = b - (b - a) * invphi
-    d = a + (b - a) * invphi
-
-    cfg_c = dict(base_cfg, lam=float(np.exp(c)))
-    sc_c = self._cv_score_anchored(X, y, w, cfg=cfg_c, seed=seed)
-
-    cfg_d = dict(base_cfg, lam=float(np.exp(d)))
-    sc_d = self._cv_score_anchored(X, y, w, cfg=cfg_d, seed=seed)
-
-    for _ in range(max(iters - 1, 0)):
-        if sc_c <= sc_d:
-            b, d = d, c
-            sc_d = sc_c
-            c = b - (b - a) * invphi
-            cfg_c = dict(base_cfg, lam=float(np.exp(c)))
-            sc_c = self._cv_score_anchored(X, y, w, cfg=cfg_c, seed=seed)
-        else:
-            a, c = c, d
-            sc_c = sc_d
-            d = a + (b - a) * invphi
-            cfg_d = dict(base_cfg, lam=float(np.exp(d)))
-            sc_d = self._cv_score_anchored(X, y, w, cfg=cfg_d, seed=seed)
-
-    if sc_c <= sc_d:
-        return cfg_c, sc_c
-    return cfg_d, sc_d
-
-# ---------- public: anchored search with a small compute budget ----------
-def fit_anchored_search(
-    self,
-    X: np.ndarray,
-    y: np.ndarray,
-    sample_weight=None,
-    *,
-    expectile: float | None = None,
-    n_splines_grid=(18, 20),          # small grid keeps it fast
-    anchor_w_grid=(0.01, 0.02),       # light anchors only
-    loglam_range=(np.log(120.0), np.log(900.0)),
-    lam_iters=4,                       # 4 golden steps per combo ≈ 16 fits total by default
-    seed: int = 42,
-    verbose: bool = False,
-):
-    """
-    Budgeted search over (n_splines, anchor_w) with golden-section tuning of lam.
-    Returns a fitted GAM with the best config, refit on all data.
-    """
-    # prep like your existing fit()
-    Xs, y, sw, scaler, num_idx, fac_idx = self._prepare_data(X, y, sample_weight)
-    ex = float(self.expectile if expectile is None else expectile)
-
-    best_cfg, best_sc = None, np.inf
-    tried = []
-
-    for ns in n_splines_grid:
-        for aw in anchor_w_grid:
-            base_cfg = dict(
-                expectile=ex, n_splines=int(ns), anchor_w=float(aw),
-                edge_quantile=0.10, max_iter=6000, tol=2e-4
-            )
-            cfg, sc = self._golden_search_loglam(
-                Xs[:, [0]], y, sw,  # only price column used by the helper's spline
-                base_cfg=base_cfg,
-                loglam_lo=float(loglam_range[0]),
-                loglam_hi=float(loglam_range[1]),
-                iters=int(lam_iters),
-                seed=seed,
-            )
-            tried.append((cfg, sc))
-            if verbose:
-                print(f"[search] ns={cfg['n_splines']} aw={cfg['anchor_w']:.3f} lam={cfg['lam']:.1f} score={sc:.3f}")
-            if sc < best_sc:
-                best_sc, best_cfg = sc, cfg
-
-    # final refit on full data with best config
-    gam = fit_price_curve_with_anchors(
-        Xs[:, [0]], y, sw,
-        expectile=best_cfg["expectile"],
-        n_splines=best_cfg["n_splines"],
-        lam=best_cfg["lam"],
-        max_iter=6000,
-        tol=2e-4,
-        anchor_w=best_cfg["anchor_w"],
-        edge_quantile=0.10,
-    )
-
-    # attach preprocessors + tuning summary (mirror your fit())
-    gam._scaler = scaler
-    gam._num_idx = num_idx
-    gam._fac_idx = fac_idx
-    gam._tuning_n_price = int(best_cfg["n_splines"])
-    gam._tuning_lam = float(best_cfg["lam"])
-    # score summary on full data
-    try:
-        y_pred = gam.predict(Xs[:, [0]])
-        resid2 = (y - y_pred) ** 2
-        mse = float((resid2 * sw).sum()) if sw is not None else float(resid2.mean())
-        rmse = float(np.sqrt(mse))
-        denom = max(float(np.mean(np.abs(y_pred))), 1e-9)
-        smooth = float(np.mean(np.abs(np.diff(y_pred, 2))) / denom) if len(y_pred) >= 5 else 0.0
-        gam._tuning_score = rmse * (1 + 0.7 * smooth)
-    except Exception:
-        gam._tuning_score = np.nan
-
-    if verbose:
-        print(f"[best] ns={best_cfg['n_splines']} lam={best_cfg['lam']:.1f} aw={best_cfg['anchor_w']:.3f} score={best_sc:.3f}")
-    return gam
-
-
 
 
 class Optimizer:
@@ -2497,67 +2555,6 @@ class viz:
         )
         return fig
     
-
-# --- Boundary-stabilized GAM fit helper (anchors) -----------------------------
-try:
-    from pygam import ExpectileGAM, s
-except Exception:  # keep import errors from crashing import; runtime fit will raise if used
-    ExpectileGAM = None
-    def s(*args, **kwargs):
-        raise RuntimeError("pygam not available")
-
-def fit_price_curve_with_anchors(
-    X: np.ndarray,               # shape (n, 1) price in col 0
-    y: np.ndarray,               # target (e.g., daily revenue or units)
-    w: Optional[np.ndarray] = None,     # sample weights (already clipped/normalized)
-    *,
-    expectile: float = 0.5,
-    n_splines: int = 16,
-    lam: float = 500.0,
-    max_iter: int = 6000,
-    tol: float = 2e-4,
-):
-    """
-    Fit a safer 1D price spline with two tiny anchors outside the observed range
-    to suppress boundary spikes. Returns a fitted ExpectileGAM.
-    """
-    if ExpectileGAM is None:
-        raise RuntimeError("pygam is required for fit_price_curve_with_anchors")
-
-    X = np.asarray(X, float)
-    y = np.asarray(y, float)
-    p = X[:, 0]
-
-    # local medians on edges
-    try:
-        q10, q90 = np.quantile(p, [0.10, 0.90])
-    except Exception:
-        q10, q90 = (np.min(p), np.max(p))
-    y_lo = float(np.median(y[p <= q10])) if np.any(p <= q10) else float(np.median(y))
-    y_hi = float(np.median(y[p >= q90])) if np.any(p >= q90) else float(np.median(y))
-
-    # anchors just outside the observed range
-    span = (p.max() - p.min()) or 1.0
-    eps = 1e-3 * span
-    X_anchor = np.array([[p.min() - eps], [p.max() + eps]], dtype=float)
-    y_anchor = np.array([y_lo, y_hi], dtype=float)
-
-    if w is None:
-        w_anchor = np.array([0.05, 0.05], dtype=float)
-        w_aug = None
-    else:
-        w = np.asarray(w, float)
-        w_anchor = np.full(2, 0.05 * float(np.mean(w)), dtype=float)
-        w_aug = np.concatenate([w, w_anchor])
-
-    X_aug = np.vstack([X, X_anchor])
-    y_aug = np.concatenate([y, y_anchor])
-
-    terms = s(0, n_splines=int(n_splines), spline_order=3)
-    gam = ExpectileGAM(terms, lam=float(lam), expectile=float(expectile),
-                       max_iter=int(max_iter), tol=float(tol))
-    gam.fit(X_aug, y_aug, weights=w_aug)
-    return gam
 
 
 def _v_best(obj, msg: str):

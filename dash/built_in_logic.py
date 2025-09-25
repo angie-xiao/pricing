@@ -6,8 +6,6 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 
-WEIGHT_LOGIC_VERSION = "anchors-v1-count-rarity"
-
 # viz
 # import seaborn as sns
 import plotly.express as px
@@ -115,292 +113,25 @@ class DataEngineer:
         df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
         return df
 
-    def _grid_search_weights(
-        self,
-        sub: pd.DataFrame,
-        param_grid: dict = None,
-        seed: int = 42,
-        max_candidates: int | None = None,
-    ) -> tuple:
-        """
-        Fast random + successive-halving search over weight knobs.
-        Logs ONLY when a new full-data best is found.
-        Returns (tail_strength, tail_p, best_rmse) and stashes other best knobs in self._best_weight_cfg.
-        """
-        rng = np.random.default_rng(seed)
-        y_true = sub["shipped_units"].to_numpy(float)
-        price = sub["price"].to_numpy(float)
-        n = len(sub)
-
-        # search ranges (collapse param_grid lists to ranges if provided)
-        space = {
-            "decay_rate": (-0.05, -0.001),
-            "tail_strength": (0.0, 0.6),
-            "tail_p": (0.3, 1.2),
-            "rarity_beta": (0.20, 0.45),
-            "rarity_cap": (1.15, 1.30),
-            "tail_q": (0.10, 0.15),
-            "lcap": (1.25, 1.50),
-        }
-        if isinstance(param_grid, dict) and param_grid:
-            for k, vals in param_grid.items():
-                if k in space and hasattr(vals, "__iter__") and len(vals) > 0:
-                    lo, hi = float(np.min(vals)), float(np.max(vals))
-                    if lo == hi:
-                        hi = lo + 1e-9
-                    space[k] = (lo, hi)
-
-        def _sample_one():
-            def runif(a, b):
-                return float(rng.uniform(a, b))
-
-            def logu(a, b):
-                la, lb = np.log(a), np.log(b)
-                return float(np.exp(rng.uniform(la, lb)))
-
-            dr = -logu(abs(space["decay_rate"][1]), abs(space["decay_rate"][0]))
-            return dict(
-                decay_rate=dr,
-                tail_strength=runif(*space["tail_strength"]),
-                tail_p=runif(*space["tail_p"]),
-                rarity_beta=runif(*space["rarity_beta"]),
-                rarity_cap=runif(*space["rarity_cap"]),
-                tail_q=runif(*space["tail_q"]),
-                lcap=runif(*space["lcap"]),
-            )
-
-        def _gini(w):
-            w = np.asarray(w, float)
-            if w.size == 0:
-                return 1.0
-            w = np.sort(w)
-            i = np.arange(1, w.size + 1, dtype=float)
-            denom = w.size * w.sum()
-            if denom <= 0:
-                return 1.0
-            return (2.0 * (i * w).sum() / denom) - (w.size + 1.0) / w.size
-
-        def _score_const(y, w):
-            yhat = (
-                np.average(y, weights=w)
-                if np.isfinite(w).all() and w.sum() > 0
-                else y.mean()
-            )
-            rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
-            pen = 0.20 * min(np.std(w), 5.0) + 0.60 * _gini(w)
-            return rmse * (1.0 + pen)
-
-        def _score_linear(y, w, x):
-            X = np.column_stack([np.ones_like(x), x]).astype(float)
-            W = np.diag(w / max(w.mean(), 1e-12))
-            try:
-                beta = np.linalg.lstsq(W @ X, W @ y, rcond=None)[0]
-                yhat = X @ beta
-            except Exception:
-                yhat = np.full_like(y, np.average(y, weights=w))
-            rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
-            pen = 0.15 * min(np.std(w), 5.0) + 0.40 * _gini(w)
-            return rmse * (1.0 + pen)
-
-        if max_candidates is None:
-            max_candidates = 64 if n >= 120 else (32 if n >= 60 else 16)
-        idx1 = (
-            rng.choice(n, size=min(n, max(60, int(0.25 * n))), replace=False)
-            if n > 60
-            else np.arange(n)
-        )
-        idx2 = (
-            rng.choice(n, size=min(n, max(120, int(0.60 * n))), replace=False)
-            if n > 120
-            else np.arange(n)
-        )
-
-        def make_w(params):
-            w = self._make_weights(
-                sub,
-                tail_strength=params["tail_strength"],
-                tail_p=params["tail_p"],
-                decay_rate=params["decay_rate"],
-                rarity_cfg={
-                    "beta": params["rarity_beta"],
-                    "cap": params["rarity_cap"],
-                    "tails_only": True,
-                    "tail_q": params["tail_q"],
-                },
-                lcap=params["lcap"],
-                window=7,
-                elasticity_df=None,
-            )
-            if (
-                (w is None)
-                or (w.size == 0)
-                or (not np.all(np.isfinite(w)))
-                or (w.std() > 2.0)
-            ):
-                return None
-            return w
-
-        # Stage 1: random + constant proxy
-        cand = []
-        for _ in range(max_candidates):
-            p = _sample_one()
-            w = make_w(p)
-            if w is None:
-                continue
-            s = _score_const(y_true[idx1], w[idx1])
-            cand.append((s, p, w))
-        if not cand:
-            return (0.3, 0.5, None)
-        cand.sort(key=lambda t: t[0])
-        cand = cand[: max(4, len(cand) // 4)]
-
-        # Stage 2: medium + linear proxy
-        next_stage = []
-        for s, p, w in cand:
-            s2 = _score_linear(y_true[idx2], w[idx2], price[idx2])
-            next_stage.append((s2, p, w))
-        next_stage.sort(key=lambda t: t[0])
-        cand = next_stage[: max(2, len(next_stage) // 4)]
-
-        # Stage 3: full data + linear proxy (LOG ONLY ON IMPROVEMENT)
-        best_s, best_p, best_w = np.inf, None, None
-        for _, p, w in cand:
-            s3 = _score_linear(y_true, w, price)
-            if s3 < best_s:
-                best_s, best_p, best_w = s3, p, w
-                # improvement log (single line)
-                _v_best(
-                    self,
-                    f"[weights BEST] tail_strength={p['tail_strength']:.3f} "
-                    f"tail_p={p['tail_p']:.3f} decay={p['decay_rate']:.4f} "
-                    f"rarity(beta={p['rarity_beta']:.2f}, cap={p['rarity_cap']:.2f}, q={p['tail_q']:.2f}) "
-                    f"lcap={p['lcap']:.2f} | score={s3:.4f}",
-                )
-
-        # stash best “other knobs”
-        self._best_weight_cfg = dict(
-            decay_rate=best_p["decay_rate"],
-            rarity_beta=best_p["rarity_beta"],
-            rarity_cap=best_p["rarity_cap"],
-            tail_q=best_p["tail_q"],
-            lcap=best_p["lcap"],
-        )
-
-        yhat = np.average(y_true, weights=best_w)
-        rmse_proxy = float(np.sqrt(np.mean((y_true - yhat) ** 2)))
-        return (best_p["tail_strength"], best_p["tail_p"], rmse_proxy)
-
-    def _make_weights(
-        self,
-        sub: pd.DataFrame,
-        tail_strength: Optional[float] = None,
-        tail_p: Optional[float] = None,
-        elasticity_df: Optional[pd.DataFrame] = None,
-        # NEW optional knobs (can be omitted by all callers)
-        decay_rate: Optional[float] = None,
-        rarity_cfg: Optional[
-            Dict
-        ] = None,  # e.g. {"smooth":5,"cap":1.25,"beta":0.35,"tails_only":True,"tail_q":0.10}
-        lcap: Optional[float] = None,
-        window: Optional[int] = None,
-    ) -> np.ndarray:
-        """
-        Blend multiple signals into normalized per-row weights.
-        Backward-compatible: if you don't pass new knobs, defaults are used.
-        """
-
-        # --- Auto-wire best knobs from the tuner, if available ---
-        cfg = getattr(self, "_best_weight_cfg", None)
-        if cfg:
-            if decay_rate is None:
-                decay_rate = cfg.get("decay_rate", decay_rate)
-            if rarity_cfg is None:
-                rarity_cfg = {
-                    "beta": cfg.get("rarity_beta", 0.35),
-                    "cap": cfg.get("rarity_cap", 1.25),
-                    "tails_only": True,
-                    "tail_q": cfg.get("tail_q", 0.10),
-                }
-            if lcap is None:
-                lcap = cfg.get("lcap", lcap)
-
-        # --- Fallback defaults for new knobs ---
-        if decay_rate is None:
-            decay_rate = -0.01
-        if rarity_cfg is None:
-            rarity_cfg = {
-                "smooth": 5,
-                "cap": 1.25,
-                "beta": 0.35,
-                "tails_only": True,
-                "tail_q": 0.10,
-            }
-        if lcap is None:
-            lcap = 1.4
-        if window is None:
-            window = 7
-
-        # --- If tail params not provided, run the (now-fast) tuner to get them ---
-        if tail_strength is None or tail_p is None:
-            tail_strength, tail_p, _ = self._grid_search_weights(sub)
-
-        # 1) time-decay
-        decayed_df = self._time_decay(sub, decay_rate=decay_rate)
+    
+    def _make_weights(self, sub: pd.DataFrame, **kwargs) -> np.ndarray:
+        """Simplified weight calculation using only time decay and rarity"""
+        # 1) Time decay
+        decayed_df = self._time_decay(sub, decay_rate=-0.01)  # Fixed decay rate
         w = decayed_df["time_decay_weight"].astype(float).to_numpy()
-
-        # 2) (optional) tail boost (you currently keep it off)
-        use_tail_boost = False
-        if use_tail_boost and tail_strength and tail_strength > 0:
-            asp = sub["price"].astype(float).to_numpy()
-            q25, q75 = np.percentile(asp, [25, 75])
-            iqr = q75 - q25 if q75 > q25 else 1.0
-            rel_dist = np.abs(asp - np.median(asp)) / iqr
-            rel_dist = np.minimum(rel_dist, 1.5)
-            w_tail = 1.0 + (tail_strength * 0.35) * rel_dist ** (tail_p * 0.6)
-            w *= 0.5 * w_tail + 0.5
-
-        # 3) rarity multiplier (density-aware, bounded)
-        rc = {
-            "smooth": 5,
-            "cap": 1.25,
-            "beta": 0.35,
-            "tails_only": True,
-            "tail_q": 0.10,
-        }
-        rc.update(rarity_cfg or {})
+        
+        # 2) Rarity multiplier
         rarity_mult = self._rarity_multiplier(
             sub["price"].to_numpy(float),
-            bin_width=None,
-            smooth=rc.get("smooth", 5),
-            cap=float(rc.get("cap", 1.25)),
-            beta=float(rc.get("beta", 0.35)),
-            tails_only=bool(rc.get("tails_only", True)),
-            tail_q=float(rc.get("tail_q", 0.10)),
+            smooth=5,
+            cap=1.25,
+            beta=0.35,
+            tails_only=True,
+            tail_q=0.10
         )
         w *= rarity_mult
-
-        # 4) product elasticity factor (unchanged; optional)
-        if elasticity_df is not None:
-            product = sub["product"].iloc[0]
-            if (
-                "product" in elasticity_df.columns
-                and "elasticity_score" in elasticity_df.columns
-            ):
-                mask = elasticity_df["product"] == product
-                if mask.any():
-                    elasticity_score = float(
-                        elasticity_df.loc[mask, "elasticity_score"].iloc[0]
-                    )
-                else:
-                    elasticity_score = 50.0
-            else:
-                elasticity_score = 50.0
-            w *= 0.8 + 0.4 * (elasticity_score / 100.0)
-
-        # 5) local leverage cap + global safety + normalize
-        w = self._cap_local_leverage(
-            w, sub["price"].to_numpy(float), window=int(window), lcap=float(lcap)
-        )
+        
+        # Final normalization
         w = np.clip(w, 0.25, 2.5)
         w = w / w.mean() if w.size else w
         return w
@@ -643,27 +374,29 @@ class DataEngineer:
 
 class ParamSearchCV:
     """
-    Cross-validation based parameter search for price curve modeling.
-    Uses price-based stratification and golden-section search for efficient tuning.
+    Cross-validation based parameter search for price curve modeling
+        - Tuning for (1) n_splines, (2) lambda;
+        - Uses price-based stratification and golden-section search for efficient tuning.
     """
 
     def __init__(
         self,
         n_splits: int = 4,
-        n_splines_grid: tuple = (18, 20),
-        # Remove anchor_w_grid since we're not using it
-        loglam_range: tuple = (np.log(120.0), np.log(900.0)),
-        lam_iters: int = 4,
+        n_splines_grid: tuple = (15, 20, 25, 30),
+        loglam_range: tuple = (np.log(50.0), np.log(1000.0)),
+        lam_iters: int = 6,
         expectile: float = 0.5,
         random_state: int = 42
     ):
         self.n_splits = n_splits
         self.n_splines_grid = n_splines_grid
-        # Remove anchor_w_grid
         self.loglam_range = loglam_range
         self.lam_iters = lam_iters
         self.expectile = expectile
         self.random_state = random_state
+        # Track best solution ever found
+        self.best_score_ever = np.inf
+        self.best_config_ever = None     
         
         
     def _fit_price_curve_with_anchors(
@@ -860,39 +593,67 @@ class ParamSearchCV:
         return cfg_d, sc_d
 
 
-    def fit(self, X, y, sample_weight=None, verbose=False) -> ExpectileGAM:
-        best_cfg, best_sc = None, np.inf
+    def _update_search_range(self, current_score, current_cfg):
+        """Update search ranges but always relative to best solution ever found"""
+        # If this is a new best score ever, update it
+        if current_score < self.best_score_ever:
+            self.best_score_ever = current_score
+            self.best_config_ever = current_cfg.copy()
+            
+            # Use best-ever solution's parameters as center of search
+            current_loglam = np.log(self.best_config_ever['lam'])
+            
+            # More conservative range updates
+            if self.best_score_ever < 1.0:
+                range_width = 0.5  # Narrow search around excellent solution
+            elif self.best_score_ever < 2.0:
+                range_width = 0.7
+            else:
+                range_width = 1.0
+                
+            self.loglam_range = (
+                max(np.log(50.0), current_loglam - range_width),
+                min(np.log(1000.0), current_loglam + range_width)
+            )
+
+
+    def fit(self, X, y, sample_weight=None, verbose=False):
+        '''
         
+        '''
+        current_best_cfg, current_best_sc = None, np.inf
+        
+        # Regular grid search
         for ns in self.n_splines_grid:
-            base_cfg = dict(
+            try:
+                cfg, sc = self._golden_search_loglam(
+                    X[:, [0]], y, sample_weight,
+                    base_cfg=dict(
+                        expectile=self.expectile,
+                        n_splines=int(ns),
+                        max_iter=6000,
+                        tol=2e-4
+                    )
+                )
+                
+                if sc < current_best_sc:
+                    current_best_sc = sc
+                    current_best_cfg = cfg
+                    self._update_search_range(current_best_sc, current_best_cfg)
+                    
+            except Exception:
+                continue
+
+        # Always use the best configuration we've ever found
+        if self.best_config_ever is not None:
+            return self._fit_price_curve_with_anchors(
+                X[:, [0]], y, sample_weight,
                 expectile=self.expectile,
-                n_splines=int(ns),
+                n_splines=self.best_config_ever['n_splines'],
+                lam=self.best_config_ever['lam'],
                 max_iter=6000,
                 tol=2e-4
             )
-            
-            cfg, sc = self._golden_search_loglam(
-                X[:, [0]], y, sample_weight,
-                base_cfg=base_cfg
-            )
-            
-            # if verbose:
-            #     print(f"[search] ns={cfg['n_splines']} lam={cfg['lam']:.1f} score={sc:.3f}")
-            
-            if sc < best_sc:
-                best_sc, best_cfg = sc, cfg
-
-        # Final fit with best parameters
-        best_gam = self._fit_price_curve_with_anchors(
-            X[:, [0]], y, sample_weight,
-            expectile=best_cfg["expectile"],
-            n_splines=best_cfg["n_splines"],
-            lam=best_cfg["lam"],
-            max_iter=6000,
-            tol=2e-4
-        )
-        
-        return best_gam
 
 
 class GAMTuner:
@@ -1084,9 +845,9 @@ class GAMModeler:
         
         self.param_search = ParamSearchCV(
             n_splits=4,
-            n_splines_grid=(18, 20),
-            loglam_range=(np.log(120.0), np.log(900.0)),
-            lam_iters=4,
+            n_splines_grid=(15, 20, 25, 30),  # Updated grid
+            loglam_range=(np.log(50.0), np.log(1000.0)),  # Wider range
+            lam_iters=6,  # More iterations
             random_state=random_state
         )
             

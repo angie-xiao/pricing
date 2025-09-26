@@ -3,9 +3,8 @@
 import os, random
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Tuple
-from itertools import product
+from datetime import datetime
+from typing import Optional
 
 # viz
 # import seaborn as sns
@@ -15,9 +14,8 @@ from dash_bootstrap_templates import load_figure_template
 
 # ML
 from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from pygam import ExpectileGAM, s, f, te
+from pygam import ExpectileGAM, f, te
 
 # local import
 from helpers import DataEng
@@ -250,36 +248,229 @@ class ParamSearchCV:
 
     def __init__(
         self,
-        n_splits: int = 4,
-        n_splines_grid: tuple = (15, 20, 25, 30),
-        loglam_range: tuple = (np.log(50.0), np.log(1000.0)),
-        lam_iters: int = 10,   
-        weight_grid: dict = None,
+        n_splits: int = 3,
+        n_splines_grid: tuple = (15, 20, 25, 30),  # Start wide
+        loglam_range: tuple = (np.log(50.0), np.log(1000.0)),  # Start wide
+        lam_iters: int = 10,
         expectile: float = 0.5,
         random_state: int = 42,
         verbose: bool = False,
     ):
-        # Existing initialization
         self.random_state = random_state
         self.n_splits = n_splits
-        self.n_splines_grid = n_splines_grid
-        self.loglam_range = loglam_range
-        self.lam_iters = lam_iters 
+        self.initial_n_splines = n_splines_grid
+        self.initial_loglam_range = loglam_range
+        self.lam_iters = lam_iters
         self.expectile = expectile
         self.verbose = verbose
 
-        # Define default weight grid if none provided
-        self.weight_grid = weight_grid or {
-            'units_pred_0.5': np.arange(0.3, 0.81, 0.05),     # Center prediction gets more weight
-            'units_pred_0.025': np.arange(0.1, 0.41, 0.05),   # Confidence bounds get less weight
-            'units_pred_0.975': np.arange(0.1, 0.41, 0.05)    # Confidence bounds get less weight
-        }
-        
-        # Results tracking
+        # Track best scores for adaptive refinement
         self.best_score_ever = np.inf
         self.best_config_ever = None
-        self.best_weights_ever = None
-        self._gam_best_line = None
+        self._adaptive_threshold = 0.1  # 10% improvement threshold
+
+        self.scalers = {"price": StandardScaler(), "discount": StandardScaler()}
+
+    def _adaptive_grid_search(self, X, y, sample_weight=None):
+        """Adaptive grid search that narrows parameters based on performance"""
+        current_best_cfg = None
+        current_best_score = np.inf
+
+        # Phase 1: Wide search with fewer iterations
+        n_splines_grid = self.initial_n_splines
+        loglam_range = self.initial_loglam_range
+        initial_lam_iters = max(5, self.lam_iters // 2)
+
+        # First pass with wide grid
+        for ns in n_splines_grid:
+            base_cfg = {
+                "n_splines": int(ns),
+                "expectile": self.expectile,
+            }
+
+            cfg, score = self._golden_search_loglam(
+                X,
+                y,
+                sample_weight,
+                base_cfg=base_cfg,
+                loglam_range=loglam_range,
+                max_iters=initial_lam_iters,
+            )
+
+            if score < current_best_score:
+                current_best_score = score
+                current_best_cfg = cfg
+
+        # Phase 2: Refined search near best configuration
+        if current_best_cfg is not None:
+            best_ns = current_best_cfg["n_splines"]
+            best_lam = np.log(current_best_cfg["lam"])
+
+            # Narrow the search space around best values
+            refined_ns = [max(10, best_ns - 5), best_ns, min(35, best_ns + 5)]
+            refined_loglam = (
+                max(self.initial_loglam_range[0], best_lam - 0.5),
+                min(self.initial_loglam_range[1], best_lam + 0.5),
+            )
+
+            # Only do refined search if initial search was promising
+            if current_best_score < self.best_score_ever * (
+                1 + self._adaptive_threshold
+            ):
+                for ns in refined_ns:
+                    base_cfg = {
+                        "n_splines": int(ns),
+                        "expectile": self.expectile,
+                    }
+
+                    cfg, score = self._golden_search_loglam(
+                        X,
+                        y,
+                        sample_weight,
+                        base_cfg=base_cfg,
+                        loglam_range=refined_loglam,
+                        max_iters=self.lam_iters,
+                    )
+
+                    if score < current_best_score:
+                        current_best_score = score
+                        current_best_cfg = cfg
+
+        # Update best ever if improved
+        if current_best_score < self.best_score_ever:
+            self.best_score_ever = current_best_score
+            self.best_config_ever = current_best_cfg.copy()
+            if self.verbose:
+                print(
+                    f"New best config found: score={current_best_score:.4f}, params={current_best_cfg}"
+                )
+
+        return current_best_cfg, current_best_score
+
+    def _preprocess_features(self, X, fit=False):
+        """
+        Standardize numerical features while leaving categorical features unchanged.
+
+        Args:
+            X: Input array with columns [price, discount, event_encoded, product_encoded]
+            fit: Whether to fit the scalers (True for training data)
+        """
+        X = np.asarray(X, dtype=float)
+        X_processed = X.copy()
+
+        # Scale price (column 0)
+        if fit:
+            X_processed[:, 0] = (
+                self.scalers["price"].fit_transform(X[:, 0].reshape(-1, 1)).ravel()
+            )
+        else:
+            X_processed[:, 0] = (
+                self.scalers["price"].transform(X[:, 0].reshape(-1, 1)).ravel()
+            )
+
+        # Scale discount (column 1)
+        if fit:
+            X_processed[:, 1] = (
+                self.scalers["discount"].fit_transform(X[:, 1].reshape(-1, 1)).ravel()
+            )
+        else:
+            X_processed[:, 1] = (
+                self.scalers["discount"].transform(X[:, 1].reshape(-1, 1)).ravel()
+            )
+
+        # Leave categorical features (columns 2 and 3) unchanged
+        return X_processed
+
+    def _fit_price_curve_with_anchors(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        w: Optional[np.ndarray] = None,
+        *,
+        expectile: float = 0.5,
+        n_splines: int = 16,
+        lam: float = 500.0,
+        max_iter: int = 6000,
+        tol: float = 2e-4,
+    ):
+        """
+        Fits GAM with all features
+        """
+        if ExpectileGAM is None:
+            raise RuntimeError("pygam is required for fit_price_curve_with_anchors")
+
+        # Preprocess features - fit scalers on input data
+        X = self._preprocess_features(X, fit=True)
+
+        X = np.asarray(X, float)
+        y = np.asarray(y, float)
+        p = X[:, 0]  # price still in first column
+
+        # local medians on edges (still using price for anchors)
+        try:
+            q10, q90 = np.quantile(p, [0.10, 0.90])
+        except Exception:
+            q10, q90 = (np.min(p), np.max(p))
+        y_lo = (
+            float(np.median(y[p <= q10])) if np.any(p <= q10) else float(np.median(y))
+        )
+        y_hi = (
+            float(np.median(y[p >= q90])) if np.any(p >= q90) else float(np.median(y))
+        )
+
+        # anchors just outside the observed range
+        span = (p.max() - p.min()) or 1.0
+        eps = 1e-3 * span
+
+        # Create anchor rows with median values for other features
+        median_disc = np.median(X[:, 1])
+        median_event = int(np.median(X[:, 2]))
+        median_product = int(np.median(X[:, 3]))
+
+        # Create anchor rows (using scaled values for numerical features)
+        X_anchor = np.array(
+            [
+                [
+                    self.scalers["price"].transform([[p.min() - eps]])[0, 0],
+                    self.scalers["discount"].transform([[median_disc]])[0, 0],
+                    median_event,
+                    median_product,
+                ],
+                [
+                    self.scalers["price"].transform([[p.max() + eps]])[0, 0],
+                    self.scalers["discount"].transform([[median_disc]])[0, 0],
+                    median_event,
+                    median_product,
+                ],
+            ],
+            dtype=float,
+        )
+        y_anchor = np.array([y_lo, y_hi], dtype=float)
+
+        if w is None:
+            w_anchor = np.array([0.05, 0.05], dtype=float)
+            w_aug = None
+        else:
+            w = np.asarray(w, float)
+            w_anchor = np.full(2, 0.05 * float(np.mean(w)), dtype=float)
+            w_aug = np.concatenate([w, w_anchor])
+
+        X_aug = np.vstack([X, X_anchor])
+        y_aug = np.concatenate([y, y_anchor])
+
+        # Create proper TermList
+        terms = te(0, 1, n_splines=[int(n_splines), 10]) + f(2) + f(3)
+
+        gam = ExpectileGAM(
+            terms,
+            lam=float(lam),
+            expectile=float(expectile),
+            max_iter=int(max_iter),
+            tol=float(tol),
+        )
+        gam.fit(X_aug, y_aug, weights=w_aug)
+
+        return gam
 
     def _price_bins_for_cv(self, prices: np.ndarray, n_bins: int = 5) -> np.ndarray:
         """
@@ -298,95 +489,20 @@ class ParamSearchCV:
             if qs[i] <= qs[i - 1]:
                 qs[i] = qs[i - 1] + 1e-9
         return np.clip(np.searchsorted(qs, prices, side="right") - 1, 0, n_bins - 1)
-
-    def _fit_price_curve_with_anchors(
-        self,
-        X: np.ndarray,  # shape (n, 1) price in col 0
-        y: np.ndarray,  # target (e.g., daily revenue or units)
-        w: Optional[np.ndarray] = None,  # sample weights (already clipped/normalized)
-        *,
-        expectile: float = 0.5,
-        n_splines: int = 16,
-        lam: float = 500.0,
-        max_iter: int = 6000,
-        tol: float = 2e-4,
-    ):
-        """
-        fits GAM with specific params
-        - take params (n_splines, lambda, etc.)
-        - adds anchor points to suppress boundary spikes
-        - fits a single GAM model with those exact specifications
-
-
-        Returns
-            a fitted ExpectileGAM.
-        """
-        if ExpectileGAM is None:
-            raise RuntimeError("pygam is required for fit_price_curve_with_anchors")
-
-        X = np.asarray(X, float)
-        y = np.asarray(y, float)
-        p = X[:, 0]
-
-        # local medians on edges
-        try:
-            q10, q90 = np.quantile(p, [0.10, 0.90])
-        except Exception:
-            q10, q90 = (np.min(p), np.max(p))
-        y_lo = (
-            float(np.median(y[p <= q10])) if np.any(p <= q10) else float(np.median(y))
-        )
-        y_hi = (
-            float(np.median(y[p >= q90])) if np.any(p >= q90) else float(np.median(y))
-        )
-
-        # anchors just outside the observed range
-        span = (p.max() - p.min()) or 1.0
-        eps = 1e-3 * span
-        X_anchor = np.array([[p.min() - eps], [p.max() + eps]], dtype=float)
-        y_anchor = np.array([y_lo, y_hi], dtype=float)
-
-        if w is None:
-            w_anchor = np.array([0.05, 0.05], dtype=float)
-            w_aug = None
-        else:
-            w = np.asarray(w, float)
-            w_anchor = np.full(2, 0.05 * float(np.mean(w)), dtype=float)
-            w_aug = np.concatenate([w, w_anchor])
-
-        X_aug = np.vstack([X, X_anchor])
-        y_aug = np.concatenate([y, y_anchor])
-
-        terms = s(0, n_splines=int(n_splines), spline_order=3)
-        gam = ExpectileGAM(
-            terms,
-            lam=float(lam),
-            expectile=float(expectile),
-            max_iter=int(max_iter),
-            tol=float(tol),
-        )
-        gam.fit(X_aug, y_aug, weights=w_aug)
-
-        return gam
-
+    
     def _cv_score_anchored(self, X, y, w, *, cfg) -> float:
         """
         Score a parameter configuration using stratified K-fold CV.
-
-        Params:
-            X: Features (price in first column)
-            y: Target values
-            w: Sample weights
-            cfg: Parameter configuration dictionary
-
-        Returns:
-            Mean CV score (lower is better)
         """
         rng = np.random.default_rng(self.random_state)
         X = np.asarray(X, float)
         y = np.asarray(y, float)
         p = X[:, 0]  # prices
         w = None if w is None else np.asarray(w, float)
+
+        # Get unique categories for each categorical feature
+        event_cats = np.unique(X[:, 2])
+        prod_cats = np.unique(X[:, 3])
 
         # Stratify by price bins
         bins = self._price_bins_for_cv(p, n_bins=5)
@@ -400,11 +516,16 @@ class ParamSearchCV:
             tr = idx[train_idx]
             va = idx[val_idx]
 
-            # Fit on train fold
+            # Ensure categorical variables in validation set exist in training set
+            X_tr, y_tr, w_tr = self._ensure_factor_domain(
+                X[tr], y[tr], None if w is None else w[tr], X[va]
+            )
+
+            # Fit on train fold with preprocessed features
             gam = self._fit_price_curve_with_anchors(
-                X[tr],
-                y[tr],
-                None if w is None else w[tr],
+                X_tr,
+                y_tr,
+                w_tr,
                 expectile=cfg.get("expectile", self.expectile),
                 n_splines=int(cfg["n_splines"]),
                 lam=float(cfg["lam"]),
@@ -412,8 +533,14 @@ class ParamSearchCV:
                 tol=float(cfg.get("tol", 2e-4)),
             )
 
+            # Preprocess validation features and ensure categories are in training domain
+            X_va = X[va].copy()
+            X_va[:, 2] = np.clip(X_va[:, 2], event_cats.min(), event_cats.max())
+            X_va[:, 3] = np.clip(X_va[:, 3], prod_cats.min(), prod_cats.max())
+            X_va_processed = self._preprocess_features(X_va, fit=False)
+
             # Score on validation fold
-            yhat = gam.predict(X[va]).astype(float)
+            yhat = gam.predict(X_va_processed).astype(float)
             resid2 = (y[va] - yhat) ** 2
 
             # Weighted or unweighted RMSE
@@ -437,21 +564,19 @@ class ParamSearchCV:
 
         return float(np.mean(scores))
 
-    def _golden_search_loglam(self, X, y, w, *, base_cfg) -> tuple:
-        """
-        Use golden-section search to efficiently find best lambda value.
+    def _golden_search_loglam(
+        self, X, y, w, *, base_cfg, loglam_range=None, max_iters=None
+    ):
+        """Modified golden search with configurable range and iterations"""
+        if loglam_range is None:
+            loglam_range = self.initial_loglam_range
+        if max_iters is None:
+            max_iters = self.lam_iters
 
-        Args:
-            X, y, w: Data and weights
-            base_cfg: Base configuration to optimize lambda for
-
-        Returns:
-            (best_config, best_score) tuple
-        """
         phi = (1 + 5**0.5) / 2
         invphi = 1 / phi
 
-        a, b = float(self.loglam_range[0]), float(self.loglam_range[1])
+        a, b = float(loglam_range[0]), float(loglam_range[1])
 
         # Initialize interior points
         c = b - (b - a) * invphi
@@ -463,7 +588,7 @@ class ParamSearchCV:
         cfg_d = dict(base_cfg, lam=float(np.exp(d)))
         sc_d = self._cv_score_anchored(X, y, w, cfg=cfg_d)
 
-        for _ in range(max(self.lam_iters - 1, 0)):
+        for _ in range(max(max_iters - 1, 0)):
             if sc_c <= sc_d:
                 b, d = d, c
                 sc_d = sc_c
@@ -480,75 +605,6 @@ class ParamSearchCV:
         if sc_c <= sc_d:
             return cfg_c, sc_c
         return cfg_d, sc_d
-
-    def _optimize_weights(self, predictions: dict, y_true: np.ndarray, initial_weights: dict = None) -> Tuple[dict, float]:
-        """
-        Optimize prediction weights using only grid search
-        """
-        pred_cols = list(predictions.keys())
-        X_pred = np.column_stack([predictions[col] for col in pred_cols])
-        
-        # Grid Search (either start fresh or use initial weights)
-        if initial_weights is None:
-            best_weights, best_rmse = self._grid_search_weights(X_pred, y_true)
-        else:
-            best_weights = initial_weights
-            blend = sum(predictions[col] * w for col, w in best_weights.items())
-            best_rmse = np.sqrt(mean_squared_error(y_true, blend))
-
-        return best_weights, best_rmse
-
-
-    def _grid_search_weights(self, X_pred: np.ndarray, y_true: np.ndarray) -> Tuple[dict, float]:
-        """Grid search for weights with more granular grid"""
-        pred_cols = list(self.weight_grid.keys())
-        best_weights = None
-        best_rmse = float('inf')
-        
-        # Define a more granular grid
-        weight_grid = {
-            'units_pred_0.5': np.arange(0.3, 0.81, 0.05),     # More granular steps
-            'units_pred_0.025': np.arange(0.1, 0.41, 0.05),   # More granular steps
-            'units_pred_0.975': np.arange(0.1, 0.41, 0.05)    # More granular steps
-        }
-        
-        # Generate valid weight combinations
-        for weights in product(*weight_grid.values()):
-            w_dict = dict(zip(pred_cols, weights))
-            # Check if weights sum to approximately 1
-            if abs(sum(w_dict.values()) - 1.0) > 1e-6:
-                continue
-                
-            # Evaluate weights
-            blend = X_pred @ np.array(list(w_dict.values()))
-            rmse = np.sqrt(mean_squared_error(y_true, blend))
-            
-            if rmse < best_rmse:
-                best_rmse = rmse
-                best_weights = w_dict
-                
-        if best_weights is None:
-            # Fallback to equal weights if no valid combination found
-            best_weights = {col: 1.0/len(pred_cols) for col in pred_cols}
-            blend = X_pred.mean(axis=1)
-            best_st_rmse = np.sqrt(mean_squared_error(y_true, blend))
-            
-        return best_weights, best_rmse
-
-        
-
-
-    def _project_onto_simplex(self, weights: np.ndarray) -> np.ndarray:
-        """Project weights onto probability simplex"""
-        if np.sum(weights) == 1 and np.all(weights >= 0):
-            return weights
-
-        u = np.sort(weights)[::-1]
-        cssv = np.cumsum(u) - 1
-        rho = np.nonzero(u * np.arange(1, len(u) + 1) > cssv)[0][-1]
-        theta = cssv[rho] / (rho + 1)
-
-        return np.maximum(weights - theta, 0)
 
     def _rarity_multiplier(
         self,
@@ -657,34 +713,71 @@ class ParamSearchCV:
         w = w / w.mean() if w.size else w
         return w
 
+    def _ensure_factor_domain(
+        self, X_train, y_train, w_train, X_pred, fac_cols=[2, 3], eps=1e-8
+    ):
+        """Make sure all categories in X_pred exist in training data."""
+        xt = np.asarray(X_train)
+        xp = np.asarray(X_pred)
+
+        need_rows = []
+        for col in fac_cols:
+            train_cats = np.unique(xt[:, col])
+            pred_cats = np.unique(xp[:, col])
+            missing = np.setdiff1d(pred_cats, train_cats)
+
+            if missing.size > 0:
+                # For each missing category, add a row with median values
+                # Use original (unscaled) values for numerical features
+                orig_price = (
+                    self.scalers["price"]
+                    .inverse_transform(xt[:, 0].reshape(-1, 1))
+                    .ravel()
+                )
+                orig_disc = (
+                    self.scalers["discount"]
+                    .inverse_transform(xt[:, 1].reshape(-1, 1))
+                    .ravel()
+                )
+
+                for cat in missing:
+                    new_row = np.array(
+                        [
+                            np.median(orig_price),  # price median (unscaled)
+                            np.median(orig_disc),  # discount median (unscaled)
+                            np.median(xt[:, 2]),  # event median
+                            np.median(xt[:, 3]),  # product median
+                        ]
+                    )
+                    new_row[col] = cat
+                    need_rows.append(new_row)
+
+        if not need_rows:
+            return X_train, y_train, w_train
+
+        X_extra = np.vstack(need_rows)
+        # Scale the numerical features in X_extra
+        X_extra = self._preprocess_features(X_extra, fit=False)
+        y_extra = np.full(len(need_rows), np.median(y_train), dtype=float)
+
+        if w_train is None:
+            w_train = np.ones(len(y_train), dtype=float)
+        w_extra = np.full(len(need_rows), float(eps), dtype=float)
+
+        X_aug = np.vstack([xt, X_extra])
+        y_aug = np.concatenate([y_train, y_extra])
+        w_aug = np.concatenate([w_train, w_extra])
+
+        return X_aug, y_aug, w_aug
+
     def fit(self, X, y, sample_weight=None, verbose=False):
-        """
-        Simplified fit method - removes weight optimization
-        """
-        current_best_cfg = None
-        current_best_score = np.inf
+        """Use adaptive grid search instead of fixed grid"""
+        self.verbose = verbose
 
-        # 1. Grid search for GAM parameters
-        for ns in self.n_splines_grid:
-            base_cfg = {
-                "n_splines": int(ns),
-                "expectile": self.expectile,
-            }
+        # Use adaptive grid search
+        current_best_cfg, _ = self._adaptive_grid_search(X, y, sample_weight)
 
-            cfg, score = self._golden_search_loglam(X, y, sample_weight, base_cfg=base_cfg)
-
-            if score < current_best_score:
-                current_best_score = score
-                current_best_cfg = cfg
-
-                # Update best ever if applicable
-                if score < self.best_score_ever:
-                    self.best_score_ever = score
-                    self.best_config_ever = cfg.copy()
-                    if verbose:
-                        print(f"New best config found: score={score:.4f}, params={cfg}")
-
-        # 2. Fit final model with best parameters
+        # Fit final model with best parameters
         if current_best_cfg is not None:
             model = self._fit_price_curve_with_anchors(
                 X,
@@ -863,7 +956,10 @@ class GAMModeler:
         return is_train, used_time_split
 
     def _mdm_build_features(self, sub_clean: pd.DataFrame):
+        # 1. Price
         price = sub_clean["price"].to_numpy(dtype=float)
+
+        # 2. Deal discount
         if "deal_discount_percent" in sub_clean.columns:
             disc = pd.to_numeric(
                 sub_clean["deal_discount_percent"], errors="coerce"
@@ -871,6 +967,8 @@ class GAMModeler:
             disc = disc.clip(lower=-100.0, upper=100.0).to_numpy(dtype=float)
         else:
             disc = np.zeros(len(sub_clean), dtype=float)
+
+        # 3. Event encoding
         if "event_encoded" in sub_clean.columns:
             evt = (
                 pd.to_numeric(sub_clean["event_encoded"], errors="coerce")
@@ -879,53 +977,23 @@ class GAMModeler:
             )
         else:
             evt = np.zeros(len(sub_clean), dtype=int)
-        X_all = np.column_stack([price, disc, evt])
+
+        # 4. Product encoding
+        if "product_encoded" in sub_clean.columns:
+            prod = (
+                pd.to_numeric(sub_clean["product_encoded"], errors="coerce")
+                .fillna(0)
+                .to_numpy(dtype=int)
+            )
+        else:
+            prod = np.zeros(len(sub_clean), dtype=int)
+
+        # Combine all features
+        X_all = np.column_stack([price, disc, evt, prod])
         y_all = sub_clean["shipped_units"].to_numpy(dtype=float)
         w_all = sub_clean["wt"].to_numpy(dtype=float)
+
         return X_all, y_all, w_all
-
-    def _ensure_factor_domain(
-        self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8
-    ):
-        """
-        Make sure all categories present in X_pred[:, fac_col] exist in the
-        training design given to pyGAM. If missing, append one pseudo-row per
-        missing level with tiny weight (eps).
-        """
-        xt = np.asarray(X_train)
-        xp = np.asarray(X_pred)
-
-        train_lvls = np.unique(xt[:, fac_col])
-        pred_lvls = np.unique(xp[:, fac_col])
-        missing = np.setdiff1d(pred_lvls, train_lvls)
-
-        if missing.size == 0:
-            return X_train, y_train, w_train
-
-        # use medians for numeric columns as placeholders
-        price_med = np.median(xt[:, 0].astype(float)) if xt.shape[1] > 0 else 0.0
-        disc_med = np.median(xt[:, 1].astype(float)) if xt.shape[1] > 1 else 0.0
-
-        X_extra = np.column_stack(
-            [
-                np.full(missing.size, price_med, dtype=float),
-                np.full(missing.size, disc_med, dtype=float),
-                missing.astype(float),  # factor column
-            ]
-        )
-
-        y_extra = np.full(
-            missing.size, np.median(y_train) if len(y_train) else 0.0, dtype=float
-        )
-        if w_train is None:
-            w_train = np.ones(len(y_train), dtype=float)
-
-        w_extra = np.full(missing.size, float(eps), dtype=float)
-
-        X_aug = np.vstack([xt, X_extra])
-        y_aug = np.concatenate([y_train, y_extra])
-        w_aug = np.concatenate([w_train, w_extra])
-        return X_aug, y_aug, w_aug
 
     @staticmethod
     def _bootstrap_weights(n_rows: int, sample_idx: np.ndarray) -> np.ndarray:
@@ -940,84 +1008,54 @@ class GAMModeler:
         if mean > 0:
             w /= mean
         return w
-    
-    def _fit_expectiles(self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)) -> dict:
-        """
-        Fits multiple expectiles using only basic weights.
-        Simplified to remove complex weight adjustments and edge tapering.
-        Monotonicity enforcement removed.
-        """
-        # 1) Data preparation - just ensure factor domain
+
+    def _fit_expectiles(
+        self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)
+    ) -> dict:
+        """Fits multiple expectiles using all features"""
+        # Ensure factor domain for categorical variables
         X_seed, y_seed, w_seed = self._fe_seed_domain(X_train, y_train, w_train, X_pred)
 
-        # 2) Core fitting
+        # Core fitting
         preds = {}
-        
         for q in qs:
-            # This is where parameter search happens for each quantile
             fit_result = self._fe_fit_one_expectile(q, X_seed, y_seed, X_pred, w_seed)
-            
-            if fit_result:  # Only update if we got valid predictions
+            if fit_result:
                 preds.update(fit_result)
-                
-            # Add logging here to track progress per quantile
-            if self.verbose:
-                print(f"Fitted expectile {q} with {len(X_seed)} points")
 
-        # Just ensure non-negativity without enforcing monotonicity
+        # Ensure non-negativity
         for k in preds:
-            if k.startswith('units_pred_'):
+            if k.startswith("units_pred_"):
                 preds[k] = np.maximum(preds[k], 0.0)
-                
-                # Handle standard deviation estimates if present
-                sd_key = f"{k}_sd"
-                if sd_key in preds:
-                    preds[sd_key] = np.maximum(preds[sd_key], 0.0)
-
-        # Add summary logging here if needed
-        if self.verbose:
-            print(f"Completed all {len(qs)} expectiles")
 
         return preds
 
     # ---- helpers ----
-    def _fe_seed_domain(self, X_train, y_train, w_train, X_pred, fac_col=2, eps=1e-8):
-        return self._ensure_factor_domain(
-            X_train, y_train, w_train, X_pred, fac_col=fac_col, eps=eps
+
+    def _fe_seed_domain(self, X_train, y_train, w_train, X_pred, eps=1e-8):
+        """Use ParamSearchCV's ensure_factor_domain method"""
+        return self.param_search._ensure_factor_domain(
+            X_train, y_train, w_train, X_pred, fac_cols=[2, 3], eps=eps
         )
 
     def _fe_fit_one_expectile(self, q, X_seed, y_seed, X_pred, w_robust):
-        """
-        Fit single expectile - simplified version
-        """
-        try:
-            self.param_search.expectile = q
-            
-            # Get model (ignore weights)
-            best_gam, _ = self.param_search.fit(
-                X_seed[:, [0]], y_seed, w_robust, verbose=self.verbose
-            )
+        """Fit single expectile with all features"""
+        self.param_search.expectile = q
 
-            if best_gam is None:
-                return {}
+        # Use all features
+        best_gam, _ = self.param_search.fit(
+            X_seed, y_seed, w_robust, verbose=self.verbose
+        )
 
-            # Generate predictions
-            X_pred_price = X_pred[:, [0]]
-            predictions = {}
-
-            # Set expectile and generate prediction
-            best_gam.expectile = q
-            pred = np.maximum(best_gam.predict(X_pred_price), 0.0)
-            predictions[f"units_pred_{q}"] = pred
-
-            return predictions
-
-        except Exception as e:
-            print(f"Error in fit_once: {str(e)}")
+        if best_gam is None:
             return {}
 
-        
+        # Set expectile and get prediction
+        best_gam.expectile = q
+        predictions = {}
+        predictions[f"units_pred_{q}"] = np.maximum(best_gam.predict(X_pred), 0.0)
 
+        return predictions
 
     def _assemble_group_results(
         self, sub_clean: pd.DataFrame, preds: dict, weights: dict = None
@@ -1163,8 +1201,8 @@ class GAMModeler:
             preds = self._fit_expectiles(X_tr, y_tr, w_tr, X_pred)
 
             # Get weights from predictions if they exist
-            weights = preds.get('optimization_weights', None)
-            
+            weights = preds.get("optimization_weights", None)
+
             # Store weights for this product if they exist
             if weights:
                 all_weights[product_name] = weights
@@ -1198,14 +1236,13 @@ class Optimizer:
     @staticmethod
     def run(all_gam_results: pd.DataFrame) -> dict:
         """Calculate weighted predictions based on ratio"""
-
         if "ratio" in all_gam_results.columns:
-            # Normalize ratio to 0-1 range for weighting
             max_ratio = all_gam_results["ratio"].max()
             confidence_weight = 1 - (all_gam_results["ratio"] / max_ratio)
         else:
-            confidence_weight = 0.5  # Default to equal weighting
+            confidence_weight = 0.5
 
+        # Calculate weighted prediction
         all_gam_results["weighted_pred"] = all_gam_results[
             "units_pred_0.5"
         ] * confidence_weight + all_gam_results["units_pred_avg"] * (

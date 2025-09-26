@@ -247,16 +247,14 @@ class DataEngineer:
 
 
 class ParamSearchCV:
+
     def __init__(
         self,
         n_splits: int = 4,
         n_splines_grid: tuple = (15, 20, 25, 30),
         loglam_range: tuple = (np.log(50.0), np.log(1000.0)),
         lam_iters: int = 10,   
-        # Weight optimization parameters
         weight_grid: dict = None,
-        n_refinement_steps: int = 100,
-        learning_rate: float = 0.01,
         expectile: float = 0.5,
         random_state: int = 42,
         verbose: bool = False,
@@ -270,15 +268,13 @@ class ParamSearchCV:
         self.expectile = expectile
         self.verbose = verbose
 
-        # New weight optimization parameters
+        # Define default weight grid if none provided
         self.weight_grid = weight_grid or {
-            "units_pred_0.5": np.arange(0.4, 0.81, 0.1),
-            "units_pred_0.025": np.arange(0.1, 0.41, 0.1),
-            "units_pred_0.975": np.arange(0.1, 0.41, 0.1),
+            'units_pred_0.5': np.arange(0.3, 0.81, 0.05),     # Center prediction gets more weight
+            'units_pred_0.025': np.arange(0.1, 0.41, 0.05),   # Confidence bounds get less weight
+            'units_pred_0.975': np.arange(0.1, 0.41, 0.05)    # Confidence bounds get less weight
         }
-        self.n_refinement_steps = n_refinement_steps
-        self.learning_rate = learning_rate
-
+        
         # Results tracking
         self.best_score_ever = np.inf
         self.best_config_ever = None
@@ -485,24 +481,14 @@ class ParamSearchCV:
             return cfg_c, sc_c
         return cfg_d, sc_d
 
-    def _optimize_weights(
-        self, predictions: dict, y_true: np.ndarray, initial_weights: dict = None
-    ) -> Tuple[dict, float]:
+    def _optimize_weights(self, predictions: dict, y_true: np.ndarray, initial_weights: dict = None) -> Tuple[dict, float]:
         """
-        Optimize prediction weights using grid search + gradient refinement
-
-        Args:
-            predictions: Dict of different predictions
-            y_true: True target values
-            initial_weights: Optional starting weights
-
-        Returns:
-            (best_weights, best_rmse)
+        Optimize prediction weights using only grid search
         """
         pred_cols = list(predictions.keys())
         X_pred = np.column_stack([predictions[col] for col in pred_cols])
-
-        # 1. Grid Search if no initial weights
+        
+        # Grid Search (either start fresh or use initial weights)
         if initial_weights is None:
             best_weights, best_rmse = self._grid_search_weights(X_pred, y_true)
         else:
@@ -510,65 +496,47 @@ class ParamSearchCV:
             blend = sum(predictions[col] * w for col, w in best_weights.items())
             best_rmse = np.sqrt(mean_squared_error(y_true, blend))
 
-        # 2. Gradient Refinement
-        weights = np.array([best_weights[col] for col in pred_cols])
-        best_refined = weights.copy()
+        return best_weights, best_rmse
 
-        for step in range(self.n_refinement_steps):
-            # Current blend
-            y_blend = X_pred @ weights
-            error = y_blend - y_true
-            rmse = np.sqrt(np.mean(error**2))
 
-            # Add regularization
-            balance_penalty = np.std(weights) * 0.1
-            total_error = rmse + balance_penalty
-
-            # Track best
-            if total_error < best_rmse:
-                best_rmse = total_error
-                best_refined = weights.copy()
-
-            # Compute gradients
-            gradients = np.zeros_like(weights)
-            for i in range(len(weights)):
-                gradients[i] = np.mean(error * X_pred[:, i])
-                weight_diff = weights[i] - np.mean(weights)
-                gradients[i] += 0.1 * weight_diff / len(weights)
-
-            # Update and project
-            weights -= self.learning_rate * gradients
-            weights = self._project_onto_simplex(weights)
-
-            # Early stopping
-            if step > 10 and abs(total_error - best_rmse) < 1e-6:
-                break
-
-        return dict(zip(pred_cols, best_refined)), best_rmse
-
-    def _grid_search_weights(
-        self, X_pred: np.ndarray, y_true: np.ndarray
-    ) -> Tuple[dict, float]:
-        """Grid search for initial weights"""
+    def _grid_search_weights(self, X_pred: np.ndarray, y_true: np.ndarray) -> Tuple[dict, float]:
+        """Grid search for weights with more granular grid"""
         pred_cols = list(self.weight_grid.keys())
         best_weights = None
-        best_rmse = float("inf")
-
+        best_rmse = float('inf')
+        
+        # Define a more granular grid
+        weight_grid = {
+            'units_pred_0.5': np.arange(0.3, 0.81, 0.05),     # More granular steps
+            'units_pred_0.025': np.arange(0.1, 0.41, 0.05),   # More granular steps
+            'units_pred_0.975': np.arange(0.1, 0.41, 0.05)    # More granular steps
+        }
+        
         # Generate valid weight combinations
-        for weights in product(*self.weight_grid.values()):
+        for weights in product(*weight_grid.values()):
             w_dict = dict(zip(pred_cols, weights))
+            # Check if weights sum to approximately 1
             if abs(sum(w_dict.values()) - 1.0) > 1e-6:
                 continue
-
+                
             # Evaluate weights
             blend = X_pred @ np.array(list(w_dict.values()))
             rmse = np.sqrt(mean_squared_error(y_true, blend))
-
+            
             if rmse < best_rmse:
                 best_rmse = rmse
                 best_weights = w_dict
-
+                
+        if best_weights is None:
+            # Fallback to equal weights if no valid combination found
+            best_weights = {col: 1.0/len(pred_cols) for col in pred_cols}
+            blend = X_pred.mean(axis=1)
+            best_st_rmse = np.sqrt(mean_squared_error(y_true, blend))
+            
         return best_weights, best_rmse
+
+        
+
 
     def _project_onto_simplex(self, weights: np.ndarray) -> np.ndarray:
         """Project weights onto probability simplex"""
@@ -691,11 +659,10 @@ class ParamSearchCV:
 
     def fit(self, X, y, sample_weight=None, verbose=False):
         """
-        Enhanced fit method with weight optimization
+        Simplified fit method - removes weight optimization
         """
         current_best_cfg = None
         current_best_score = np.inf
-        current_best_weights = None
 
         # 1. Grid search for GAM parameters
         for ns in self.n_splines_grid:
@@ -704,9 +671,7 @@ class ParamSearchCV:
                 "expectile": self.expectile,
             }
 
-            cfg, score = self._golden_search_loglam(
-                X, y, sample_weight, base_cfg=base_cfg
-            )
+            cfg, score = self._golden_search_loglam(X, y, sample_weight, base_cfg=base_cfg)
 
             if score < current_best_score:
                 current_best_score = score
@@ -717,9 +682,7 @@ class ParamSearchCV:
                     self.best_score_ever = score
                     self.best_config_ever = cfg.copy()
                     if verbose:
-                        print(
-                            f"New best grid config found: score={score:.4f}, params={cfg}"
-                        )
+                        print(f"New best config found: score={score:.4f}, params={cfg}")
 
         # 2. Fit final model with best parameters
         if current_best_cfg is not None:
@@ -733,23 +696,7 @@ class ParamSearchCV:
                 max_iter=6000,
                 tol=2e-4,
             )
-
-            # 3. Generate predictions at different quantiles
-            predictions = {
-                "units_pred_0.025": model.predict(X),
-                "units_pred_0.5": model.predict(X),
-                "units_pred_0.975": model.predict(X),
-            }
-
-            # 4. Optimize prediction weights
-            best_weights, best_rmse = self._optimize_weights(predictions, y)
-            self.best_weights_ever = best_weights
-
-            if verbose:
-                print(f"Optimized weights: {best_weights}")
-                print(f"Final RMSE: {best_rmse:.4f}")
-
-            return model, best_weights
+            return model, None  # Return None for weights since we're not using them
 
         return None, None
 
@@ -998,13 +945,13 @@ class GAMModeler:
         """
         Fits multiple expectiles using only basic weights.
         Simplified to remove complex weight adjustments and edge tapering.
+        Monotonicity enforcement removed.
         """
         # 1) Data preparation - just ensure factor domain
         X_seed, y_seed, w_seed = self._fe_seed_domain(X_train, y_train, w_train, X_pred)
 
         # 2) Core fitting
         preds = {}
-        weights = {}
         
         for q in qs:
             # This is where parameter search happens for each quantile
@@ -1017,18 +964,11 @@ class GAMModeler:
             if self.verbose:
                 print(f"Fitted expectile {q} with {len(X_seed)} points")
 
-        # 3) Ensure predictions don't cross...
-        qkeys = sorted(
-            [k for k in preds if k.startswith("units_pred_") and not k.endswith("_sd")],
-            key=lambda k: float(k.replace("units_pred_", "")),
-        )
-
-        if qkeys:
-            P = np.vstack([preds[k] for k in qkeys])
-            P_nc = np.maximum.accumulate(P, axis=0)  # Enforce monotonicity
-            for i, k in enumerate(qkeys):
-                preds[k] = np.maximum(P_nc[i], 0.0)  # Ensure non-negative
-
+        # Just ensure non-negativity without enforcing monotonicity
+        for k in preds:
+            if k.startswith('units_pred_'):
+                preds[k] = np.maximum(preds[k], 0.0)
+                
                 # Handle standard deviation estimates if present
                 sd_key = f"{k}_sd"
                 if sd_key in preds:
@@ -1036,7 +976,7 @@ class GAMModeler:
 
         # Add summary logging here if needed
         if self.verbose:
-            print(f"Completed all {len(qs)} expectiles with monotonicity enforcement")
+            print(f"Completed all {len(qs)} expectiles")
 
         return preds
 
@@ -1048,16 +988,13 @@ class GAMModeler:
 
     def _fe_fit_one_expectile(self, q, X_seed, y_seed, X_pred, w_robust):
         """
-        Fit single expectile with optimized weights
-
-        Returns:
-            Dictionary with predictions
+        Fit single expectile - simplified version
         """
         try:
             self.param_search.expectile = q
             
-            # Get both model and weights from ParamSearchCV
-            best_gam, best_weights = self.param_search.fit(
+            # Get model (ignore weights)
+            best_gam, _ = self.param_search.fit(
                 X_seed[:, [0]], y_seed, w_robust, verbose=self.verbose
             )
 
@@ -1068,22 +1005,18 @@ class GAMModeler:
             X_pred_price = X_pred[:, [0]]
             predictions = {}
 
-            # Generate predictions for different quantiles
-            for pred_q in [0.025, 0.5, 0.975]:
-                best_gam.expectile = pred_q
-                pred = np.maximum(best_gam.predict(X_pred_price), 0.0)
-                predictions[f"units_pred_{pred_q}"] = pred
-
-            # Calculate blended prediction if weights available
-            if best_weights:
-                blend = sum(predictions[col] * w for col, w in best_weights.items())
-                predictions["blended_pred"] = blend
+            # Set expectile and generate prediction
+            best_gam.expectile = q
+            pred = np.maximum(best_gam.predict(X_pred_price), 0.0)
+            predictions[f"units_pred_{q}"] = pred
 
             return predictions
 
         except Exception as e:
             print(f"Error in fit_once: {str(e)}")
             return {}
+
+        
 
 
     def _assemble_group_results(

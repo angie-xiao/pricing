@@ -676,7 +676,6 @@ class ParamSearchCV:
 
         return float(np.mean(scores))
 
-
     def _golden_search_loglam(
         self, X, y, w, *, base_cfg, loglam_range=None, max_iters=None
     ):

@@ -4,7 +4,8 @@ import os, random
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
+from itertools import product
 
 # viz
 # import seaborn as sns
@@ -14,6 +15,7 @@ from dash_bootstrap_templates import load_figure_template
 
 # ML
 from sklearn.model_selection import KFold
+from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from pygam import ExpectileGAM, s, f, te
 
@@ -127,7 +129,7 @@ class DataEngineer:
         res["product_encoded"] = le.fit_transform(res["product"])
 
         return res
- 
+
     def prepare(self) -> pd.DataFrame:
         """
         Prepare merged & cleaned Top-N product rows for modeling.
@@ -245,150 +247,61 @@ class DataEngineer:
 
 
 class ParamSearchCV:
-    """
-    Cross-validation based "hyperparameters" AND "weights" search for price curve modeling
-        - Tuning for (1) n_splines, (2) lambda, (3) weight (time recency & rarity)
-        - Uses price-based stratification and golden-section search for efficient tuning.
-    """
-
     def __init__(
         self,
         n_splits: int = 4,
         n_splines_grid: tuple = (15, 20, 25, 30),
         loglam_range: tuple = (np.log(50.0), np.log(1000.0)),
-        # weight
-        decay_rate_grid: tuple = (-0.02, -0.01, -0.005),
-        rarity_smooth_grid: tuple = (3, 5, 7),
-        rarity_cap_grid: tuple = (1.15, 1.25, 1.35),
-        rarity_beta_grid: tuple = (0.25, 0.35, 0.45),
-        lam_iters: int = 6,
+        lam_iters: int = 10,   
+        # Weight optimization parameters
+        weight_grid: dict = None,
+        n_refinement_steps: int = 100,
+        learning_rate: float = 0.01,
         expectile: float = 0.5,
         random_state: int = 42,
+        verbose: bool = False,
     ):
+        # Existing initialization
         self.random_state = random_state
-        # hyperparameters
         self.n_splits = n_splits
         self.n_splines_grid = n_splines_grid
         self.loglam_range = loglam_range
-        self.lam_iters = lam_iters
+        self.lam_iters = lam_iters 
         self.expectile = expectile
-        # weights
-        self.decay_rate_grid = decay_rate_grid
-        self.rarity_smooth_grid = rarity_smooth_grid
-        self.rarity_cap_grid = rarity_cap_grid
-        self.rarity_beta_grid = rarity_beta_grid
-        # keep track of the best scores & configs
+        self.verbose = verbose
+
+        # New weight optimization parameters
+        self.weight_grid = weight_grid or {
+            "units_pred_0.5": np.arange(0.4, 0.81, 0.1),
+            "units_pred_0.025": np.arange(0.1, 0.41, 0.1),
+            "units_pred_0.975": np.arange(0.1, 0.41, 0.1),
+        }
+        self.n_refinement_steps = n_refinement_steps
+        self.learning_rate = learning_rate
+
+        # Results tracking
         self.best_score_ever = np.inf
         self.best_config_ever = None
-        # track best result message
-        self._gam_best_line = None 
-        
-    def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
+        self.best_weights_ever = None
+        self._gam_best_line = None
+
+    def _price_bins_for_cv(self, prices: np.ndarray, n_bins: int = 5) -> np.ndarray:
         """
-        Calculates an exponential decay weight based on time difference.
-        Assumes order_date is already synthesized/valid.
+        Create stratified bins based on price quantiles for balanced CV splits.
 
-        param
-            prepared_df (assuming that DataEngineer.prepare() has been run through)
-            decay_rate (default: -0.01)
+        Args:
+            prices: Array of prices
+            n_bins: Number of bins to create
 
-        return
-            df
+        Returns:
+            Array of bin labels (0 to n_bins-1) for each price
         """
-        df = prepared_df.copy()
-        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
-
-        today_ref = pd.Timestamp("today")
-        df["days_apart"] = (today_ref - df["order_date"]).dt.days
-        df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
-        return df
-   
-    def _rarity_multiplier(
-        self,
-        prices: np.ndarray,
-        bin_width: float | None = None,  # None = auto (Freedman–Diaconis)
-        smooth: int = 5,  # stronger smoothing
-        cap: float = 1.25,  # tighter cap than 1.35
-        beta: float = 0.35,  # softer curvature
-        tails_only: bool = True,  # <— NEW: only weight the tails
-        tail_q: float = 0.10,  # 10% tails by default
-    ) -> np.ndarray:
-        """
-        find out distribution density - assign bigger bonus points to rare points
-
-            -> (1/density)^beta -> normalize -> clip.
-            - Auto bin width via Freedman-Diaconis unless provided.
-            - Capping via light smoothing of bin counts to avoid single-bin spikes.
-            - Normalized to mean=1 so it only redistributes mass.
-
-        Returns
-            a multiplicative weight per observation that is higher in
-            low-density (rare) price regions and lower in dense regions,
-            but bounded to avoid domination by singletons.
-        """
-        p = np.asarray(prices, dtype=float).ravel()
-        n = p.size
-        if n == 0 or np.allclose(p, p[0]):
-            return np.ones_like(p)
-
-        # define safe interior (no rarity bonus there)
-        if tails_only:
-            lo, hi = np.quantile(p, [tail_q, 1.0 - tail_q])
-            in_core = (p >= lo) & (p <= hi)
-        else:
-            in_core = np.zeros_like(p, dtype=bool)
-
-        # Freedman–Diaconis bin width with guardrails
-        if bin_width is None:
-            q25, q75 = np.percentile(p, [25, 75])
-            iqr = max(q75 - q25, 1e-9)
-            bw = 2.0 * iqr / np.cbrt(n)
-            span = max(p.max() - p.min(), 1e-6)
-            bw = np.clip(bw, span / 80, span / 25)
-        else:
-            bw = float(bin_width)
-
-        edges = np.arange(p.min() - 1e-9, p.max() + bw + 1e-9, bw)
-        counts, edges = np.histogram(p, bins=edges)
-
-        if smooth and smooth > 1:
-            k = smooth + (smooth % 2 == 0)  # force odd
-            kernel = np.ones(k, dtype=float) / k
-            counts = np.convolve(counts, kernel, mode="same")
-
-        counts = np.maximum(counts, 1e-12)
-        idx = np.clip(np.digitize(p, edges) - 1, 0, len(counts) - 1)
-        c = counts[idx]
-
-        raw = (1.0 / c) ** float(beta)
-        raw /= np.mean(raw)
-
-        mult = np.clip(raw, 1.0 / float(cap), float(cap))
-        # disable rarity inside the core band
-        mult[in_core] = 1.0
-        return mult
-
-    def _make_weights(self, sub: pd.DataFrame, **kwargs) -> np.ndarray:
-        """Simplified weight calculation using only time decay and rarity"""
-        # 1) Time decay
-        decayed_df = self._time_decay(sub, decay_rate=-0.01)  # Fixed decay rate
-        w = decayed_df["time_decay_weight"].astype(float).to_numpy()
-
-        # 2) Rarity multiplier
-        rarity_mult = self._rarity_multiplier(
-            sub["price"].to_numpy(float),
-            smooth=5,
-            cap=1.25,
-            beta=0.35,
-            tails_only=True,
-            tail_q=0.10,
-        )
-        w *= rarity_mult
-
-        # Final normalization
-        w = np.clip(w, 0.25, 2.5)
-        w = w / w.mean() if w.size else w
-        return w
+        qs = np.quantile(prices, np.linspace(0, 1, n_bins + 1))
+        # Make edges strictly monotone to handle ties
+        for i in range(1, len(qs)):
+            if qs[i] <= qs[i - 1]:
+                qs[i] = qs[i - 1] + 1e-9
+        return np.clip(np.searchsorted(qs, prices, side="right") - 1, 0, n_bins - 1)
 
     def _fit_price_curve_with_anchors(
         self,
@@ -460,29 +373,11 @@ class ParamSearchCV:
 
         return gam
 
-    def _price_bins_for_cv(self, prices: np.ndarray, n_bins: int = 5) -> np.ndarray:
-        """
-        Create stratified bins based on price quantiles for balanced CV splits.
-
-        Args:
-            prices: Array of prices
-            n_bins: Number of bins to create
-
-        Returns:
-            Array of bin labels (0 to n_bins-1) for each price
-        """
-        qs = np.quantile(prices, np.linspace(0, 1, n_bins + 1))
-        # Make edges strictly monotone to handle ties
-        for i in range(1, len(qs)):
-            if qs[i] <= qs[i - 1]:
-                qs[i] = qs[i - 1] + 1e-9
-        return np.clip(np.searchsorted(qs, prices, side="right") - 1, 0, n_bins - 1)
-
     def _cv_score_anchored(self, X, y, w, *, cfg) -> float:
         """
         Score a parameter configuration using stratified K-fold CV.
 
-        Args:
+        Params:
             X: Features (price in first column)
             y: Target values
             w: Sample weights
@@ -590,66 +485,275 @@ class ParamSearchCV:
             return cfg_c, sc_c
         return cfg_d, sc_d
 
-    def _update_search_range(self, current_score, current_cfg):
-        """Update search ranges but always relative to best solution ever found"""
-        # If this is a new best score ever, update it
-        if current_score < self.best_score_ever:
-            self.best_score_ever = current_score
-            self.best_config_ever = current_cfg.copy()
-            self._gam_best_line = (
-                f"New best score {current_score:.4f} with config {current_cfg}"
-            )
+    def _optimize_weights(
+        self, predictions: dict, y_true: np.ndarray, initial_weights: dict = None
+    ) -> Tuple[dict, float]:
+        """
+        Optimize prediction weights using grid search + gradient refinement
 
-            # Use best-ever solution's parameters as center of search
-            current_loglam = np.log(self.best_config_ever["lam"])
+        Args:
+            predictions: Dict of different predictions
+            y_true: True target values
+            initial_weights: Optional starting weights
 
-            # More conservative range updates
-            if self.best_score_ever < 1.0:
-                range_width = 0.5  # Narrow search around excellent solution
-            elif self.best_score_ever < 2.0:
-                range_width = 0.7
-            else:
-                range_width = 1.0
+        Returns:
+            (best_weights, best_rmse)
+        """
+        pred_cols = list(predictions.keys())
+        X_pred = np.column_stack([predictions[col] for col in pred_cols])
 
-            # self.loglam_range = (
-            #     max(np.log(50.0), current_loglam - range_width),
-            #     min(np.log(1000.0), current_loglam + range_width),
-            # )
+        # 1. Grid Search if no initial weights
+        if initial_weights is None:
+            best_weights, best_rmse = self._grid_search_weights(X_pred, y_true)
+        else:
+            best_weights = initial_weights
+            blend = sum(predictions[col] * w for col, w in best_weights.items())
+            best_rmse = np.sqrt(mean_squared_error(y_true, blend))
+
+        # 2. Gradient Refinement
+        weights = np.array([best_weights[col] for col in pred_cols])
+        best_refined = weights.copy()
+
+        for step in range(self.n_refinement_steps):
+            # Current blend
+            y_blend = X_pred @ weights
+            error = y_blend - y_true
+            rmse = np.sqrt(np.mean(error**2))
+
+            # Add regularization
+            balance_penalty = np.std(weights) * 0.1
+            total_error = rmse + balance_penalty
+
+            # Track best
+            if total_error < best_rmse:
+                best_rmse = total_error
+                best_refined = weights.copy()
+
+            # Compute gradients
+            gradients = np.zeros_like(weights)
+            for i in range(len(weights)):
+                gradients[i] = np.mean(error * X_pred[:, i])
+                weight_diff = weights[i] - np.mean(weights)
+                gradients[i] += 0.1 * weight_diff / len(weights)
+
+            # Update and project
+            weights -= self.learning_rate * gradients
+            weights = self._project_onto_simplex(weights)
+
+            # Early stopping
+            if step > 10 and abs(total_error - best_rmse) < 1e-6:
+                break
+
+        return dict(zip(pred_cols, best_refined)), best_rmse
+
+    def _grid_search_weights(
+        self, X_pred: np.ndarray, y_true: np.ndarray
+    ) -> Tuple[dict, float]:
+        """Grid search for initial weights"""
+        pred_cols = list(self.weight_grid.keys())
+        best_weights = None
+        best_rmse = float("inf")
+
+        # Generate valid weight combinations
+        for weights in product(*self.weight_grid.values()):
+            w_dict = dict(zip(pred_cols, weights))
+            if abs(sum(w_dict.values()) - 1.0) > 1e-6:
+                continue
+
+            # Evaluate weights
+            blend = X_pred @ np.array(list(w_dict.values()))
+            rmse = np.sqrt(mean_squared_error(y_true, blend))
+
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_weights = w_dict
+
+        return best_weights, best_rmse
+
+    def _project_onto_simplex(self, weights: np.ndarray) -> np.ndarray:
+        """Project weights onto probability simplex"""
+        if np.sum(weights) == 1 and np.all(weights >= 0):
+            return weights
+
+        u = np.sort(weights)[::-1]
+        cssv = np.cumsum(u) - 1
+        rho = np.nonzero(u * np.arange(1, len(u) + 1) > cssv)[0][-1]
+        theta = cssv[rho] / (rho + 1)
+
+        return np.maximum(weights - theta, 0)
+
+    def _rarity_multiplier(
+        self,
+        prices: np.ndarray,
+        bin_width: float | None = None,  # None = auto (Freedman–Diaconis)
+        smooth: int = 5,  # stronger smoothing
+        cap: float = 1.25,  # tighter cap than 1.35
+        beta: float = 0.35,  # softer curvature
+        tails_only: bool = True,  # <— NEW: only weight the tails
+        tail_q: float = 0.10,  # 10% tails by default
+    ) -> np.ndarray:
+        """
+        find out distribution density - assign bigger bonus points to rare points
+
+            -> (1/density)^beta -> normalize -> clip.
+            - Auto bin width via Freedman-Diaconis unless provided.
+            - Capping via light smoothing of bin counts to avoid single-bin spikes.
+            - Normalized to mean=1 so it only redistributes mass.
+
+        Returns
+            a multiplicative weight per observation that is higher in
+            low-density (rare) price regions and lower in dense regions,
+            but bounded to avoid domination by singletons.
+        """
+        p = np.asarray(prices, dtype=float).ravel()
+        n = p.size
+        if n == 0 or np.allclose(p, p[0]):
+            return np.ones_like(p)
+
+        # define safe interior (no rarity bonus there)
+        if tails_only:
+            lo, hi = np.quantile(p, [tail_q, 1.0 - tail_q])
+            in_core = (p >= lo) & (p <= hi)
+        else:
+            in_core = np.zeros_like(p, dtype=bool)
+
+        # Freedman–Diaconis bin width with guardrails
+        if bin_width is None:
+            q25, q75 = np.percentile(p, [25, 75])
+            iqr = max(q75 - q25, 1e-9)
+            bw = 2.0 * iqr / np.cbrt(n)
+            span = max(p.max() - p.min(), 1e-6)
+            bw = np.clip(bw, span / 80, span / 25)
+        else:
+            bw = float(bin_width)
+
+        edges = np.arange(p.min() - 1e-9, p.max() + bw + 1e-9, bw)
+        counts, edges = np.histogram(p, bins=edges)
+
+        if smooth and smooth > 1:
+            k = smooth + (smooth % 2 == 0)  # force odd
+            kernel = np.ones(k, dtype=float) / k
+            counts = np.convolve(counts, kernel, mode="same")
+
+        counts = np.maximum(counts, 1e-12)
+        idx = np.clip(np.digitize(p, edges) - 1, 0, len(counts) - 1)
+        c = counts[idx]
+
+        raw = (1.0 / c) ** float(beta)
+        raw /= np.mean(raw)
+
+        mult = np.clip(raw, 1.0 / float(cap), float(cap))
+        # disable rarity inside the core band
+        mult[in_core] = 1.0
+        return mult
+
+    def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
+        """
+        Calculates an exponential decay weight based on time difference.
+        Assumes order_date is already synthesized/valid.
+
+        param
+            prepared_df (assuming that DataEngineer.prepare() has been run through)
+            decay_rate (default: -0.01)
+
+        return
+            df
+        """
+        df = prepared_df.copy()
+        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
+
+        today_ref = pd.Timestamp("today")
+        df["days_apart"] = (today_ref - df["order_date"]).dt.days
+        df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
+        return df
+
+    def _make_weights(self, sub: pd.DataFrame, **kwargs) -> np.ndarray:
+        """Simplified weight calculation using only time decay and rarity"""
+        # 1) Time decay
+        decayed_df = self._time_decay(sub, decay_rate=-0.01)  # Fixed decay rate
+        w = decayed_df["time_decay_weight"].astype(float).to_numpy()
+
+        # 2) Rarity multiplier
+        rarity_mult = self._rarity_multiplier(
+            sub["price"].to_numpy(float),
+            smooth=5,
+            cap=1.25,
+            beta=0.35,
+            tails_only=True,
+            tail_q=0.10,
+        )
+        w *= rarity_mult
+
+        # Final normalization
+        w = np.clip(w, 0.25, 2.5)
+        w = w / w.mean() if w.size else w
+        return w
 
     def fit(self, X, y, sample_weight=None, verbose=False):
+        """
+        Enhanced fit method with weight optimization
+        """
         current_best_cfg = None
         current_best_score = np.inf
+        current_best_weights = None
 
+        # 1. Grid search for GAM parameters
         for ns in self.n_splines_grid:
             base_cfg = {
-                'n_splines': int(ns),
-                'expectile': self.expectile,
+                "n_splines": int(ns),
+                "expectile": self.expectile,
             }
 
-            cfg, score = self._golden_search_loglam(X, y, sample_weight, base_cfg=base_cfg)
+            cfg, score = self._golden_search_loglam(
+                X, y, sample_weight, base_cfg=base_cfg
+            )
 
             if score < current_best_score:
                 current_best_score = score
                 current_best_cfg = cfg
-                
+
                 # Update best ever if applicable
                 if score < self.best_score_ever:
                     self.best_score_ever = score
                     self.best_config_ever = cfg.copy()
-                    print(f"New best grid config found: score={score:.4f}, params={cfg}")
+                    if verbose:
+                        print(
+                            f"New best grid config found: score={score:.4f}, params={cfg}"
+                        )
 
+        # 2. Fit final model with best parameters
         if current_best_cfg is not None:
-            return self._fit_price_curve_with_anchors(
-                X, y, sample_weight,
+            model = self._fit_price_curve_with_anchors(
+                X,
+                y,
+                sample_weight,
                 expectile=self.expectile,
-                n_splines=current_best_cfg['n_splines'],
-                lam=current_best_cfg['lam'],
+                n_splines=current_best_cfg["n_splines"],
+                lam=current_best_cfg["lam"],
                 max_iter=6000,
                 tol=2e-4,
             )
-        return None
 
-    
+            # 3. Generate predictions at different quantiles
+            predictions = {
+                "units_pred_0.025": model.predict(X),
+                "units_pred_0.5": model.predict(X),
+                "units_pred_0.975": model.predict(X),
+            }
+
+            # 4. Optimize prediction weights
+            best_weights, best_rmse = self._optimize_weights(predictions, y)
+            self.best_weights_ever = best_weights
+
+            if verbose:
+                print(f"Optimized weights: {best_weights}")
+                print(f"Final RMSE: {best_rmse:.4f}")
+
+            return model, best_weights
+
+        return None, None
+
+
 class GAMModeler:
 
     def __init__(
@@ -685,7 +789,6 @@ class GAMModeler:
             n_splits=4,
             n_splines_grid=(15, 20, 25, 30),
             loglam_range=(np.log(50.0), np.log(1000.0)),
-            lam_iters=6,
             random_state=random_state,
         )
 
@@ -761,7 +864,9 @@ class GAMModeler:
 
         # Time decay weights
         dec = (
-            self.param_search._time_decay(sub)["time_decay_weight"].astype(float).to_numpy()
+            self.param_search._time_decay(sub)["time_decay_weight"]
+            .astype(float)
+            .to_numpy()
         )
 
         # Rarity weights based on price distribution
@@ -888,10 +993,8 @@ class GAMModeler:
         if mean > 0:
             w /= mean
         return w
-
-    def _fit_expectiles(
-        self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)
-    ) -> dict:
+    
+    def _fit_expectiles(self, X_train, y_train, w_train, X_pred, qs=(0.025, 0.5, 0.975)) -> dict:
         """
         Fits multiple expectiles using only basic weights.
         Simplified to remove complex weight adjustments and edge tapering.
@@ -901,13 +1004,18 @@ class GAMModeler:
 
         # 2) Core fitting
         preds = {}
+        weights = {}
+        
         for q in qs:
             # This is where parameter search happens for each quantile
             fit_result = self._fe_fit_one_expectile(q, X_seed, y_seed, X_pred, w_seed)
-            preds.update(fit_result)
-
+            
+            if fit_result:  # Only update if we got valid predictions
+                preds.update(fit_result)
+                
             # Add logging here to track progress per quantile
-            _v_best(self, f"Fitted expectile {q} with {len(X_seed)} points")
+            if self.verbose:
+                print(f"Fitted expectile {q} with {len(X_seed)} points")
 
         # 3) Ensure predictions don't cross...
         qkeys = sorted(
@@ -927,9 +1035,8 @@ class GAMModeler:
                     preds[sd_key] = np.maximum(preds[sd_key], 0.0)
 
         # Add summary logging here if needed
-        _v_best(
-            self, f"Completed all {len(qs)} expectiles with monotonicity enforcement"
-        )
+        if self.verbose:
+            print(f"Completed all {len(qs)} expectiles with monotonicity enforcement")
 
         return preds
 
@@ -940,54 +1047,55 @@ class GAMModeler:
         )
 
     def _fe_fit_one_expectile(self, q, X_seed, y_seed, X_pred, w_robust):
-        def fit_once(q, boot_idx=None):
-            try:
-                self.param_search.expectile = q
-                w_boot = (
-                    w_robust
-                    if boot_idx is None
-                    else (self._bootstrap_weights(len(y_seed), boot_idx) * w_robust)
-                )
+        """
+        Fit single expectile with optimized weights
 
-                best_gam = self.param_search.fit(
-                    X_seed[:, [0]], y_seed, w_boot, verbose=self.verbose
-                )
+        Returns:
+            Dictionary with predictions
+        """
+        try:
+            self.param_search.expectile = q
+            
+            # Get both model and weights from ParamSearchCV
+            best_gam, best_weights = self.param_search.fit(
+                X_seed[:, [0]], y_seed, w_robust, verbose=self.verbose
+            )
 
-                if best_gam is not None and hasattr(best_gam, "_tuning_score"):
-                    _v_best(
-                        self,
-                        f"Expectile {q}: Found best model with score {best_gam._tuning_score:.4f}",
-                    )
+            if best_gam is None:
+                return {}
 
-                if best_gam is None:
-                    return None
+            # Generate predictions
+            X_pred_price = X_pred[:, [0]]
+            predictions = {}
 
-                X_pred_price = X_pred[:, [0]]
-                return np.maximum(best_gam.predict(X_pred_price), 0.0)
+            # Generate predictions for different quantiles
+            for pred_q in [0.025, 0.5, 0.975]:
+                best_gam.expectile = pred_q
+                pred = np.maximum(best_gam.predict(X_pred_price), 0.0)
+                predictions[f"units_pred_{pred_q}"] = pred
 
-            except Exception as e:
-                print(f"Error in fit_once: {str(e)}")
-                return None
+            # Calculate blended prediction if weights available
+            if best_weights:
+                blend = sum(predictions[col] * w for col, w in best_weights.items())
+                predictions["blended_pred"] = blend
 
-        # Add return dictionary with predictions
-        pred = fit_once(q)
-        if pred is not None:
-            return {
-                f"units_pred_{q}": pred,
-                f"units_pred_{q}_sd": np.zeros_like(
-                    pred
-                ),  # or actual SD if bootstrapping
-            }
-        return {}  # Return empty dict if fit failed
+            return predictions
+
+        except Exception as e:
+            print(f"Error in fit_once: {str(e)}")
+            return {}
+
 
     def _assemble_group_results(
-        self, sub_clean: pd.DataFrame, preds: dict
+        self, sub_clean: pd.DataFrame, preds: dict, weights: dict = None
     ) -> pd.DataFrame:
+        """
+        Assemble results including optimized blends
+        """
         res_pred = pd.DataFrame(preds, index=sub_clean.index)
-
         price_nonneg = np.maximum(sub_clean["price"].values.astype(float), 0.0)
 
-        # revenue preds + (optional) SDs from bootstrap
+        # Handle revenue predictions for individual quantiles
         for k in list(preds.keys()):
             if k.startswith("units_pred_") and not k.endswith("_sd"):
                 q = k.replace("units_pred_", "")
@@ -1002,7 +1110,13 @@ class GAMModeler:
                         res_pred[sd_col].astype(float) * price_nonneg
                     )
 
-        # clamp any unit preds that slipped (paranoia)
+        # Handle blended predictions if weights available
+        if weights and "blended_pred" in preds:
+            res_pred["revenue_pred_blend"] = (
+                res_pred["blended_pred"].astype(float) * price_nonneg
+            ).clip(lower=0.0)
+
+        # Clamp any unit predictions that slipped
         for c in [
             c
             for c in res_pred.columns
@@ -1010,6 +1124,14 @@ class GAMModeler:
         ]:
             res_pred[c] = pd.to_numeric(res_pred[c], errors="coerce").clip(lower=0.0)
 
+        # Add blend if present
+        if "blended_pred" in res_pred.columns:
+            res_pred["blended_pred"] = pd.to_numeric(
+                res_pred["blended_pred"],
+                # errors="coerce'
+            ).clip(lower=0.0)
+
+        # Core columns to keep
         keep_cols = [
             "order_date",
             "wt",
@@ -1021,16 +1143,24 @@ class GAMModeler:
             "deal_discount_percent",
             "shipped_units",
             "revenue_share_amt",
-            "split",  # NEW: carry split downstream
+            "split",
         ]
         keep_cols = [c for c in keep_cols if c in sub_clean.columns]
-        return pd.concat(
+
+        # Merge results
+        result = pd.concat(
             [
                 sub_clean[keep_cols].reset_index(drop=True),
                 res_pred.reset_index(drop=True),
             ],
             axis=1,
         )
+
+        # Store weights as metadata if available
+        if weights:
+            result.attrs["optimization_weights"] = weights
+
+        return result
 
     def _postprocess_all(self, df: pd.DataFrame) -> pd.DataFrame:
         """ """
@@ -1086,27 +1216,37 @@ class GAMModeler:
 
     def run(self) -> pd.DataFrame:
         """
-        Train per product, predict expectiles, assemble results, and postprocess.
+        Train per product with optimized weights
         """
         all_results = []
+        all_weights = {}
 
         for product_name, sub in self.topsellers.groupby("product"):
             sub_clean, X_tr, y_tr, w_tr, X_pred = self._make_design_matrix(sub)
             if sub_clean is None:
                 continue
 
+            # Changed from unpacking two values to just getting predictions
             preds = self._fit_expectiles(X_tr, y_tr, w_tr, X_pred)
 
-            group_df = self._assemble_group_results(sub_clean, preds)
+            # Get weights from predictions if they exist
+            weights = preds.get('optimization_weights', None)
+            
+            # Store weights for this product if they exist
+            if weights:
+                all_weights[product_name] = weights
+
+            group_df = self._assemble_group_results(sub_clean, preds, weights)
             all_results.append(group_df)
 
             if self.verbose and hasattr(self, "_gam_best_line"):
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] GAMModeler {self._gam_best_line}",
-                    flush=True,
+                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"GAMModeler {self._gam_best_line}"
                 )
+                if weights:
+                    print(f"Optimized weights: {weights}")
 
-                # reset for next product
                 del self._gam_best_line
                 self._gam_best_score = float("inf")
 
@@ -1114,6 +1254,10 @@ class GAMModeler:
             return pd.DataFrame()
 
         all_gam_results = pd.concat(all_results, axis=0, ignore_index=True)
+
+        # Store all weights in the result
+        all_gam_results.attrs["all_optimization_weights"] = all_weights
+
         return self._postprocess_all(all_gam_results)
 
 
@@ -1162,8 +1306,9 @@ class PricingPipeline:
             n_splits=4,
             n_splines_grid=(15, 20, 25, 30),
             loglam_range=(np.log(50.0), np.log(1000.0)),
-            lam_iters=6,
+            expectile=0.5,
             random_state=42,
+            verbose=False,
         )
 
     @classmethod

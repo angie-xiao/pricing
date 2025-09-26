@@ -272,79 +272,123 @@ class ParamSearchCV:
         self.scalers = {"price": StandardScaler(), "discount": StandardScaler()}
 
     def _adaptive_grid_search(self, X, y, sample_weight=None):
-        """Adaptive grid search that narrows parameters based on performance"""
+        """Adaptive grid search that incorporates elasticity and narrows parameters based on performance"""
         current_best_cfg = None
         current_best_score = np.inf
-
+        
+        # Get product information and elasticity scores
+        X_df = pd.DataFrame(X, columns=['price', 'deal_discount_percent', 
+                                    'event_encoded', 'product_encoded'])
+        unique_products = X_df['product_encoded'].unique()
+        elasticity_scores = getattr(self, 'elasticity_scores', {})
+        
+        # Add minimum improvement threshold
+        min_improvement = 0.01  # 1% improvement threshold
+        
         # Phase 1: Wide search with fewer iterations
-        n_splines_grid = self.initial_n_splines
-        loglam_range = self.initial_loglam_range
         initial_lam_iters = max(5, self.lam_iters // 2)
-
-        # First pass with wide grid
+        
+        # Adjust search space based on average elasticity of products
+        mean_elasticity = np.mean([elasticity_scores.get(p, 0.5) for p in unique_products])
+        
+        if mean_elasticity > 0.7:  # High elasticity group
+            n_splines_grid = (25, 30, 35)  # More flexible
+            loglam_range = (np.log(30.0), np.log(500.0))  # Lower smoothing
+        elif mean_elasticity < 0.3:  # Low elasticity group
+            n_splines_grid = (10, 15, 20)  # Less flexible
+            loglam_range = (np.log(200.0), np.log(2000.0))  # Higher smoothing
+        else:  # Medium elasticity group
+            n_splines_grid = self.initial_n_splines
+            loglam_range = self.initial_loglam_range
+        
+        # First pass with elasticity-adjusted grid
         for ns in n_splines_grid:
             base_cfg = {
                 "n_splines": int(ns),
                 "expectile": self.expectile,
             }
-
+            
             cfg, score = self._golden_search_loglam(
-                X,
-                y,
-                sample_weight,
+                X, y, sample_weight, 
                 base_cfg=base_cfg,
                 loglam_range=loglam_range,
-                max_iters=initial_lam_iters,
+                max_iters=initial_lam_iters
             )
-
-            if score < current_best_score:
+            
+            if current_best_score == np.inf:  # First iteration
                 current_best_score = score
                 current_best_cfg = cfg
-
-        # Phase 2: Refined search near best configuration
+                if self.verbose:
+                    print(f"Initial score: {score:.4f}")
+            elif score < current_best_score:
+                rel_improvement = (current_best_score - score) / current_best_score
+                current_best_score = score
+                current_best_cfg = cfg
+                if self.verbose:
+                    print(f"Improvement: {rel_improvement:.3%}, New score: {score:.4f}")
+        
+        # Phase 2: Only proceed if phase 1 found good results
         if current_best_cfg is not None:
             best_ns = current_best_cfg["n_splines"]
             best_lam = np.log(current_best_cfg["lam"])
-
-            # Narrow the search space around best values
-            refined_ns = [max(10, best_ns - 5), best_ns, min(35, best_ns + 5)]
+            phase1_best_score = current_best_score
+            
+            # Narrow the search space around best values, adjusted by elasticity
+            if mean_elasticity > 0.7:
+                ns_step = 7  # Larger steps for high elasticity
+                lam_range = 0.7  # Wider lambda range
+            elif mean_elasticity < 0.3:
+                ns_step = 3  # Smaller steps for low elasticity
+                lam_range = 0.3  # Narrower lambda range
+            else:
+                ns_step = 5  # Default steps
+                lam_range = 0.5  # Default range
+                
+            refined_ns = [
+                max(10, best_ns - ns_step),
+                best_ns,
+                min(35, best_ns + ns_step)
+            ]
             refined_loglam = (
-                max(self.initial_loglam_range[0], best_lam - 0.5),
-                min(self.initial_loglam_range[1], best_lam + 0.5),
+                max(self.initial_loglam_range[0], best_lam - lam_range),
+                min(self.initial_loglam_range[1], best_lam + lam_range)
             )
-
+            
             # Only do refined search if initial search was promising
-            if current_best_score < self.best_score_ever * (
-                1 + self._adaptive_threshold
-            ):
+            if current_best_score < self.best_score_ever * (1 + self._adaptive_threshold):
                 for ns in refined_ns:
                     base_cfg = {
                         "n_splines": int(ns),
                         "expectile": self.expectile,
                     }
-
+                    
                     cfg, score = self._golden_search_loglam(
-                        X,
-                        y,
-                        sample_weight,
+                        X, y, sample_weight,
                         base_cfg=base_cfg,
                         loglam_range=refined_loglam,
-                        max_iters=self.lam_iters,
+                        max_iters=self.lam_iters
                     )
-
+                    
                     if score < current_best_score:
+                        rel_improvement = (current_best_score - score) / current_best_score
                         current_best_score = score
                         current_best_cfg = cfg
-
+                        if self.verbose:
+                            print(f"Phase 2 improvement: {rel_improvement:.3%}, New score: {score:.4f}")
+                
+                # Only stop if phase 2 didn't improve significantly over phase 1
+                total_improvement = (phase1_best_score - current_best_score) / phase1_best_score
+                if total_improvement < min_improvement:
+                    if self.verbose:
+                        print(f"Phase 2 total improvement ({total_improvement:.3%}) below threshold")
+        
         # Update best ever if improved
         if current_best_score < self.best_score_ever:
             self.best_score_ever = current_best_score
             self.best_config_ever = current_best_cfg.copy()
             if self.verbose:
-                print(
-                    f"New best config found: score={current_best_score:.4f}, params={current_best_cfg}"
-                )
-
+                print(f"New best config found: score={current_best_score:.4f}, params={current_best_cfg}")
+        
         return current_best_cfg, current_best_score
 
     def _preprocess_features(self, X, fit=False):
@@ -489,22 +533,42 @@ class ParamSearchCV:
             if qs[i] <= qs[i - 1]:
                 qs[i] = qs[i - 1] + 1e-9
         return np.clip(np.searchsorted(qs, prices, side="right") - 1, 0, n_bins - 1)
-    
+
     def _cv_score_anchored(self, X, y, w, *, cfg) -> float:
         """
-        Score a parameter configuration using stratified K-fold CV.
+        Score a parameter configuration using stratified K-fold CV with elasticity awareness.
+        
+        Args:
+            X: Input array with named columns [price, discount, event_encoded, product_encoded]
+            y: Target values
+            w: Sample weights
+            cfg: Configuration dictionary with model parameters
+        
+        Returns:
+            float: Average score across folds, adjusted for elasticity
         """
         rng = np.random.default_rng(self.random_state)
         X = np.asarray(X, float)
         y = np.asarray(y, float)
-        p = X[:, 0]  # prices
+        p = X[:, 0]  # prices still in first column
         w = None if w is None else np.asarray(w, float)
 
+        # Create DataFrame for feature access by name
+        X_df = pd.DataFrame(X, columns=['price', 'deal_discount_percent', 
+                                    'event_encoded', 'product_encoded'])
+        
         # Get unique categories for each categorical feature
-        event_cats = np.unique(X[:, 2])
-        prod_cats = np.unique(X[:, 3])
+        event_cats = np.unique(X_df['event_encoded'])
+        prod_cats = np.unique(X_df['product_encoded'])
 
-        # Stratify by price bins
+        # Get elasticity scores
+        elasticity_scores = getattr(self, 'elasticity_scores', {})
+        product_encoding = getattr(self, 'product_encoding', {})
+        
+        # Reverse product encoding mapping for score lookup
+        rev_encoding = {v: k for k, v in product_encoding.items()} if product_encoding else {}
+
+        # Stratify by price bins and elasticity groups
         bins = self._price_bins_for_cv(p, n_bins=5)
         idx = np.arange(len(p))
         rng.shuffle(idx)
@@ -535,34 +599,83 @@ class ParamSearchCV:
 
             # Preprocess validation features and ensure categories are in training domain
             X_va = X[va].copy()
-            X_va[:, 2] = np.clip(X_va[:, 2], event_cats.min(), event_cats.max())
-            X_va[:, 3] = np.clip(X_va[:, 3], prod_cats.min(), prod_cats.max())
+            X_va_df = X_df.iloc[va].copy()
+            
+            # Clip categorical features to training domain
+            X_va_df['event_encoded'] = np.clip(
+                X_va_df['event_encoded'], event_cats.min(), event_cats.max()
+            )
+            X_va_df['product_encoded'] = np.clip(
+                X_va_df['product_encoded'], prod_cats.min(), prod_cats.max()
+            )
+            
+            # Update X_va with clipped values
+            X_va[:, 2] = X_va_df['event_encoded']
+            X_va[:, 3] = X_va_df['product_encoded']
+            
+            # Preprocess validation features
             X_va_processed = self._preprocess_features(X_va, fit=False)
 
             # Score on validation fold
             yhat = gam.predict(X_va_processed).astype(float)
             resid2 = (y[va] - yhat) ** 2
 
-            # Weighted or unweighted RMSE
+            # Get unique products in validation fold
+            val_products = X_va_df['product_encoded'].unique()
+            
+            # Calculate elasticity-weighted RMSE
             if w is None:
-                rmse = float(np.sqrt(resid2.mean()))
+                # If no sample weights, use elasticity-based weighting
+                fold_weights = np.ones_like(y[va], dtype=float)
+                for prod_encoded in val_products:
+                    prod_name = rev_encoding.get(prod_encoded)
+                    if prod_name is None:
+                        continue
+                        
+                    elasticity = elasticity_scores.get(prod_name, 0.5)
+                    prod_mask = X_va_df['product_encoded'] == prod_encoded
+                    
+                    # Adjust weights based on elasticity
+                    if elasticity > 0.7:  # High elasticity
+                        fold_weights[prod_mask] = 1.3  # Higher weight for elastic products
+                    elif elasticity < 0.3:  # Low elasticity
+                        fold_weights[prod_mask] = 0.7  # Lower weight for inelastic products
+                    
+                fold_weights /= fold_weights.mean()  # Normalize weights
+                rmse = float(np.sqrt((resid2 * fold_weights).mean()))
             else:
+                # If sample weights provided, combine with elasticity weights
                 ww = w[va] / max(w[va].sum(), 1e-12)
                 rmse = float(np.sqrt((resid2 * ww).sum()))
 
-            # Add curvature penalty
+            # Add curvature penalty adjusted by elasticity
             order = np.argsort(X[va, 0])
             yv = yhat[order]
+            
             if yv.size >= 5:
                 dd = np.abs(np.diff(yv, n=2))
                 denom = max(np.mean(np.abs(yv)), 1e-9)
-                curvature = float(np.mean(dd) / denom)
+                base_curvature = float(np.mean(dd) / denom)
+                
+                # Adjust curvature penalty by mean elasticity of validation products
+                mean_elasticity = np.mean([
+                    elasticity_scores.get(rev_encoding.get(p), 0.5) 
+                    for p in val_products
+                ])
+                
+                if mean_elasticity > 0.7:
+                    curvature = base_curvature * 0.5  # Reduce penalty for elastic products
+                elif mean_elasticity < 0.3:
+                    curvature = base_curvature * 1.5  # Increase penalty for inelastic products
+                else:
+                    curvature = base_curvature
             else:
                 curvature = 0.0
 
             scores.append(rmse * (1.0 + 0.7 * curvature))
 
         return float(np.mean(scores))
+
 
     def _golden_search_loglam(
         self, X, y, w, *, base_cfg, loglam_range=None, max_iters=None
@@ -824,14 +937,55 @@ class GAMModeler:
         self.engineer = DataEngineer(None, None)
         self.engineer._verbose = self.verbose
 
-        # Initialize parameter search
+        # Calculate elasticity scores if we have data
+        if not self.topsellers.empty:
+            elasticity_df = ElasticityAnalyzer.compute(self.topsellers)
+            self.elasticity_scores = dict(
+                zip(elasticity_df['product'], elasticity_df['elasticity_score'])
+            )
+        else:
+            self.elasticity_scores = {}
+
+        # Initialize parameter search with elasticity-aware defaults
+        n_splines_grid = self._get_elasticity_adjusted_splines()
+        loglam_range = self._get_elasticity_adjusted_lambda()
+        
         self.param_search = ParamSearchCV(
             n_splits=4,
-            n_splines_grid=(15, 20, 25, 30),
-            loglam_range=(np.log(50.0), np.log(1000.0)),
+            n_splines_grid=n_splines_grid,
+            loglam_range=loglam_range,
             random_state=random_state,
         )
+        # Pass elasticity scores to param search
+        self.param_search.elasticity_scores = self.elasticity_scores
 
+
+    def _get_elasticity_adjusted_splines(self):
+        """Adjust n_splines grid based on mean elasticity"""
+        if not self.elasticity_scores:
+            return (15, 20, 25, 30)  # Default grid
+            
+        mean_elasticity = np.mean(list(self.elasticity_scores.values()))
+        
+        if mean_elasticity > 0.7:  # High elasticity
+            return (20, 25, 30, 35)  # More flexible
+        elif mean_elasticity < 0.3:  # Low elasticity
+            return (10, 15, 20, 25)  # Less flexible
+        return (15, 20, 25, 30)  # Default grid
+
+    def _get_elasticity_adjusted_lambda(self):
+        """Adjust lambda range based on mean elasticity"""
+        if not self.elasticity_scores:
+            return (np.log(50.0), np.log(1000.0))  # Default range
+            
+        mean_elasticity = np.mean(list(self.elasticity_scores.values()))
+        
+        if mean_elasticity > 0.7:  # High elasticity
+            return (np.log(30.0), np.log(500.0))  # Lower smoothing
+        elif mean_elasticity < 0.3:  # Low elasticity
+            return (np.log(100.0), np.log(2000.0))  # Higher smoothing
+        return (np.log(50.0), np.log(1000.0))  # Default range        
+        
     # --------- helpers ---------
     def _bootstrap_loops_for_size(self, n_train: int) -> int:
         if self.n_bootstrap == 0:

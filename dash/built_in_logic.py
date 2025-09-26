@@ -74,67 +74,6 @@ class DataEngineer:
         s = pd.to_numeric(s, errors="coerce").fillna(0)
         return s.clip(lower=0)
 
-    # synthesize order_date when real dates are missing
-    def _synthesize_order_dates(
-        self,
-        df: pd.DataFrame,
-        start="2023-09-17",
-        end="2025-09-17",
-        seed=42,
-        col="order_date",
-    ) -> pd.DataFrame:
-        out = df.copy()
-        start_ts = pd.to_datetime(start).value // 10**9
-        end_ts = pd.to_datetime(end).value // 10**9
-
-        rng = np.random.default_rng(seed)
-        # generate for all rows to fully override
-        rand_ts = rng.integers(start_ts, end_ts, size=len(out), endpoint=False)
-        out[col] = pd.to_datetime(rand_ts, unit="s")
-        return out
-
-    def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
-        """
-        Calculates an exponential decay weight based on time difference.
-        Assumes order_date is already synthesized/valid.
-
-        param
-            prepared_df (assuming that DataEngineer.prepare() has been run through)
-            decay_rate (default: -0.01)
-
-        return
-            df
-        """
-        df = prepared_df.copy()
-        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
-
-        today_ref = pd.Timestamp("today")
-        df["days_apart"] = (today_ref - df["order_date"]).dt.days
-        df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
-        return df
-
-    def _make_weights(self, sub: pd.DataFrame, **kwargs) -> np.ndarray:
-        """Simplified weight calculation using only time decay and rarity"""
-        # 1) Time decay
-        decayed_df = self._time_decay(sub, decay_rate=-0.01)  # Fixed decay rate
-        w = decayed_df["time_decay_weight"].astype(float).to_numpy()
-
-        # 2) Rarity multiplier
-        rarity_mult = self._rarity_multiplier(
-            sub["price"].to_numpy(float),
-            smooth=5,
-            cap=1.25,
-            beta=0.35,
-            tails_only=True,
-            tail_q=0.10,
-        )
-        w *= rarity_mult
-
-        # Final normalization
-        w = np.clip(w, 0.25, 2.5)
-        w = w / w.mean() if w.size else w
-        return w
-
     def _days_at_price(self, df) -> pd.DataFrame:
         """
         add a column for the number of days where an ASP was sold at
@@ -160,6 +99,25 @@ class DataEngineer:
 
         return res
 
+    # synthesize order_date when real dates are missing
+    def _synthesize_order_dates(
+        self,
+        df: pd.DataFrame,
+        start="2023-09-17",
+        end="2025-09-17",
+        seed=42,
+        col="order_date",
+    ) -> pd.DataFrame:
+        out = df.copy()
+        start_ts = pd.to_datetime(start).value // 10**9
+        end_ts = pd.to_datetime(end).value // 10**9
+
+        rng = np.random.default_rng(seed)
+        # generate for all rows to fully override
+        rand_ts = rng.integers(start_ts, end_ts, size=len(out), endpoint=False)
+        out[col] = pd.to_datetime(rand_ts, unit="s")
+        return out
+
     def _label_encoder(self, df) -> pd.DataFrame:
         """label encoding categorical variable"""
         le = LabelEncoder()
@@ -169,92 +127,7 @@ class DataEngineer:
         res["product_encoded"] = le.fit_transform(res["product"])
 
         return res
-
-    @staticmethod
-    def _rarity_multiplier(
-        prices: np.ndarray,
-        bin_width: float | None = None,  # None = auto (Freedman–Diaconis)
-        smooth: int = 5,  # stronger smoothing
-        cap: float = 1.25,  # tighter cap than 1.35
-        beta: float = 0.35,  # softer curvature
-        tails_only: bool = True,  # <— NEW: only weight the tails
-        tail_q: float = 0.10,  # 10% tails by default
-    ) -> np.ndarray:
-        """
-        find out distribution density - assign bigger bonus points to rare points
-
-            -> (1/density)^beta -> normalize -> clip.
-            - Auto bin width via Freedman-Diaconis unless provided.
-            - Capping via light smoothing of bin counts to avoid single-bin spikes.
-            - Normalized to mean=1 so it only redistributes mass.
-
-        Returns
-            a multiplicative weight per observation that is higher in
-            low-density (rare) price regions and lower in dense regions,
-            but bounded to avoid domination by singletons.
-        """
-        p = np.asarray(prices, dtype=float).ravel()
-        n = p.size
-        if n == 0 or np.allclose(p, p[0]):
-            return np.ones_like(p)
-
-        # define safe interior (no rarity bonus there)
-        if tails_only:
-            lo, hi = np.quantile(p, [tail_q, 1.0 - tail_q])
-            in_core = (p >= lo) & (p <= hi)
-        else:
-            in_core = np.zeros_like(p, dtype=bool)
-
-        # Freedman–Diaconis bin width with guardrails
-        if bin_width is None:
-            q25, q75 = np.percentile(p, [25, 75])
-            iqr = max(q75 - q25, 1e-9)
-            bw = 2.0 * iqr / np.cbrt(n)
-            span = max(p.max() - p.min(), 1e-6)
-            bw = np.clip(bw, span / 80, span / 25)
-        else:
-            bw = float(bin_width)
-
-        edges = np.arange(p.min() - 1e-9, p.max() + bw + 1e-9, bw)
-        counts, edges = np.histogram(p, bins=edges)
-
-        if smooth and smooth > 1:
-            k = smooth + (smooth % 2 == 0)  # force odd
-            kernel = np.ones(k, dtype=float) / k
-            counts = np.convolve(counts, kernel, mode="same")
-
-        counts = np.maximum(counts, 1e-12)
-        idx = np.clip(np.digitize(p, edges) - 1, 0, len(counts) - 1)
-        c = counts[idx]
-
-        raw = (1.0 / c) ** float(beta)
-        raw /= np.mean(raw)
-
-        mult = np.clip(raw, 1.0 / float(cap), float(cap))
-        # disable rarity inside the core band
-        mult[in_core] = 1.0
-        return mult
-
-    @staticmethod
-    def _cap_local_leverage(
-        w: np.ndarray, prices: np.ndarray, window: int = 7, lcap: float = 1.4
-    ) -> np.ndarray:
-        """Limit each point's weight to <= lcap × local-mean(weight) in price order."""
-        w = np.asarray(w, dtype=float)
-        x = np.asarray(prices, dtype=float)
-        order = np.argsort(x)
-        ws = w[order].copy()
-        m = max(1, window // 2)
-        n = len(ws)
-        for i in range(n):
-            lo, hi = max(0, i - m), min(n, i + m + 1)
-            mu = float(ws[lo:hi].mean())
-            if mu > 0:
-                ws[i] = min(ws[i], lcap * mu)
-        out = np.empty_like(ws)
-        out[order] = ws
-        return out
-
+ 
     def prepare(self) -> pd.DataFrame:
         """
         Prepare merged & cleaned Top-N product rows for modeling.
@@ -373,8 +246,8 @@ class DataEngineer:
 
 class ParamSearchCV:
     """
-    Cross-validation based parameter search for price curve modeling
-        - Tuning for (1) n_splines, (2) lambda;
+    Cross-validation based "hyperparameters" AND "weights" search for price curve modeling
+        - Tuning for (1) n_splines, (2) lambda, (3) weight (time recency & rarity)
         - Uses price-based stratification and golden-section search for efficient tuning.
     """
 
@@ -383,19 +256,139 @@ class ParamSearchCV:
         n_splits: int = 4,
         n_splines_grid: tuple = (15, 20, 25, 30),
         loglam_range: tuple = (np.log(50.0), np.log(1000.0)),
+        # weight
+        decay_rate_grid: tuple = (-0.02, -0.01, -0.005),
+        rarity_smooth_grid: tuple = (3, 5, 7),
+        rarity_cap_grid: tuple = (1.15, 1.25, 1.35),
+        rarity_beta_grid: tuple = (0.25, 0.35, 0.45),
         lam_iters: int = 6,
         expectile: float = 0.5,
         random_state: int = 42,
     ):
+        self.random_state = random_state
+        # hyperparameters
         self.n_splits = n_splits
         self.n_splines_grid = n_splines_grid
         self.loglam_range = loglam_range
         self.lam_iters = lam_iters
         self.expectile = expectile
-        self.random_state = random_state
-        # Track best solution ever found
+        # weights
+        self.decay_rate_grid = decay_rate_grid
+        self.rarity_smooth_grid = rarity_smooth_grid
+        self.rarity_cap_grid = rarity_cap_grid
+        self.rarity_beta_grid = rarity_beta_grid
+        # keep track of the best scores & configs
         self.best_score_ever = np.inf
         self.best_config_ever = None
+        # track best result message
+        self._gam_best_line = None 
+        
+    def _time_decay(self, prepared_df, decay_rate=-0.01) -> pd.DataFrame:
+        """
+        Calculates an exponential decay weight based on time difference.
+        Assumes order_date is already synthesized/valid.
+
+        param
+            prepared_df (assuming that DataEngineer.prepare() has been run through)
+            decay_rate (default: -0.01)
+
+        return
+            df
+        """
+        df = prepared_df.copy()
+        df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
+
+        today_ref = pd.Timestamp("today")
+        df["days_apart"] = (today_ref - df["order_date"]).dt.days
+        df["time_decay_weight"] = np.exp(decay_rate * df["days_apart"].fillna(0))
+        return df
+   
+    def _rarity_multiplier(
+        self,
+        prices: np.ndarray,
+        bin_width: float | None = None,  # None = auto (Freedman–Diaconis)
+        smooth: int = 5,  # stronger smoothing
+        cap: float = 1.25,  # tighter cap than 1.35
+        beta: float = 0.35,  # softer curvature
+        tails_only: bool = True,  # <— NEW: only weight the tails
+        tail_q: float = 0.10,  # 10% tails by default
+    ) -> np.ndarray:
+        """
+        find out distribution density - assign bigger bonus points to rare points
+
+            -> (1/density)^beta -> normalize -> clip.
+            - Auto bin width via Freedman-Diaconis unless provided.
+            - Capping via light smoothing of bin counts to avoid single-bin spikes.
+            - Normalized to mean=1 so it only redistributes mass.
+
+        Returns
+            a multiplicative weight per observation that is higher in
+            low-density (rare) price regions and lower in dense regions,
+            but bounded to avoid domination by singletons.
+        """
+        p = np.asarray(prices, dtype=float).ravel()
+        n = p.size
+        if n == 0 or np.allclose(p, p[0]):
+            return np.ones_like(p)
+
+        # define safe interior (no rarity bonus there)
+        if tails_only:
+            lo, hi = np.quantile(p, [tail_q, 1.0 - tail_q])
+            in_core = (p >= lo) & (p <= hi)
+        else:
+            in_core = np.zeros_like(p, dtype=bool)
+
+        # Freedman–Diaconis bin width with guardrails
+        if bin_width is None:
+            q25, q75 = np.percentile(p, [25, 75])
+            iqr = max(q75 - q25, 1e-9)
+            bw = 2.0 * iqr / np.cbrt(n)
+            span = max(p.max() - p.min(), 1e-6)
+            bw = np.clip(bw, span / 80, span / 25)
+        else:
+            bw = float(bin_width)
+
+        edges = np.arange(p.min() - 1e-9, p.max() + bw + 1e-9, bw)
+        counts, edges = np.histogram(p, bins=edges)
+
+        if smooth and smooth > 1:
+            k = smooth + (smooth % 2 == 0)  # force odd
+            kernel = np.ones(k, dtype=float) / k
+            counts = np.convolve(counts, kernel, mode="same")
+
+        counts = np.maximum(counts, 1e-12)
+        idx = np.clip(np.digitize(p, edges) - 1, 0, len(counts) - 1)
+        c = counts[idx]
+
+        raw = (1.0 / c) ** float(beta)
+        raw /= np.mean(raw)
+
+        mult = np.clip(raw, 1.0 / float(cap), float(cap))
+        # disable rarity inside the core band
+        mult[in_core] = 1.0
+        return mult
+
+    def _make_weights(self, sub: pd.DataFrame, **kwargs) -> np.ndarray:
+        """Simplified weight calculation using only time decay and rarity"""
+        # 1) Time decay
+        decayed_df = self._time_decay(sub, decay_rate=-0.01)  # Fixed decay rate
+        w = decayed_df["time_decay_weight"].astype(float).to_numpy()
+
+        # 2) Rarity multiplier
+        rarity_mult = self._rarity_multiplier(
+            sub["price"].to_numpy(float),
+            smooth=5,
+            cap=1.25,
+            beta=0.35,
+            tails_only=True,
+            tail_q=0.10,
+        )
+        w *= rarity_mult
+
+        # Final normalization
+        w = np.clip(w, 0.25, 2.5)
+        w = w / w.mean() if w.size else w
+        return w
 
     def _fit_price_curve_with_anchors(
         self,
@@ -624,46 +617,39 @@ class ParamSearchCV:
             # )
 
     def fit(self, X, y, sample_weight=None, verbose=False):
-        """ """
-        current_best_cfg, current_best_sc = None, np.inf
+        current_best_cfg = None
+        current_best_score = np.inf
 
-        # Regular grid search
         for ns in self.n_splines_grid:
-            try:
-                cfg, sc = self._golden_search_loglam(
-                    X[:, [0]],
-                    y,
-                    sample_weight,
-                    base_cfg=dict(
-                        expectile=self.expectile,
-                        n_splines=int(ns),
-                        max_iter=6000,
-                        tol=2e-4,
-                    ),
-                )
+            base_cfg = {
+                'n_splines': int(ns),
+                'expectile': self.expectile,
+            }
 
-                if sc < current_best_sc:
-                    current_best_sc = sc
-                    current_best_cfg = cfg
-                    self._update_search_range(current_best_sc, current_best_cfg)
+            cfg, score = self._golden_search_loglam(X, y, sample_weight, base_cfg=base_cfg)
 
-            except Exception:
-                continue
+            if score < current_best_score:
+                current_best_score = score
+                current_best_cfg = cfg
+                
+                # Update best ever if applicable
+                if score < self.best_score_ever:
+                    self.best_score_ever = score
+                    self.best_config_ever = cfg.copy()
+                    print(f"New best grid config found: score={score:.4f}, params={cfg}")
 
-        # Always use the best configuration we've ever found
-        if self.best_config_ever is not None:
+        if current_best_cfg is not None:
             return self._fit_price_curve_with_anchors(
-                X[:, [0]],
-                y,
-                sample_weight,
+                X, y, sample_weight,
                 expectile=self.expectile,
-                n_splines=self.best_config_ever["n_splines"],
-                lam=self.best_config_ever["lam"],
+                n_splines=current_best_cfg['n_splines'],
+                lam=current_best_cfg['lam'],
                 max_iter=6000,
                 tol=2e-4,
             )
+        return None
 
-
+    
 class GAMModeler:
 
     def __init__(
@@ -769,18 +755,17 @@ class GAMModeler:
 
     def _mdm_build_weights(self, sub: pd.DataFrame) -> np.ndarray:
         """Build weights using only time decay and price rarity"""
-        # Cache key based on dataframe content
         cache_key = hash(str(sub.values.tobytes()))
         if hasattr(self, "_weight_cache") and cache_key in self._weight_cache:
             return self._weight_cache[cache_key]
 
         # Time decay weights
         dec = (
-            self.engineer._time_decay(sub)["time_decay_weight"].astype(float).to_numpy()
+            self.param_search._time_decay(sub)["time_decay_weight"].astype(float).to_numpy()
         )
 
         # Rarity weights based on price distribution
-        rarity = self.engineer._rarity_multiplier(
+        rarity = self.param_search._rarity_multiplier(
             sub["price"].to_numpy(float),
             smooth=5,
             cap=1.25,
@@ -793,7 +778,6 @@ class GAMModeler:
         w = dec * rarity
         w = w / w.mean()
 
-        # Cache result
         if not hasattr(self, "_weight_cache"):
             self._weight_cache = {}
         self._weight_cache[cache_key] = w
@@ -1174,6 +1158,13 @@ class Optimizer:
 class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
+        self.param_search = ParamSearchCV(
+            n_splits=4,
+            n_splines_grid=(15, 20, 25, 30),
+            loglam_range=(np.log(50.0), np.log(1000.0)),
+            lam_iters=6,
+            random_state=42,
+        )
 
     @classmethod
     def from_csv_folder(
@@ -1204,7 +1195,7 @@ class PricingPipeline:
         topsellers = self.engineer.prepare()
 
         # Add time decay and calculate elasticity
-        topsellers_decayed = self.engineer._time_decay(topsellers)
+        topsellers_decayed = self.param_search._time_decay(topsellers)
         elasticity_df = ElasticityAnalyzer.compute(topsellers_decayed)
 
         # Initialize GAMModeler without elasticity

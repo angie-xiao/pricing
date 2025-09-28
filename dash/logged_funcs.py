@@ -35,20 +35,28 @@ class ParamSearchCV:
         span = (p.max() - p.min()) or 1.0
         eps = 1e-3 * span
 
-        median_disc    = float(np.median(X[:, 1]))  # already scaled
-        median_event   = int(np.median(X[:, 2]))
+        median_disc = float(np.median(X[:, 1]))  # already scaled
+        median_event = int(np.median(X[:, 2]))
         median_product = int(np.median(X[:, 3]))
 
         X_anchor = np.array(
             [
-                [p.min() - eps, median_disc, median_event,   median_product],
-                [p.max() + eps, median_disc, median_event,   median_product],
+                [p.min() - eps, median_disc, median_event, median_product],
+                [p.max() + eps, median_disc, median_event, median_product],
             ],
             dtype=float,
         )
 
-        y_lo = float(np.median(y[p <= np.quantile(p, 0.10)])) if np.any(p <= np.quantile(p, 0.10)) else float(np.median(y))
-        y_hi = float(np.median(y[p >= np.quantile(p, 0.90)])) if np.any(p >= np.quantile(p, 0.90)) else float(np.median(y))
+        y_lo = (
+            float(np.median(y[p <= np.quantile(p, 0.10)]))
+            if np.any(p <= np.quantile(p, 0.10))
+            else float(np.median(y))
+        )
+        y_hi = (
+            float(np.median(y[p >= np.quantile(p, 0.90)]))
+            if np.any(p >= np.quantile(p, 0.90))
+            else float(np.median(y))
+        )
         y_anchor = np.array([y_lo, y_hi], dtype=float)
 
         # Tiny anchor weights
@@ -59,7 +67,6 @@ class ParamSearchCV:
 
         X_aug = np.vstack([X, X_anchor])
         y_aug = np.concatenate([y, y_anchor])
-
 
         # Create proper TermList
         terms = te(0, 1, n_splines=[int(n_splines), 10]) + f(2) + f(3)

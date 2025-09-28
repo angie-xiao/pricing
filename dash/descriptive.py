@@ -64,7 +64,6 @@ def layout(products):
             ),
             # breathing room bottom
             html.Div(style={"height": "16px"}),
-
             # Footer
             html.Div(
                 [
@@ -81,7 +80,7 @@ def layout(products):
                 style={
                     "display": "flex",
                     "flexDirection": "column",
-                    "alignItems": "center",      # horizontal center
+                    "alignItems": "center",  # horizontal center
                     "justifyContent": "center",  # vertical center
                     "height": "80px",
                     "fontSize": "0.8em",
@@ -91,7 +90,7 @@ def layout(products):
                     "width": "100%",
                     "marginTop": "40px",
                 },
-            )
+            ),
         ],
         fluid=True,
     )

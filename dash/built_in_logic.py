@@ -19,7 +19,7 @@ from sklearn.model_selection import KFold
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
 from sklearn.metrics import mean_squared_error
-from pygam import ExpectileGAM,s,l
+from pygam import ExpectileGAM, s, l
 from sklearn.ensemble import GradientBoostingRegressor
 
 # local import
@@ -27,12 +27,20 @@ from helpers import DataEng
 
 # ignore warnings
 import warnings
+
 warnings.filterwarnings("ignore")
 
 
-EXPECTED_COLS = ["price", "deal_discount_percent", "event_encoded", "product_encoded", "asp", "__intercept__",]
-CAT_COLS      = ["event_encoded", "product_encoded"]
-NUM_COLS      = ["price", "deal_discount_percent"]
+EXPECTED_COLS = [
+    "price",
+    "deal_discount_percent",
+    "event_encoded",
+    "product_encoded",
+    "asp",
+    "__intercept__",
+]
+CAT_COLS = ["event_encoded", "product_encoded"]
+NUM_COLS = ["price", "deal_discount_percent"]
 
 
 def _v_best(obj, msg: str):
@@ -278,13 +286,18 @@ class Weighting:
     All methods accept/return pandas objects or numpy arrays and are robust
     to missing columns.
     """
-    def __init__(self, decay_rate: float = -0.01,
-                 rarity_smooth: int = 5,
-                 rarity_cap: float = 1.25,
-                 rarity_beta: float = 0.35,
-                 rarity_tails_only: bool = True,
-                 rarity_tail_q: float = 0.10,
-                 clip_min: float = 0.25, clip_max: float = 2.5):
+
+    def __init__(
+        self,
+        decay_rate: float = -0.01,
+        rarity_smooth: int = 5,
+        rarity_cap: float = 1.25,
+        rarity_beta: float = 0.35,
+        rarity_tails_only: bool = True,
+        rarity_tail_q: float = 0.10,
+        clip_min: float = 0.25,
+        clip_max: float = 2.5,
+    ):
         self.decay_rate = float(decay_rate)
         self.rarity_smooth = int(rarity_smooth)
         self.rarity_cap = float(rarity_cap)
@@ -309,8 +322,9 @@ class Weighting:
         days = np.where(np.isfinite(days), days, 0.0)
         return np.exp(self.decay_rate * days)
 
-    def _rarity_multiplier(self, prices: np.ndarray,
-                           bin_width: float | None = None) -> np.ndarray:
+    def _rarity_multiplier(
+        self, prices: np.ndarray, bin_width: float | None = None
+    ) -> np.ndarray:
         """
         Assigns higher weights to low-density price regions.
         Robust to constant arrays and NaNs.
@@ -350,7 +364,11 @@ class Weighting:
             counts = np.convolve(counts, kernel, mode="same")
 
         counts = np.maximum(counts, 1e-12)
-        idx = np.clip(np.digitize(np.nan_to_num(p_valid, nan=edges[0]), edges) - 1, 0, len(counts) - 1)
+        idx = np.clip(
+            np.digitize(np.nan_to_num(p_valid, nan=edges[0]), edges) - 1,
+            0,
+            len(counts) - 1,
+        )
 
         # map counts back to full vector
         c_full = np.full_like(p, np.nan, dtype=float)
@@ -369,8 +387,9 @@ class Weighting:
         return mult
 
     # ----- main entry -----
-    def _make_weights(self, df: pd.DataFrame,
-                      base_weights: Optional[np.ndarray] = None) -> np.ndarray:
+    def _make_weights(
+        self, df: pd.DataFrame, base_weights: Optional[np.ndarray] = None
+    ) -> np.ndarray:
         """
         Weighted combination: time decay * rarity (on 'price'), then clipped & normalized.
         """
@@ -398,6 +417,7 @@ class ParamSearchCV:
     - CV over (lam, n_splines)
     - fits ONE ExpectileGAM (for self.expectile) and returns it
     """
+
     def __init__(
         self,
         numeric_cols: Optional[Sequence[str]] = None,
@@ -450,7 +470,9 @@ class ParamSearchCV:
         self.elasticity_scores: Dict[Any, float] = {}
 
     # ----- dataframe & transform helpers -----
-    def _ensure_dataframe(self, X, feature_names: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    def _ensure_dataframe(
+        self, X, feature_names: Optional[Sequence[str]] = None
+    ) -> pd.DataFrame:
         if isinstance(X, pd.DataFrame):
             df = X.copy()
         else:
@@ -461,7 +483,9 @@ class ParamSearchCV:
                 df[c] = df[c].astype("string")
         return df
 
-    def _preprocess_features(self, X, fit: bool, feature_names: Optional[Sequence[str]] = None) -> np.ndarray:
+    def _preprocess_features(
+        self, X, fit: bool, feature_names: Optional[Sequence[str]] = None
+    ) -> np.ndarray:
         df = self._ensure_dataframe(X, feature_names or EXPECTED_COLS)
         Xt = self.ct.fit_transform(df) if fit else self.ct.transform(df)
         self._fitted = self._fitted or fit
@@ -474,7 +498,10 @@ class ParamSearchCV:
     # ----- core one-expectile fit (stable) -----
     def _fit_one_expectile_core(
         self,
-        X_tr, y_tr, w_tr, X_va,
+        X_tr,
+        y_tr,
+        w_tr,
+        X_va,
         *,
         expectile: float,
         lam: float = 300.0,
@@ -488,7 +515,8 @@ class ParamSearchCV:
         Always returns (y_hat_va, model).
         """
         # arrays
-        X_tr = np.asarray(X_tr, dtype=float); X_va = np.asarray(X_va, dtype=float)
+        X_tr = np.asarray(X_tr, dtype=float)
+        X_va = np.asarray(X_va, dtype=float)
         y_tr = np.asarray(y_tr, dtype=float)
 
         # remove constant columns (OHE on tiny folds)
@@ -508,7 +536,8 @@ class ParamSearchCV:
             w_tr = w_tr / (w_tr.mean() or 1.0)
 
         # scale y
-        y_mu = float(y_tr.mean()); y_sd = float(y_tr.std()) or 1.0
+        y_mu = float(y_tr.mean())
+        y_sd = float(y_tr.std()) or 1.0
         y_tr_s = (y_tr - y_mu) / y_sd
 
         # terms: smooth for first 2 cols (scaled price/discount), linear for the rest (OHE)
@@ -540,8 +569,11 @@ class ParamSearchCV:
             for j in range(1, n_feats):
                 t_lin += l(j)
             gam_lin = ExpectileGAM(
-                terms=t_lin, expectile=float(expectile),
-                lam=1e6, max_iter=8000, tol=5e-3
+                terms=t_lin,
+                expectile=float(expectile),
+                lam=1e6,
+                max_iter=8000,
+                tol=5e-3,
             )
             gam_lin.fit(X_tr, y_tr_s, weights=w_tr)
             y_hat_va = gam_lin.predict(X_va) * y_sd + y_mu
@@ -551,15 +583,27 @@ class ParamSearchCV:
 
         # constant predictor
         class _Const:
-            def __init__(self, c, q): self._c=float(c); self.expectile=float(q)
-            def predict(self, X): X=np.asarray(X); return np.full(X.shape[0], self._c, float)
+            def __init__(self, c, q):
+                self._c = float(c)
+                self.expectile = float(q)
+
+            def predict(self, X):
+                X = np.asarray(X)
+                return np.full(X.shape[0], self._c, float)
+
         const = _Const(y_mu, expectile)
         return np.full(X_va.shape[0], y_mu, float), const
 
     # ----- CV scorer (RMSE on the single expectile) -----
-    def _cv_score(self, X, y, w=None, cfg=None,
-                  n_splits: Optional[int] = None,
-                  random_state: Optional[int] = None) -> float:
+    def _cv_score(
+        self,
+        X,
+        y,
+        w=None,
+        cfg=None,
+        n_splits: Optional[int] = None,
+        random_state: Optional[int] = None,
+    ) -> float:
         cfg = cfg or {}
         lam = float(cfg.get("lam", 300.0))
         n_splines = int(cfg.get("n_splines", 20))
@@ -580,24 +624,32 @@ class ParamSearchCV:
             y_tr, y_va = y[tr_idx], y[va_idx]
 
             # per-fold weights from train fold only
-            w_tr = self.weighting._make_weights(X_tr_df, base_w[tr_idx] if base_w is not None else None)
+            w_tr = self.weighting._make_weights(
+                X_tr_df, base_w[tr_idx] if base_w is not None else None
+            )
             w_va = None if base_w is None else base_w[va_idx]
 
             X_tr = self._preprocess_features(X_tr_df, fit=True)
             X_va = self._preprocess_features(X_va_df, fit=False)
 
             y_hat, _ = self._fit_one_expectile_core(
-                X_tr, y_tr, w_tr, X_va,
-                expectile=q, lam=lam, n_splines=n_splines
+                X_tr, y_tr, w_tr, X_va, expectile=q, lam=lam, n_splines=n_splines
             )
             mse = mean_squared_error(y_va, y_hat, sample_weight=w_va)
             rmses.append(float(np.sqrt(mse)))
         return float(np.mean(rmses)) if rmses else float("inf")
 
     # ----- golden-section search over log(lam) -----
-    def _golden_search_loglam(self, X, y, w, *, base_cfg: Dict[str, Any],
-                              loglam_range: Tuple[float, float] | None = None,
-                              max_iters: Optional[int] = None) -> Tuple[Dict[str, Any], float]:
+    def _golden_search_loglam(
+        self,
+        X,
+        y,
+        w,
+        *,
+        base_cfg: Dict[str, Any],
+        loglam_range: Tuple[float, float] | None = None,
+        max_iters: Optional[int] = None,
+    ) -> Tuple[Dict[str, Any], float]:
         if loglam_range is None:
             loglam_range = self.initial_loglam_range
         if max_iters is None:
@@ -633,11 +685,19 @@ class ParamSearchCV:
         return (cfg_c, sc_c) if sc_c <= sc_d else (cfg_d, sc_d)
 
     # ----- adaptive grid over n_splines with elasticity hint (optional) -----
-    def _adaptive_grid_search(self, X, y, sample_weight=None) -> Tuple[Optional[Dict[str, Any]], float]:
+    def _adaptive_grid_search(
+        self, X, y, sample_weight=None
+    ) -> Tuple[Optional[Dict[str, Any]], float]:
         X_df = self._ensure_dataframe(X, EXPECTED_COLS)
-        unique_products = X_df["product_encoded"].unique() if "product_encoded" in X_df else []
+        unique_products = (
+            X_df["product_encoded"].unique() if "product_encoded" in X_df else []
+        )
         es = self.elasticity_scores or {}
-        mean_elasticity = float(np.mean([es.get(p, 0.5) for p in unique_products])) if len(unique_products) else 0.5
+        mean_elasticity = (
+            float(np.mean([es.get(p, 0.5) for p in unique_products]))
+            if len(unique_products)
+            else 0.5
+        )
 
         # adjust search ranges
         if mean_elasticity > 0.7:
@@ -658,8 +718,12 @@ class ParamSearchCV:
         for ns in n_splines_grid:
             base_cfg = {"n_splines": int(ns), "expectile": self.expectile}
             cfg, score = self._golden_search_loglam(
-                X, y, sample_weight, base_cfg=base_cfg,
-                loglam_range=loglam_range, max_iters=initial_lam_iters
+                X,
+                y,
+                sample_weight,
+                base_cfg=base_cfg,
+                loglam_range=loglam_range,
+                max_iters=initial_lam_iters,
             )
             if score < current_best_score:
                 current_best_score = score
@@ -673,14 +737,22 @@ class ParamSearchCV:
             best_lam_log = float(np.log(current_best_cfg["lam"]))
             ns_step = 5
             lam_window = 0.5
-            refined_ns = [max(8, best_ns - ns_step), best_ns, min(36, best_ns + ns_step)]
+            refined_ns = [
+                max(8, best_ns - ns_step),
+                best_ns,
+                min(36, best_ns + ns_step),
+            ]
             refined_loglam = (best_lam_log - lam_window, best_lam_log + lam_window)
 
             for ns in refined_ns:
                 base_cfg = {"n_splines": int(ns), "expectile": self.expectile}
                 cfg, score = self._golden_search_loglam(
-                    X, y, sample_weight,
-                    base_cfg=base_cfg, loglam_range=refined_loglam, max_iters=self.lam_iters
+                    X,
+                    y,
+                    sample_weight,
+                    base_cfg=base_cfg,
+                    loglam_range=refined_loglam,
+                    max_iters=self.lam_iters,
                 )
                 if score < current_best_score:
                     current_best_score = score
@@ -704,7 +776,10 @@ class ParamSearchCV:
         y_full = np.asarray(y)
 
         _, model = self._fit_one_expectile_core(
-            X_full, y_full, full_w, X_full,
+            X_full,
+            y_full,
+            full_w,
+            X_full,
             expectile=float(best_cfg.get("expectile", self.expectile)),
             lam=float(best_cfg["lam"]),
             n_splines=int(best_cfg["n_splines"]),
@@ -726,6 +801,7 @@ class GAMModeler:
     - loops over expectiles and delegates to ParamSearchCV
     - transforms X_pred via param_search.transform() and predicts
     """
+
     def __init__(self, param_search: ParamSearchCV):
         self.param_search = param_search
 
@@ -768,7 +844,11 @@ class GAMModeler:
             sw = np.nan_to_num(sw, nan=0.0, posinf=0.0, neginf=0.0)
             # floor tiny weights so the model doesn't learn a trivial zero solution
             if np.isfinite(sw).any():
-                q20 = np.nanquantile(sw[np.isfinite(sw)], 0.20) if np.isfinite(sw).sum() else 0.0
+                q20 = (
+                    np.nanquantile(sw[np.isfinite(sw)], 0.20)
+                    if np.isfinite(sw).sum()
+                    else 0.0
+                )
                 floor = 0.1 if (not np.isfinite(q20) or q20 <= 1e-6) else float(q20)
                 sw = np.clip(sw, floor, None)
             else:
@@ -794,7 +874,9 @@ class GAMModeler:
         for q in expectiles:
             # Map expectile to quantile (same numeric value here)
             alpha = float(q)
-            model = GradientBoostingRegressor(loss="quantile", alpha=alpha, **base_kwargs)
+            model = GradientBoostingRegressor(
+                loss="quantile", alpha=alpha, **base_kwargs
+            )
             model.fit(X_trs, y_tr, sample_weight=sw)
             yhat = model.predict(X_prs)
             # units must be non-negative
@@ -883,14 +965,16 @@ class PricingPipeline:
         """
         # 1) Base table and required aliases
         topsellers = self.engineer.prepare()
-        if 'asp' not in topsellers.columns and 'price' in topsellers.columns:
-            topsellers['asp'] = pd.to_numeric(topsellers['price'], errors='coerce')
-        if '__intercept__' not in topsellers.columns:
-            topsellers['__intercept__'] = 1.0
+        if "asp" not in topsellers.columns and "price" in topsellers.columns:
+            topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
+        if "__intercept__" not in topsellers.columns:
+            topsellers["__intercept__"] = 1.0
 
         # 2) Weights for training / elasticity
-        topsellers['time_weight'] = self.param_search.weighting._time_decay(topsellers)
-        w_raw = np.asarray(self.param_search.weighting._make_weights(topsellers), dtype=float)
+        topsellers["time_weight"] = self.param_search.weighting._time_decay(topsellers)
+        w_raw = np.asarray(
+            self.param_search.weighting._make_weights(topsellers), dtype=float
+        )
         if not np.isfinite(w_raw).any() or np.nansum(w_raw) <= 0:
             w_stable = np.ones(len(topsellers), dtype=float)
         else:
@@ -907,11 +991,13 @@ class PricingPipeline:
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
-            elasticity_df = pd.DataFrame(columns=['product', 'ratio', 'elasticity_score'])
+            elasticity_df = pd.DataFrame(
+                columns=["product", "ratio", "elasticity_score"]
+            )
 
         # 4) Design matrix and target strictly from EXPECTED_COLS
         X = topsellers[EXPECTED_COLS].copy()
-        y = np.asarray(topsellers['shipped_units'], dtype=float)
+        y = np.asarray(topsellers["shipped_units"], dtype=float)
 
         # 5) Fit GAM expectiles
         modeler = GAMModeler(self.param_search)
@@ -924,66 +1010,104 @@ class PricingPipeline:
         )
 
         # 6) Assemble results
-        all_gam_results = topsellers[['product']].copy().reset_index(drop=True)
-        for k, arr in res.get('predictions', {}).items():
+        all_gam_results = topsellers[["product"]].copy().reset_index(drop=True)
+        for k, arr in res.get("predictions", {}).items():
             all_gam_results[k] = np.asarray(arr, dtype=float)
 
-        if all(c in all_gam_results.columns for c in ['units_pred_0.025','units_pred_0.5','units_pred_0.975']):
-            all_gam_results['units_pred_avg'] = (
-                all_gam_results[['units_pred_0.025','units_pred_0.5','units_pred_0.975']].to_numpy().mean(axis=1)
+        if all(
+            c in all_gam_results.columns
+            for c in ["units_pred_0.025", "units_pred_0.5", "units_pred_0.975"]
+        ):
+            all_gam_results["units_pred_avg"] = (
+                all_gam_results[
+                    ["units_pred_0.025", "units_pred_0.5", "units_pred_0.975"]
+                ]
+                .to_numpy()
+                .mean(axis=1)
             )
-        elif 'units_pred_0.5' in all_gam_results.columns:
-            all_gam_results['units_pred_avg'] = all_gam_results['units_pred_0.5']
+        elif "units_pred_0.5" in all_gam_results.columns:
+            all_gam_results["units_pred_avg"] = all_gam_results["units_pred_0.5"]
         else:
-            all_gam_results['units_pred_avg'] = np.nan
+            all_gam_results["units_pred_avg"] = np.nan
 
         # Carry identifiers & prices
-        for col in ['asin','price','asp']:
+        for col in ["asin", "price", "asp"]:
             if col in topsellers.columns:
                 all_gam_results[col] = topsellers[col].reset_index(drop=True)
 
         # P50 price used by tables
-        if 'pred_0.5' not in all_gam_results.columns:
-            all_gam_results['pred_0.5'] = (
-                all_gam_results['asp'] if 'asp' in all_gam_results.columns else all_gam_results.get('price')
+        if "pred_0.5" not in all_gam_results.columns:
+            all_gam_results["pred_0.5"] = (
+                all_gam_results["asp"]
+                if "asp" in all_gam_results.columns
+                else all_gam_results.get("price")
             )
 
         # Actual daily revenue (price × daily units)
-        if 'revenue_actual' not in all_gam_results.columns:
-            price_col = 'asp' if 'asp' in topsellers.columns else ('price' if 'price' in topsellers.columns else None)
-            if price_col is not None and 'shipped_units' in topsellers.columns:
-                pr = pd.to_numeric(topsellers[price_col], errors='coerce').reset_index(drop=True)
-                pu = pd.to_numeric(topsellers['shipped_units'], errors='coerce').reset_index(drop=True)
-                all_gam_results['revenue_actual'] = pr * pu
+        if "revenue_actual" not in all_gam_results.columns:
+            price_col = (
+                "asp"
+                if "asp" in topsellers.columns
+                else ("price" if "price" in topsellers.columns else None)
+            )
+            if price_col is not None and "shipped_units" in topsellers.columns:
+                pr = pd.to_numeric(topsellers[price_col], errors="coerce").reset_index(
+                    drop=True
+                )
+                pu = pd.to_numeric(
+                    topsellers["shipped_units"], errors="coerce"
+                ).reset_index(drop=True)
+                all_gam_results["revenue_actual"] = pr * pu
             else:
-                all_gam_results['revenue_actual'] = pd.Series(np.nan, index=all_gam_results.index)
+                all_gam_results["revenue_actual"] = pd.Series(
+                    np.nan, index=all_gam_results.index
+                )
 
-        if 'daily_rev' not in all_gam_results.columns and 'revenue_actual' in all_gam_results.columns:
-            all_gam_results['daily_rev'] = pd.to_numeric(all_gam_results['revenue_actual'], errors='coerce')
+        if (
+            "daily_rev" not in all_gam_results.columns
+            and "revenue_actual" in all_gam_results.columns
+        ):
+            all_gam_results["daily_rev"] = pd.to_numeric(
+                all_gam_results["revenue_actual"], errors="coerce"
+            )
 
         # Revenue predictions from units × price
-        price_col = 'asp' if 'asp' in all_gam_results.columns else 'price'
+        price_col = "asp" if "asp" in all_gam_results.columns else "price"
         if price_col in all_gam_results.columns:
-            for q in ('0.025','0.5','0.975'):
-                up, rp = f'units_pred_{q}', f'revenue_pred_{q}'
+            for q in ("0.025", "0.5", "0.975"):
+                up, rp = f"units_pred_{q}", f"revenue_pred_{q}"
                 if up in all_gam_results.columns and rp not in all_gam_results.columns:
-                    all_gam_results[rp] = pd.to_numeric(all_gam_results[up], errors='coerce') * pd.to_numeric(all_gam_results[price_col], errors='coerce')
+                    all_gam_results[rp] = pd.to_numeric(
+                        all_gam_results[up], errors="coerce"
+                    ) * pd.to_numeric(all_gam_results[price_col], errors="coerce")
 
         # Merge elasticity if available
-        if not elasticity_df.empty and 'product' in elasticity_df.columns:
-            keep_cols = ['product'] + [c for c in ['ratio','elasticity_score'] if c in elasticity_df.columns]
-            all_gam_results = all_gam_results.merge(elasticity_df[keep_cols], on='product', how='left')
+        if not elasticity_df.empty and "product" in elasticity_df.columns:
+            keep_cols = ["product"] + [
+                c for c in ["ratio", "elasticity_score"] if c in elasticity_df.columns
+            ]
+            all_gam_results = all_gam_results.merge(
+                elasticity_df[keep_cols], on="product", how="left"
+            )
 
         # Debug: sanity medians
         try:
-            med_act = float(np.nanmedian(all_gam_results.get('daily_rev', pd.Series([np.nan]))))
-            med_p50 = float(np.nanmedian(all_gam_results.get('revenue_pred_0.5', pd.Series([np.nan]))))
-            print(f"[DBG] med(actual_daily_rev)={med_act:.2f}  med(pred50_rev)={med_p50:.2f}", flush=True)
+            med_act = float(
+                np.nanmedian(all_gam_results.get("daily_rev", pd.Series([np.nan])))
+            )
+            med_p50 = float(
+                np.nanmedian(
+                    all_gam_results.get("revenue_pred_0.5", pd.Series([np.nan]))
+                )
+            )
+            print(
+                f"[DBG] med(actual_daily_rev)={med_act:.2f}  med(pred50_rev)={med_p50:.2f}",
+                flush=True,
+            )
         except Exception:
             pass
 
         return topsellers, elasticity_df, all_gam_results
-
 
     def _compute_best_tables(self, all_gam_results, topsellers):
         """Run Optimizer and ensure required cols are present."""
@@ -1129,30 +1253,44 @@ class PricingPipeline:
         """Compute model fit metrics"""
         df = all_gam_results.copy()
         # Backfill revenue_actual if not present
-        if "revenue_actual" not in df.columns and {"price", "shipped_units"}.issubset(df.columns):
-            df["revenue_actual"] = pd.to_numeric(df["price"], errors="coerce") * pd.to_numeric(df["shipped_units"], errors="coerce")
+        if "revenue_actual" not in df.columns and {"price", "shipped_units"}.issubset(
+            df.columns
+        ):
+            df["revenue_actual"] = pd.to_numeric(
+                df["price"], errors="coerce"
+            ) * pd.to_numeric(df["shipped_units"], errors="coerce")
         # Derive revenue_pred_* from units_pred_* if needed
         if "price" in df.columns:
             for q in ("0.025", "0.5", "0.975"):
                 up = f"units_pred_{q}"
                 rp = f"revenue_pred_{q}"
                 if rp not in df.columns and up in df.columns:
-                    df[rp] = pd.to_numeric(df[up], errors="coerce") * pd.to_numeric(df["price"], errors="coerce")
+                    df[rp] = pd.to_numeric(df[up], errors="coerce") * pd.to_numeric(
+                        df["price"], errors="coerce"
+                    )
 
         # Actual daily revenue
-                # Ensure denominator is a Series; missing or zero -> NaN
+        # Ensure denominator is a Series; missing or zero -> NaN
         if "days_sold" in df.columns:
             den = pd.to_numeric(df["days_sold"], errors="coerce")
         else:
             den = pd.Series(np.nan, index=df.index)
         den = den.mask(den == 0)
-        act_rev = pd.to_numeric(df["revenue_actual"], errors="coerce") if "revenue_actual" in df.columns else pd.Series(np.nan, index=df.index)
+        act_rev = (
+            pd.to_numeric(df["revenue_actual"], errors="coerce")
+            if "revenue_actual" in df.columns
+            else pd.Series(np.nan, index=df.index)
+        )
         daily_act = (act_rev / den).where(den.notna(), act_rev)
 
         out = {}
 
         # P50 metrics
-        pred50_rev = pd.to_numeric(df["revenue_pred_0.5"], errors="coerce") if "revenue_pred_0.5" in df.columns else pd.Series(np.nan, index=df.index)
+        pred50_rev = (
+            pd.to_numeric(df["revenue_pred_0.5"], errors="coerce")
+            if "revenue_pred_0.5" in df.columns
+            else pd.Series(np.nan, index=df.index)
+        )
         daily_pred50 = (pred50_rev / den).where(den.notna(), pred50_rev)
 
         mask50 = (daily_act > 0) & daily_pred50.notna()
@@ -1236,7 +1374,6 @@ class PricingPipeline:
 
 
 class viz:
-
     """
     Refactored Viz class kept in built_in_logic.py for predictive graph.
     Ensures:
@@ -1259,7 +1396,7 @@ class viz:
             "lux",
         ]
         load_figure_template(templates)
-        self.template = template 
+        self.template = template
 
     def gam_results(self, all_gam_results: pd.DataFrame):
         """
@@ -1277,8 +1414,12 @@ class viz:
             return self.empty_fig("No model data")
 
         need_cols = [
-            "product", "asp", "revenue_actual",
-            "revenue_pred_0.025", "revenue_pred_0.5", "revenue_pred_0.975",
+            "product",
+            "asp",
+            "revenue_actual",
+            "revenue_pred_0.025",
+            "revenue_pred_0.5",
+            "revenue_pred_0.975",
         ]
         missing = [c for c in need_cols if c not in all_gam_results.columns]
         if missing:
@@ -1295,33 +1436,61 @@ class viz:
             g = g.sort_values("asp")
 
             # Actual revenue points
-            fig.add_trace(go.Scatter(
-                x=g["asp"], y=g["revenue_actual"], mode="markers",
-                opacity=0.55, name=f"{group_name} • Actual Revenue",
-                marker=dict(size=8, symbol="circle"),
-                legendgroup=group_name,
-                hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"],
+                    y=g["revenue_actual"],
+                    mode="markers",
+                    opacity=0.55,
+                    name=f"{group_name} • Actual Revenue",
+                    marker=dict(size=8, symbol="circle"),
+                    legendgroup=group_name,
+                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
+                )
+            )
 
             # Revenue band (P2.5–P97.5), drawn as two traces to avoid self-crossing
-            fig.add_trace(go.Scatter(
-                name=f"{group_name} (Rev band upper)",
-                x=g["asp"], y=g["revenue_pred_0.975"],
-                mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
-                legendgroup=group_name,
-            ))
-            fig.add_trace(go.Scatter(
-                name=f"{group_name} (Rev band)",
-                x=g["asp"], y=g["revenue_pred_0.025"],
-                mode="lines", line=dict(width=0), fill="tonexty", opacity=0.25,
-                showlegend=False, hoverinfo="skip", legendgroup=group_name,
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    name=f"{group_name} (Rev band upper)",
+                    x=g["asp"],
+                    y=g["revenue_pred_0.975"],
+                    mode="lines",
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup=group_name,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    name=f"{group_name} (Rev band)",
+                    x=g["asp"],
+                    y=g["revenue_pred_0.025"],
+                    mode="lines",
+                    line=dict(width=0),
+                    fill="tonexty",
+                    opacity=0.25,
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup=group_name,
+                )
+            )
 
             # Diamonds for recommended / conservative / optimistic prices
             best_rows = {
-                "Recommended (P50)": ("revenue_pred_0.5", g.loc[g["revenue_pred_0.5"].idxmax()]),
-                "Conservative (P2.5)": ("revenue_pred_0.025", g.loc[g["revenue_pred_0.025"].idxmax()]),
-                "Optimistic (P97.5)": ("revenue_pred_0.975", g.loc[g["revenue_pred_0.975"].idxmax()]),
+                "Recommended (P50)": (
+                    "revenue_pred_0.5",
+                    g.loc[g["revenue_pred_0.5"].idxmax()],
+                ),
+                "Conservative (P2.5)": (
+                    "revenue_pred_0.025",
+                    g.loc[g["revenue_pred_0.025"].idxmax()],
+                ),
+                "Optimistic (P97.5)": (
+                    "revenue_pred_0.975",
+                    g.loc[g["revenue_pred_0.975"].idxmax()],
+                ),
             }
             marker_colors = {
                 "Conservative (P2.5)": "#1F6FEB",
@@ -1329,20 +1498,32 @@ class viz:
                 "Recommended (P50)": "#B82132",
             }
             for label, (pred_col, row) in best_rows.items():
-                fig.add_trace(go.Scatter(
-                    x=[row["asp"]], y=[row[pred_col]], mode="markers",
-                    marker=dict(color=marker_colors[label], size=12, symbol="diamond"),
-                    name=f"{group_name} • {label}", legendgroup=group_name,
-                    hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=[row["asp"]],
+                        y=[row[pred_col]],
+                        mode="markers",
+                        marker=dict(
+                            color=marker_colors[label], size=12, symbol="diamond"
+                        ),
+                        name=f"{group_name} • {label}",
+                        legendgroup=group_name,
+                        hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
+                    )
+                )
 
             # P50 line (sorted!)
-            fig.add_trace(go.Scatter(
-                x=g["asp"], y=g["revenue_pred_0.5"], mode="lines",
-                name=f"{group_name} • Expected Revenue (P50)",
-                line=dict(width=2), legendgroup=group_name,
-                hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}}<extra></extra>",
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"],
+                    y=g["revenue_pred_0.5"],
+                    mode="lines",
+                    name=f"{group_name} • Expected Revenue (P50)",
+                    line=dict(width=2),
+                    legendgroup=group_name,
+                    hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}}<extra></extra>",
+                )
+            )
 
         # 3) Layout (avoid crashing if self.template is not set)
         template = getattr(self, "template", None)
@@ -1351,8 +1532,12 @@ class viz:
             legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
             margin=dict(r=8, t=40, b=40, l=60),
         )
-        fig.update_yaxes(title="Expected Daily Revenue", tickprefix="$", separatethousands=True)
-        fig.update_xaxes(title="Average Selling Price (ASP)", tickprefix="$", separatethousands=True)
+        fig.update_yaxes(
+            title="Expected Daily Revenue", tickprefix="$", separatethousands=True
+        )
+        fig.update_xaxes(
+            title="Average Selling Price (ASP)", tickprefix="$", separatethousands=True
+        )
         return fig
 
     def elast_dist(self, elast_df: pd.DataFrame):

@@ -21,7 +21,7 @@ from sklearn.metrics import mean_squared_error
 
 
 # =====================================================================
-# Constants / Styling
+#                        Constants / Styling
 # =====================================================================
 
 
@@ -58,7 +58,7 @@ class Paths:
 
 
 # =====================================================================
-# Caching / Build
+#                         Caching / Build
 # =====================================================================
 
 
@@ -149,7 +149,7 @@ class Cache:
 
 
 # =====================================================================
-# Data engineering primitives
+#                         Data engineering 
 # =====================================================================
 
 
@@ -216,7 +216,7 @@ class DataEng:
 
 
 # =====================================================================
-# Tables / columns for Opportunities page
+#                        Opportunities Page
 # =====================================================================
 
 
@@ -301,7 +301,7 @@ class OppsTable:
 
 
 # =====================================================================
-# Home page small UI pieces
+#                   Home page small UI pieces
 # =====================================================================
 
 
@@ -379,7 +379,7 @@ class HomeUI:
 
 
 # =====================================================================
-# Overview page UI & metrics
+#                   Overview page UI & metrics
 # =====================================================================
 
 
@@ -656,49 +656,77 @@ class Scenario:
         asin: str,
         best50_df: pd.DataFrame,
         curr_price_df: pd.DataFrame,
-        all_gam: pd.DataFrame,
+        all_gam_results: pd.DataFrame,
     ) -> Tuple[str, str]:
         """
-        Returns (annualized_units_delta, annualized_revenue)
-        Both as formatted strings with signs.
+        Return (annualized_units_delta, annualized_revenue_delta) as signed strings.
+        Opportunity = (recommended - current) * 365
+
+        - Looks up recommended daily rev/units from best50_df (or curve fallback)
+        - Looks up current daily rev/units by nearest ASP on curve
+        - Computes signed annual deltas
         """
         try:
-            # Get recommended price data
-            best = best50_df[best50_df["asin"] == asin]
-            if best.empty:
+            if not asin or not isinstance(asin, str):
+                return "—", "—"
+            if best50_df is None or curr_price_df is None or all_gam_results is None:
                 return "—", "—"
 
-            # Get current price
-            cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
-            curr_price = float(cp.iloc[0]) if len(cp) else np.nan
+            # --- Recommended row ---
+            best_row = best50_df.loc[best50_df["asin"] == asin]
+            if best_row.empty:
+                return "—", "—"
 
-            # Get predicted values at recommended price
-            daily_units_best = float(best["units_pred_0.5"].iloc[0])
-            daily_rev_best = float(best["revenue_pred_0.5"].iloc[0])
+            if {"asp", "revenue_pred_0.5", "units_pred_0.5"}.issubset(best_row.columns):
+                daily_rev_best = float(best_row["revenue_pred_0.5"].iloc[0])
+                daily_units_best = float(best_row["units_pred_0.5"].iloc[0])
+                rec_price = float(best_row["asp"].iloc[0])
+            elif {"price", "revenue_pred_0.5", "units_pred_0.5"}.issubset(best_row.columns):
+                daily_rev_best = float(best_row["revenue_pred_0.5"].iloc[0])
+                daily_units_best = float(best_row["units_pred_0.5"].iloc[0])
+                rec_price = float(best_row["price"].iloc[0])
+            else:
+                return "—", "—"
 
-            # Get predicted values at current price
-            prod_curve = all_gam[all_gam["asin"] == asin].copy()
-            if not prod_curve.empty and pd.notna(curr_price):
-                # Find nearest price point
-                idx = (prod_curve["asp"] - curr_price).abs().idxmin()
-                daily_units_curr = float(prod_curve.loc[idx, "units_pred_0.5"])
+            # --- Current price ---
+            if "asin" in curr_price_df.columns and "current_price" in curr_price_df.columns:
+                cp_series = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
+                curr_price = float(cp_series.iloc[0]) if len(cp_series) else None
+            else:
+                curr_price = None
+            if curr_price is None or not np.isfinite(curr_price):
+                return "—", "—"
 
-                # Calculate daily difference and annualize
-                units_diff_annual = (daily_units_best - daily_units_curr) * 365
-                rev_best_annual = daily_rev_best * 365
+            # --- Curve for this ASIN ---
+            prod_curve = (
+                all_gam_results.loc[all_gam_results["asin"] == asin]
+                if "asin" in all_gam_results.columns
+                else all_gam_results
+            )
+            if prod_curve.empty:
+                return "—", "—"
 
-                return (
-                    Formatters.signed_units(units_diff_annual),
-                    Formatters.signed_money(rev_best_annual),
-                )
+            need_cols = {"asp", "revenue_pred_0.5", "units_pred_0.5"}
+            if not need_cols.issubset(prod_curve.columns):
+                return "—", "—"
 
-            # If we can't get current price predictions, just show annualized recommended values
-            units_best_annual = daily_units_best * 365
-            rev_best_annual = daily_rev_best * 365
+            # Recommended metrics from curve (for consistency)
+            idx_best = (prod_curve["asp"] - rec_price).abs().idxmin()
+            daily_rev_best = float(prod_curve.loc[idx_best, "revenue_pred_0.5"])
+            daily_units_best = float(prod_curve.loc[idx_best, "units_pred_0.5"])
+
+            # Current metrics from curve
+            idx_curr = (prod_curve["asp"] - curr_price).abs().idxmin()
+            daily_rev_curr = float(prod_curve.loc[idx_curr, "revenue_pred_0.5"])
+            daily_units_curr = float(prod_curve.loc[idx_curr, "units_pred_0.5"])
+
+            # --- Signed annual deltas ---
+            units_delta_annual = (daily_units_best - daily_units_curr) * 365.0
+            rev_delta_annual = (daily_rev_best - daily_rev_curr) * 365.0
 
             return (
-                Formatters.signed_units(units_best_annual),
-                Formatters.signed_money(rev_best_annual),
+                Formatters.signed_units(units_delta_annual),
+                Formatters.signed_money(rev_delta_annual),
             )
 
         except Exception as e:
@@ -816,7 +844,7 @@ class Notes:
 
 
 # =====================================================================
-# Overview callback micro-helpers (already class-based)
+#                        Overview Page Helpers
 # =====================================================================
 
 
@@ -872,10 +900,22 @@ class OverviewHelpers:
         cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
         return f"${float(cp.iloc[0]):,.2f}" if len(cp) else "—"
 
-    @staticmethod
+    @staticmethod 
     def recommended_price_text(asin: str, best50_df: pd.DataFrame) -> str:
         row = best50_df.loc[best50_df["asin"] == asin]
-        return f"${float(row['asp'].iloc[0]):,.2f}" if len(row) else "—"
+        if not len(row):
+            return "—"
+        if "asp" in row.columns:
+            val = row["asp"].iloc[0]
+        elif "price" in row.columns:
+            val = row["price"].iloc[0]
+        else:
+            return "—"
+        try:
+            return f"${float(val):,.2f}"
+        except Exception:
+            return "—"
+
 
     @staticmethod
     def elasticity_texts(

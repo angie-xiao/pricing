@@ -512,45 +512,58 @@ class Formatters:
 
 
 class Metrics:
+ 
     @staticmethod
     def model_fit_units(prod_df: pd.DataFrame) -> Tuple[str, str]:
-        """(value_text, subtext) RMSE on daily revenue (P50)."""
+        """(value_text, subtext) RMSE on daily revenue (P50) + weighted relative error."""
         if prod_df is None or prod_df.empty:
             return "—", ""
-        need = {"daily_rev", "revenue_pred_0.5", "asp"}
-        if not need.issubset(prod_df.columns):
+
+        df = prod_df.copy()
+
+        # Accept either 'daily_rev' or 'revenue'
+        if "daily_rev" not in df.columns:
+            if "revenue" in df.columns:
+                df["daily_rev"] = pd.to_numeric(df["revenue"], errors="coerce")
+            else:
+                return "—", ""
+
+        # Need prediction
+        if "revenue_pred_0.5" not in df.columns:
             return "—", ""
 
-        df = prod_df[["asp", "daily_rev", "revenue_pred_0.5"]].dropna()
+        if "asp" not in df.columns and "price" in df.columns:
+            df["asp"] = pd.to_numeric(df["price"], errors="coerce")
+
+        df = df[["asp", "daily_rev", "revenue_pred_0.5"]].dropna()
         if df.empty:
             return "—", ""
 
+        # Aggregate at price to stabilize duplicates
         df = df.groupby("asp", as_index=False).agg(
             daily_rev=("daily_rev", "mean"),
             pred_rev=("revenue_pred_0.5", "mean"),
         )
-        y_true = df["daily_rev"].to_numpy(float)
-        y_pred = df["pred_rev"].to_numpy(float)
-        if y_true.size == 0:
+        if df.empty:
             return "—", ""
 
-        # Calculate RMSE
-        rmse_val = np.sqrt(mean_squared_error(y_true, y_pred))
+        # RMSE
+        diff2 = (df["pred_rev"] - df["daily_rev"]) ** 2
+        rmse = float(np.sqrt(np.nanmean(diff2))) if len(diff2) else np.nan
 
-        # Calculate average revenue
-        avg_rev = float(np.mean(y_true)) if y_true.size else np.nan
+        # Weighted relative error (closer to MAPE but avoids div-by-zero)
+        mask = df["daily_rev"] > 0
+        w = df["daily_rev"].where(mask, np.nan)
+        pct = (df["pred_rev"] - df["daily_rev"]) / df["daily_rev"]
+        rel = float(np.nansum(pct * w) / np.nansum(w)) if np.nansum(w) > 0 else np.nan
 
-        # Calculate percentage error (pct_err)
-        pct_err = (rmse_val / avg_rev * 100.0) if avg_rev else np.nan
+        if np.isnan(rmse):
+            return "—", ""
 
-        # Format the output without $ for RMSE and with percentage error
-        rmse_formatted = f"±${rmse_val:,.0f}"
-        pct_err_formatted = (
-            f"≈{pct_err:.1f}% typical error" if np.isfinite(pct_err) else ""
-        )
-
-        return rmse_formatted, pct_err_formatted
-
+        sub = f"{rel:+.0%} vs actual" if np.isfinite(rel) else ""
+        return f"${rmse:,.0f}", sub
+    
+    
     @staticmethod
     def update_elasticity_kpi_by_product(
         product_name: str, elast_df: pd.DataFrame
@@ -877,7 +890,8 @@ class OverviewHelpers:
     @staticmethod
     def pred_graph(viz, filt_df: pd.DataFrame):
         return (
-            viz.gam_results(filt_df) if len(filt_df) else viz.empty_fig("No model data")
+            viz.gam_results(filt_df)
+            # viz.predictive_from_frames(filt_df, aggregate="mean")
         )
 
     @staticmethod

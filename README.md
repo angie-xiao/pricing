@@ -128,37 +128,34 @@ git clone https://github.com/angie-xiao/pricing.git
 
 Windows
 ```bash
-py -3.11 -m venv .pricing-venv
-.\.pricing-venv\Scripts\Activate.ps1
+# create and activate virtual environment
+py -3.11 -m venv .pricing-venv           # only run once
+.\.pricing-venv\Scripts\Activate.ps1     # acitvate
+
+# install up-to-date pip
 python -m pip install --upgrade pip
-python -m pip install `
-  "dash>=2.17" `
-  "dash-bootstrap-components>=1.6" `
-  "dash-bootstrap-templates>=1.2" `
-  "pandas>=2.1" `
-  "numpy>=1.26,<2.1" `
-  "scipy>=1.11" `
-  "scikit-learn>=1.3" `
-  "pygam>=0.9.0,<1.0" `
-  "plotly>=5.20"
+
+# keep build tools fresh
+python -m pip install -U pip setuptools wheel
+
+# install your requirements (will upgrade scikit-learn per the file)
+pip install -U -r requirements.txt
 ```
 
 macOS / Linux
 ```bash
+# create and activate virtual environment
+python3.11 -m venv .pricing-venv    # only run once
+source .pricing-venv/bin/activate   # activate
 
-python3.11 -m venv .pricing-venv
-source .pricing-venv/bin/activate
+# install up-to-date pip
 python -m pip install --upgrade pip
-python -m pip install \
-  "dash>=2.17" \
-  "dash-bootstrap-components>=1.6" \
-  "dash-bootstrap-templates>=1.2" \
-  "pandas>=2.1" \
-  "numpy>=1.26,<2.1" \
-  "scipy>=1.11" \
-  "scikit-learn>=1.3" \
-  "pygam>=0.9.0,<1.0" \
-  "plotly>=5.20"
+
+# keep build tools fresh
+python -m pip install -U pip setuptools wheel
+
+# install your requirements (will upgrade scikit-learn per the file)
+pip install -U -r requirements.txt
 ```
 
 

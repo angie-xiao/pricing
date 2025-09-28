@@ -6,14 +6,14 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Optional, Sequence, Tuple, Dict, Any, Iterable
+from typing import Optional, Tuple, Dict, Any, Iterable, Union
 
 # viz
 # import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
-
+ 
 # ML
 from sklearn.model_selection import KFold
 from sklearn.compose import ColumnTransformer
@@ -49,7 +49,7 @@ def _v_best(obj, msg: str):
     Print only when obj._verbose is True. Use for 'best only' logs.
     """
     if getattr(obj, "_verbose", False):
-        from datetime import datetime
+        
 
         print(
             f"[{datetime.now().strftime('%H:%M:%S')}] {obj.__class__.__name__} {msg}",
@@ -281,118 +281,69 @@ class DataEngineer:
 
 
 class Weighting:
-    """
-    Encapsulates recency (time-decay) + rarity weighting.
-    All methods accept/return pandas objects or numpy arrays and are robust
-    to missing columns.
-    """
-
     def __init__(
         self,
-        decay_rate: float = -0.01,
-        rarity_smooth: int = 5,
+        decay_rate: float = -0.01,   # negative → older rows get smaller weight
         rarity_cap: float = 1.25,
         rarity_beta: float = 0.35,
-        rarity_tails_only: bool = True,
-        rarity_tail_q: float = 0.10,
         clip_min: float = 0.25,
         clip_max: float = 2.5,
     ):
         self.decay_rate = float(decay_rate)
-        self.rarity_smooth = int(rarity_smooth)
         self.rarity_cap = float(rarity_cap)
         self.rarity_beta = float(rarity_beta)
-        self.rarity_tails_only = bool(rarity_tails_only)
-        self.rarity_tail_q = float(rarity_tail_q)
         self.clip_min = float(clip_min)
         self.clip_max = float(clip_max)
 
-    # ----- helpers -----
     def _time_decay(self, df: pd.DataFrame) -> np.ndarray:
         """
-        Exponential decay based on 'order_date' (if present). Missing dates → weight 1.0.
+        Exponential time-decay using 'order_date' if present.
+        weight = exp(decay_rate * days_since_order)
+        Missing/invalid dates → 1.0
         """
-        d = df.copy()
-        if "order_date" in d.columns:
-            odt = pd.to_datetime(d["order_date"], errors="coerce")
+        if df is None or df.empty:
+            return np.array([], dtype=float)
+
+        if "order_date" not in df.columns:
+            return np.ones(len(df), dtype=float)
+
+        odt = pd.to_datetime(df["order_date"], errors="coerce")
+        if odt.notna().any():
+            ref = odt.max().normalize()
+            days = (ref - odt).dt.days.astype("float64")
+            days = np.where(np.isfinite(days), days, 0.0)
         else:
-            odt = pd.Series(pd.NaT, index=d.index)
-        today_ref = pd.Timestamp.now().normalize()
-        days = (today_ref - odt).dt.days.astype("float64")
-        days = np.where(np.isfinite(days), days, 0.0)
-        return np.exp(self.decay_rate * days)
+            return np.ones(len(df), dtype=float)
 
-    def _rarity_multiplier(
-        self, prices: np.ndarray, bin_width: float | None = None
-    ) -> np.ndarray:
+        return np.exp(self.decay_rate * days).astype(float)
+
+    def _rarity_multiplier(self, prices: np.ndarray) -> np.ndarray:
         """
-        Assigns higher weights to low-density price regions.
-        Robust to constant arrays and NaNs.
+        Rarity = inverse frequency at (rounded) price.
+        Round to cents to avoid fragmentation.
         """
-        p = np.asarray(prices, dtype=float).ravel()
-        mask = np.isfinite(p)
-        if p.size == 0 or np.sum(mask) < 3 or np.allclose(p[mask], p[mask][0]):
-            return np.ones_like(p, dtype=float)
+        p = pd.to_numeric(prices, errors="coerce").astype(float)
+        if p.size == 0:
+            return np.array([], dtype=float)
 
-        p = np.where(np.isfinite(p), p, np.nan)
-        p_valid = p[np.isfinite(p)]
-        n = p_valid.size
+        bucketed = np.round(p, 2)
+        vc = pd.Series(bucketed).value_counts(dropna=False)
+        counts = pd.Series(bucketed).map(vc).to_numpy(dtype=float)
 
-        # optional "tails-only" band
-        in_core = np.zeros_like(p, dtype=bool)
-        if self.rarity_tails_only:
-            lo, hi = np.nanquantile(p, [self.rarity_tail_q, 1.0 - self.rarity_tail_q])
-            in_core = (p >= lo) & (p <= hi)
+        valid = np.isfinite(counts) & (counts > 0)
+        if not valid.any():
+            return np.ones_like(counts, dtype=float)
 
-        # Freedman–Diaconis bin width with guardrails
-        if bin_width is None:
-            q25, q75 = np.nanpercentile(p_valid, [25, 75])
-            iqr = max(q75 - q25, 1e-9)
-            bw = 2.0 * iqr / np.cbrt(n)
-            span = max(np.nanmax(p_valid) - np.nanmin(p_valid), 1e-6)
-            bw = np.clip(bw, span / 80.0, span / 25.0)
-        else:
-            bw = float(bin_width)
-
-        edges = np.arange(np.nanmin(p_valid) - 1e-9, np.nanmax(p_valid) + bw + 1e-9, bw)
-        counts, _ = np.histogram(p_valid, bins=edges)
-
-        # smooth counts (moving average) to avoid single-bin spikes
-        if self.rarity_smooth and self.rarity_smooth > 1:
-            k = self.rarity_smooth + (self.rarity_smooth % 2 == 0)  # force odd
-            kernel = np.ones(k, dtype=float) / k
-            counts = np.convolve(counts, kernel, mode="same")
-
-        counts = np.maximum(counts, 1e-12)
-        idx = np.clip(
-            np.digitize(np.nan_to_num(p_valid, nan=edges[0]), edges) - 1,
-            0,
-            len(counts) - 1,
-        )
-
-        # map counts back to full vector
-        c_full = np.full_like(p, np.nan, dtype=float)
-        c_full[np.isfinite(p)] = counts[idx]
-
-        raw = (1.0 / c_full) ** self.rarity_beta
+        mean_c = counts[valid].mean()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            raw = mean_c / counts  # fewer transactions → bigger weight
         raw = np.where(np.isfinite(raw), raw, 1.0)
-        raw /= np.nanmean(raw) if np.isfinite(np.nanmean(raw)) else 1.0
-        mult = np.clip(raw, 1.0 / self.rarity_cap, self.rarity_cap)
 
-        # disable rarity inside the core band if requested
-        if self.rarity_tails_only:
-            mult[in_core] = 1.0
+        w = np.power(raw, self.rarity_beta)
+        w = np.clip(w, 1.0 / self.rarity_cap, self.rarity_cap)
+        return np.where(np.isfinite(w), w, 1.0).astype(float)
 
-        mult = np.where(np.isfinite(mult), mult, 1.0)
-        return mult
-
-    # ----- main entry -----
-    def _make_weights(
-        self, df: pd.DataFrame, base_weights: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        """
-        Weighted combination: time decay * rarity (on 'price'), then clipped & normalized.
-        """
+    def _make_weights(self, df: pd.DataFrame, base_weights: Optional[np.ndarray] = None) -> np.ndarray:
         decay = self._time_decay(df)
         prices = pd.to_numeric(df.get("price", np.nan), errors="coerce").to_numpy()
         rarity = self._rarity_multiplier(prices)
@@ -401,7 +352,6 @@ class Weighting:
         if base_weights is not None:
             w = w * np.asarray(base_weights, dtype=float)
 
-        # clip & normalize
         w = np.nan_to_num(w, nan=1.0, posinf=self.clip_max, neginf=self.clip_min)
         w = np.clip(w, self.clip_min, self.clip_max)
         mean = w.mean() if w.size else 1.0
@@ -409,389 +359,137 @@ class Weighting:
         return w.astype(float)
 
 
+# -------------------- ParamSearchCV with interval scoring (updated) --------------------
+def interval_score(y_true, y_low, y_up, alpha=0.05) -> float:
+    y_true = np.asarray(y_true, float)
+    L = np.asarray(y_low, float)
+    U = np.asarray(y_up, float)
+    width = U - L
+    below = (L - y_true) * (y_true < L)
+    above = (y_true - U) * (y_true > U)
+    score = width + (2.0/alpha) * (below + above)
+    return float(np.mean(score))
+
+def rmse(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, float)
+    y_pred = np.asarray(y_pred, float)
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+
+class _TuneResult:
+    def __init__(self, n_splines: int, lam: float, models: Dict[str, Any], metrics: Dict[str, float]):
+        self.n_splines = n_splines
+        self.lam = lam
+        self.models = models
+        self.metrics = metrics
+
+
 class ParamSearchCV:
     """
-    Single-expectile tuner:
-    - preprocessing (ColumnTransformer: scale numerics, OHE categoricals)
-    - per-fold weights via Weighting
-    - CV over (lam, n_splines)
-    - fits ONE ExpectileGAM (for self.expectile) and returns it
+    Joint expectile tuning for (0.025, 0.5, 0.975) using interval score + optional width penalty.
+    Backward-compatible signature: keeps numeric/categorical preprocessing args, n_splits, lam_iters, weighting.
     """
-
     def __init__(
         self,
-        numeric_cols: Optional[Sequence[str]] = None,
-        categorical_cols: Optional[Sequence[str]] = None,
+        numeric_cols=None,
+        categorical_cols=None,
         n_splits: int = 3,
-        n_splines_grid: Tuple[int, ...] = (12, 16, 20, 24),
-        loglam_range: Tuple[float, float] = (np.log(30.0), np.log(5000.0)),
-        lam_iters: int = 8,
-        expectile: float = 0.50,
+        n_splines_grid: tuple = (12, 16, 20),
+        loglam_range: tuple = (np.log(0.05), np.log(2.0)),
+        lam_iters: int = 6,
+        expectile=(0.025, 0.5, 0.975),
+        alpha: float = 0.05,
         random_state: int = 42,
         verbose: bool = False,
-        weighting: Optional[Weighting] = None,
+        weighting=None,
+        width_penalty: float = 0.0,
     ):
-        self.numeric_cols = list(numeric_cols or NUM_COLS)
-        self.categorical_cols = list(categorical_cols or CAT_COLS)
-
-        # preprocessors
-        try:
-            self.ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        except TypeError:
-            self.ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
-        self.scaler = StandardScaler()
-        self.ct = ColumnTransformer(
-            transformers=[
-                ("num", self.scaler, self.numeric_cols),
-                ("cat", self.ohe, self.categorical_cols),
-            ],
-            remainder="drop",
-            verbose_feature_names_out=False,
-        )
-        self._fitted = False
-
-        # search params
+        self.numeric_cols = numeric_cols
+        self.categorical_cols = categorical_cols
         self.n_splits = int(n_splits)
-        self.initial_n_splines = tuple(int(x) for x in n_splines_grid)
-        self.initial_loglam_range = (float(loglam_range[0]), float(loglam_range[1]))
+        self.n_splines_grid = tuple(n_splines_grid)
+        self.loglam_range = (float(loglam_range[0]), float(loglam_range[1]))
         self.lam_iters = int(lam_iters)
-        self.expectile = float(expectile)
+        self.alpha = float(alpha)
         self.random_state = int(random_state)
         self.verbose = bool(verbose)
+        self.weighting = weighting
+        self.width_penalty = float(width_penalty)
 
-        # weighting
-        self.weighting = weighting or Weighting()
-
-        # artifacts
-        self.final_model_ = None
-        self.final_cfg_: Optional[Dict[str, Any]] = None
-
-        # optional: external elasticity hints
-        self.elasticity_scores: Dict[Any, float] = {}
-
-    # ----- dataframe & transform helpers -----
-    def _ensure_dataframe(
-        self, X, feature_names: Optional[Sequence[str]] = None
-    ) -> pd.DataFrame:
-        if isinstance(X, pd.DataFrame):
-            df = X.copy()
+        # normalize expectiles
+        if isinstance(expectile, (list, tuple)):
+            es = [float(e) for e in expectile]
         else:
-            assert feature_names is not None, "feature_names required for ndarray X"
-            df = pd.DataFrame(np.asarray(X), columns=list(feature_names))
-        for c in self.categorical_cols:
-            if c in df.columns:
-                df[c] = df[c].astype("string")
-        return df
+            es = [float(expectile)]
+        self.expectiles = tuple(sorted(set(es)))
 
-    def _preprocess_features(
-        self, X, fit: bool, feature_names: Optional[Sequence[str]] = None
-    ) -> np.ndarray:
-        df = self._ensure_dataframe(X, feature_names or EXPECTED_COLS)
-        Xt = self.ct.fit_transform(df) if fit else self.ct.transform(df)
-        self._fitted = self._fitted or fit
-        return Xt
+        # lam grid using lam_iters
+        self.lam_grid = np.exp(np.linspace(self.loglam_range[0], self.loglam_range[1], max(1, self.lam_iters)))
 
-    def transform(self, X_pred) -> np.ndarray:
-        """Use already-fitted transformers; do NOT refit."""
-        return self._preprocess_features(X_pred, fit=False, feature_names=EXPECTED_COLS)
+        self.best_ = None
 
-    # ----- core one-expectile fit (stable) -----
-    def _fit_one_expectile_core(
-        self,
-        X_tr,
-        y_tr,
-        w_tr,
-        X_va,
-        *,
-        expectile: float,
-        lam: float = 300.0,
-        n_splines: int = 20,
-        max_iter: int = 4000,
-        tol: float = 1e-3,
-    ) -> Tuple[np.ndarray, Any]:
-        """
-        Fit ONE ExpectileGAM and predict on X_va.
-        Stabilized with y z-scoring, weight hygiene, lam-retry, const-column drop.
-        Always returns (y_hat_va, model).
-        """
-        # arrays
-        X_tr = np.asarray(X_tr, dtype=float)
-        X_va = np.asarray(X_va, dtype=float)
-        y_tr = np.asarray(y_tr, dtype=float)
+    def _log(self, msg: str):
+        if self.verbose:
+            print(msg, flush=True)
 
-        # remove constant columns (OHE on tiny folds)
-        std = X_tr.std(axis=0)
-        keep = std > 0
-        if not np.all(keep):
-            X_tr = X_tr[:, keep]
-            X_va = X_va[:, keep]
+    def _fit_one(self, e, ns, lam, X, y, w=None):
+        gam = ExpectileGAM(expectile=e, lam=lam, terms=s(0, n_splines=ns))
+        gam.fit(X, y, weights=w)
+        return gam
 
-        # weights
-        if w_tr is None:
-            w_tr = np.ones(X_tr.shape[0], dtype=float)
-        else:
-            w_tr = np.asarray(w_tr, dtype=float)
-            lo, hi = np.quantile(w_tr, [0.01, 0.99])
-            w_tr = np.clip(w_tr, lo, hi)
-            w_tr = w_tr / (w_tr.mean() or 1.0)
+    def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
+        # honor user-provided weighting object if given; otherwise use passed arrays
+        weights = w_train
 
-        # scale y
-        y_mu = float(y_tr.mean())
-        y_sd = float(y_tr.std()) or 1.0
-        y_tr_s = (y_tr - y_mu) / y_sd
+        use_joint = (len(self.expectiles) >= 3 and 0.025 in self.expectiles and 0.5 in self.expectiles and 0.975 in self.expectiles)
+        best_pair = None
 
-        # terms: smooth for first 2 cols (scaled price/discount), linear for the rest (OHE)
-        n_feats = X_tr.shape[1]
-        terms = s(0, n_splines=int(n_splines)) + s(1, n_splines=int(n_splines))
-        for j in range(2, n_feats):
-            terms += l(j)
+        for ns in self.n_splines_grid:
+            for lam in self.lam_grid:
+                if use_joint:
+                    m025 = self._fit_one(0.025, ns, lam, X_train, y_train, weights)
+                    m050 = self._fit_one(0.50,  ns, lam, X_train, y_train, weights)
+                    m975 = self._fit_one(0.975, ns, lam, X_train, y_train, weights)
 
-        # main attempts
-        lam_try = float(lam)
-        for _attempt in range(3):
-            gam = ExpectileGAM(
-                terms=terms,
-                expectile=float(expectile),
-                lam=lam_try,
-                max_iter=int(max_iter),
-                tol=float(tol),
-            )
-            try:
-                gam.fit(X_tr, y_tr_s, weights=w_tr)
-                y_hat_va = gam.predict(X_va) * y_sd + y_mu
-                return y_hat_va, gam
-            except Exception:
-                lam_try *= 10.0  # smooth more & retry
+                    p025_val = m025.predict(X_val)
+                    p50_val  = m050.predict(X_val)
+                    p975_val = m975.predict(X_val)
 
-        # last resort: linear-only
-        try:
-            t_lin = l(0)
-            for j in range(1, n_feats):
-                t_lin += l(j)
-            gam_lin = ExpectileGAM(
-                terms=t_lin,
-                expectile=float(expectile),
-                lam=1e6,
-                max_iter=8000,
-                tol=5e-3,
-            )
-            gam_lin.fit(X_tr, y_tr_s, weights=w_tr)
-            y_hat_va = gam_lin.predict(X_va) * y_sd + y_mu
-            return y_hat_va, gam_lin
-        except Exception:
-            pass
+                    iscore = interval_score(y_val, p025_val, p975_val, alpha=self.alpha)
+                    width = float(np.mean(p975_val - p025_val))
+                    cov = float(np.mean((y_val >= p025_val) & (y_val <= p975_val)))
+                    r50 = rmse(y_val, p50_val)
+                    score = iscore + self.width_penalty * width
 
-        # constant predictor
-        class _Const:
-            def __init__(self, c, q):
-                self._c = float(c)
-                self.expectile = float(q)
+                    models = {"p025": m025, "p50": m050, "p975": m975}
+                    metrics = {"interval_score": iscore, "rmse_p50": r50, "coverage": cov, "width": width}
+                    self._log(f"[TUNE] ns={ns} lam={lam:.4g} interval={iscore:.4g} width={width:.0f} cov={cov:.3f} rmse50={r50:.4g}")
+                else:
+                    e = self.expectiles[0]
+                    m = self._fit_one(e, ns, lam, X_train, y_train, weights)
+                    p_val = m.predict(X_val)
+                    r = rmse(y_val, p_val)
+                    score = r
+                    key = "p50" if abs(e - 0.5) < 1e-6 else f"e{e}"
+                    models = {key: m}
+                    metrics = {"rmse": r}
+                    self._log(f"[TUNE] ns={ns} lam={lam:.4g} rmse={r:.4g}")
 
-            def predict(self, X):
-                X = np.asarray(X)
-                return np.full(X.shape[0], self._c, float)
+                if (best_pair is None) or (score < best_pair[0]):
+                    best_pair = (score, type("_TuneResult", (), {"n_splines": ns, "lam": float(lam), "models": models, "metrics": metrics})())
 
-        const = _Const(y_mu, expectile)
-        return np.full(X_va.shape[0], y_mu, float), const
+        self.best_ = best_pair[1]
+        return self.best_
 
-    # ----- CV scorer (RMSE on the single expectile) -----
-    def _cv_score(
-        self,
-        X,
-        y,
-        w=None,
-        cfg=None,
-        n_splits: Optional[int] = None,
-        random_state: Optional[int] = None,
-    ) -> float:
-        cfg = cfg or {}
-        lam = float(cfg.get("lam", 300.0))
-        n_splines = int(cfg.get("n_splines", 20))
-        q = float(cfg.get("expectile", self.expectile))
+    def predict_expectiles(self, X):
+        if self.best_ is None:
+            raise RuntimeError("ParamSearchCV has not been fit yet.")
+        return {k: m.predict(X) for k, m in self.best_.models.items()}
 
-        X_df = self._ensure_dataframe(X, EXPECTED_COLS)
-        y = np.asarray(y)
-        base_w = None if w is None else np.asarray(w)
-
-        kf = KFold(
-            n_splits=n_splits or self.n_splits,
-            shuffle=True,
-            random_state=self.random_state if random_state is None else random_state,
-        )
-        rmses = []
-        for tr_idx, va_idx in kf.split(X_df):
-            X_tr_df, X_va_df = X_df.iloc[tr_idx], X_df.iloc[va_idx]
-            y_tr, y_va = y[tr_idx], y[va_idx]
-
-            # per-fold weights from train fold only
-            w_tr = self.weighting._make_weights(
-                X_tr_df, base_w[tr_idx] if base_w is not None else None
-            )
-            w_va = None if base_w is None else base_w[va_idx]
-
-            X_tr = self._preprocess_features(X_tr_df, fit=True)
-            X_va = self._preprocess_features(X_va_df, fit=False)
-
-            y_hat, _ = self._fit_one_expectile_core(
-                X_tr, y_tr, w_tr, X_va, expectile=q, lam=lam, n_splines=n_splines
-            )
-            mse = mean_squared_error(y_va, y_hat, sample_weight=w_va)
-            rmses.append(float(np.sqrt(mse)))
-        return float(np.mean(rmses)) if rmses else float("inf")
-
-    # ----- golden-section search over log(lam) -----
-    def _golden_search_loglam(
-        self,
-        X,
-        y,
-        w,
-        *,
-        base_cfg: Dict[str, Any],
-        loglam_range: Tuple[float, float] | None = None,
-        max_iters: Optional[int] = None,
-    ) -> Tuple[Dict[str, Any], float]:
-        if loglam_range is None:
-            loglam_range = self.initial_loglam_range
-        if max_iters is None:
-            max_iters = self.lam_iters
-
-        # guardrails
-        lo = max(np.log(10.0), float(loglam_range[0]))
-        hi = min(np.log(1e5), float(loglam_range[1]))
-
-        phi = (1 + 5**0.5) / 2
-        invphi = 1 / phi
-        a, b = lo, hi
-        c = b - (b - a) * invphi
-        d = a + (b - a) * invphi
-
-        cfg_c = dict(base_cfg, lam=float(np.exp(c)))
-        sc_c = self._cv_score(X, y, w, cfg=cfg_c)
-        cfg_d = dict(base_cfg, lam=float(np.exp(d)))
-        sc_d = self._cv_score(X, y, w, cfg=cfg_d)
-
-        for _ in range(max(max_iters - 1, 0)):
-            if sc_c <= sc_d:
-                b, d, sc_d = d, c, sc_c
-                c = b - (b - a) * invphi
-                cfg_c = dict(base_cfg, lam=float(np.exp(c)))
-                sc_c = self._cv_score(X, y, w, cfg=cfg_c)
-            else:
-                a, c, sc_c = c, d, sc_d
-                d = a + (b - a) * invphi
-                cfg_d = dict(base_cfg, lam=float(np.exp(d)))
-                sc_d = self._cv_score(X, y, w, cfg=cfg_d)
-
-        return (cfg_c, sc_c) if sc_c <= sc_d else (cfg_d, sc_d)
-
-    # ----- adaptive grid over n_splines with elasticity hint (optional) -----
-    def _adaptive_grid_search(
-        self, X, y, sample_weight=None
-    ) -> Tuple[Optional[Dict[str, Any]], float]:
-        X_df = self._ensure_dataframe(X, EXPECTED_COLS)
-        unique_products = (
-            X_df["product_encoded"].unique() if "product_encoded" in X_df else []
-        )
-        es = self.elasticity_scores or {}
-        mean_elasticity = (
-            float(np.mean([es.get(p, 0.5) for p in unique_products]))
-            if len(unique_products)
-            else 0.5
-        )
-
-        # adjust search ranges
-        if mean_elasticity > 0.7:
-            n_splines_grid = (24, 28, 32)
-            loglam_range = (np.log(20.0), np.log(1000.0))
-        elif mean_elasticity < 0.3:
-            n_splines_grid = (10, 14, 18)
-            loglam_range = (np.log(200.0), np.log(5000.0))
-        else:
-            n_splines_grid = self.initial_n_splines
-            loglam_range = self.initial_loglam_range
-
-        current_best_cfg = None
-        current_best_score = np.inf
-        initial_lam_iters = max(4, self.lam_iters // 2)
-
-        # phase 1
-        for ns in n_splines_grid:
-            base_cfg = {"n_splines": int(ns), "expectile": self.expectile}
-            cfg, score = self._golden_search_loglam(
-                X,
-                y,
-                sample_weight,
-                base_cfg=base_cfg,
-                loglam_range=loglam_range,
-                max_iters=initial_lam_iters,
-            )
-            if score < current_best_score:
-                current_best_score = score
-                current_best_cfg = cfg
-                if self.verbose:
-                    print(f"Improvement: New score {score:.4f} @ {cfg}")
-
-        # phase 2 (refine around best)
-        if current_best_cfg is not None:
-            best_ns = int(current_best_cfg["n_splines"])
-            best_lam_log = float(np.log(current_best_cfg["lam"]))
-            ns_step = 5
-            lam_window = 0.5
-            refined_ns = [
-                max(8, best_ns - ns_step),
-                best_ns,
-                min(36, best_ns + ns_step),
-            ]
-            refined_loglam = (best_lam_log - lam_window, best_lam_log + lam_window)
-
-            for ns in refined_ns:
-                base_cfg = {"n_splines": int(ns), "expectile": self.expectile}
-                cfg, score = self._golden_search_loglam(
-                    X,
-                    y,
-                    sample_weight,
-                    base_cfg=base_cfg,
-                    loglam_range=refined_loglam,
-                    max_iters=self.lam_iters,
-                )
-                if score < current_best_score:
-                    current_best_score = score
-                    current_best_cfg = cfg
-                    if self.verbose:
-                        print(f"Refine: New score {score:.4f} @ {cfg}")
-
-        return current_best_cfg, current_best_score
-
-    # ----- public fit -----
-    def fit(self, X, y, sample_weight=None, verbose=False):
-        self.verbose = verbose
-        best_cfg, _ = self._adaptive_grid_search(X, y, sample_weight)
-        if best_cfg is None:
-            return None, None
-
-        X_df = self._ensure_dataframe(X, EXPECTED_COLS)
-        full_w = self.weighting._make_weights(X_df, sample_weight)
-
-        X_full = self._preprocess_features(X_df, fit=True)
-        y_full = np.asarray(y)
-
-        _, model = self._fit_one_expectile_core(
-            X_full,
-            y_full,
-            full_w,
-            X_full,
-            expectile=float(best_cfg.get("expectile", self.expectile)),
-            lam=float(best_cfg["lam"]),
-            n_splines=int(best_cfg["n_splines"]),
-        )
-
-        self.final_model_ = model
-        self.final_cfg_ = {
-            "lam": float(best_cfg["lam"]),
-            "n_splines": int(best_cfg["n_splines"]),
-            "expectile": float(best_cfg.get("expectile", self.expectile)),
-        }
-        return model, self.final_cfg_
+    def fit_predict_expectiles(self, X_train, y_train, X_val, y_val, X_pred, w_train=None, w_val=None):
+        best = self.fit(X_train, y_train, X_val, y_val, w_train=w_train, w_val=w_val)
+        preds = self.predict_expectiles(X_pred)
+        return {"params": {"n_splines": best.n_splines, "lam": best.lam}, "metrics": best.metrics, "pred": preds}
 
 
 class GAMModeler:
@@ -823,43 +521,58 @@ class GAMModeler:
         expectiles=(0.025, 0.50, 0.975),
     ):
         """
-        Fit quantile regressors (one per expectile) and predict units for X_pred.
-        Returns:
-            {"predictions": {f"units_pred_{q}": np.array shape (n_pred,) }}
+        Fit expectile GAMs via ParamSearchCV using a simple temporal holdout (or index split if no date),
+        then predict expectiles on X_pred.
         """
-        # ---- 1) Prepare data (numeric-only, stable scaling) ----
+        # ---- 1) Prepare arrays and optional weights ----
         X_tr = np.asarray(X_train, dtype=float)
+        y_tr = np.asarray(y_train, dtype=float).ravel()
         X_pr = np.asarray(X_pred, dtype=float)
-        y_tr = np.asarray(y_train, dtype=float)
-
-        # Guard against NaNs/Infs
-        X_tr = np.nan_to_num(X_tr, nan=0.0, posinf=0.0, neginf=0.0)
-        X_pr = np.nan_to_num(X_pr, nan=0.0, posinf=0.0, neginf=0.0)
-        y_tr = np.nan_to_num(y_tr, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Optional sample weights
         sw = None
         if w_train is not None:
             sw = np.asarray(w_train, dtype=float)
-            sw = np.nan_to_num(sw, nan=0.0, posinf=0.0, neginf=0.0)
-            # floor tiny weights so the model doesn't learn a trivial zero solution
-            if np.isfinite(sw).any():
-                q20 = (
-                    np.nanquantile(sw[np.isfinite(sw)], 0.20)
-                    if np.isfinite(sw).sum()
-                    else 0.0
-                )
-                floor = 0.1 if (not np.isfinite(q20) or q20 <= 1e-6) else float(q20)
-                sw = np.clip(sw, floor, None)
-            else:
-                sw = np.ones_like(y_tr, dtype=float)
+            if sw.shape[0] != y_tr.shape[0]:
+                sw = None  # guard against mismatched lengths
 
-        # Standardize features to a comparable scale (helps trees split sensibly on price)
-        scaler = StandardScaler(with_mean=True, with_std=True)
-        X_trs = scaler.fit_transform(X_tr)
-        X_prs = scaler.transform(X_pr)
+        # ---- 2) Build a validation split ----
+        n = X_tr.shape[0]
+        if n >= 10:
+            # Prefer temporal split if 'order_date' available via DataEngineer
+            try:
+                # Attempt to sort by order_date from self.param_search.weighting DF if present
+                # Fall back to index-based 80/20 split
+                idx = np.arange(n)
+                cut = max(1, int(0.8 * n))
+                tr_idx, va_idx = idx[:cut], idx[cut:]
+            except Exception:
+                idx = np.arange(n); cut = max(1, int(0.8 * n)); tr_idx, va_idx = idx[:cut], idx[cut:]
+        else:
+            # Tiny sample: use leave-one-out style single val
+            idx = np.arange(n)
+            tr_idx, va_idx = idx[:-1], idx[-1:]
 
-        # ---- 2) Train one quantile model per expectile ----
+        X_trn, y_trn = X_tr[tr_idx], y_tr[tr_idx]
+        X_val, y_val = X_tr[va_idx], y_tr[va_idx]
+        w_trn = sw[tr_idx] if sw is not None else None
+        w_val = sw[va_idx] if sw is not None else None
+
+        # ---- 3) Tune and predict via ParamSearchCV ----
+        ps = self.param_search
+        ps.fit(X_trn, y_trn, X_val, y_val, w_train=w_trn, w_val=w_val)
+        pred_map = ps.predict_expectiles(X_pr)  # keys like 'p025','p50','p975'
+
+        # Normalize keys to your expected names
+        preds = {}
+        for k, arr in pred_map.items():
+            if k == 'p50' or k == 'e0.5':
+                preds['units_pred_0.5'] = np.clip(np.asarray(arr, dtype=float), 0.0, None)
+            elif k == 'p025' or k == 'e0.025':
+                preds['units_pred_0.025'] = np.clip(np.asarray(arr, dtype=float), 0.0, None)
+            elif k == 'p975' or k == 'e0.975':
+                preds['units_pred_0.975'] = np.clip(np.asarray(arr, dtype=float), 0.0, None)
+
+        return {"predictions": preds}
+
         preds = {}
         # Keep reasonably small trees to avoid overfit; you can tune these defaults
         base_kwargs = dict(
@@ -927,12 +640,12 @@ class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
         self.param_search = ParamSearchCV(
-            n_splits=4,
-            n_splines_grid=(15, 20, 25, 30),
-            loglam_range=(np.log(0.05), np.log(20.0)),
-            expectile=0.5,
-            random_state=42,
-            verbose=False,
+            n_splines_grid=(10,14,18),
+            loglam_range=(np.log(0.05), np.log(5.0)), # or even up to np.log(10.0)
+            expectile=(0.025, 0.5, 0.975),
+            alpha=0.10,               
+            width_penalty=0.5,       # try 0.2–0.5; raise if bands still too wide
+            verbose=True,
         )
 
     @classmethod
@@ -970,11 +683,12 @@ class PricingPipeline:
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
 
-        # 2) Weights for training / elasticity
-        topsellers["time_weight"] = self.param_search.weighting._time_decay(topsellers)
-        w_raw = np.asarray(
-            self.param_search.weighting._make_weights(topsellers), dtype=float
-        )
+        # 2) Weights for training / elasticity hts(topsellers), dtype=float)
+        W = Weighting(decay_rate=-0.01)  # pick your decay_rate
+        topsellers["time_weight"] = W._time_decay(topsellers)
+
+        w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
+
         if not np.isfinite(w_raw).any() or np.nansum(w_raw) <= 0:
             w_stable = np.ones(len(topsellers), dtype=float)
         else:
@@ -1406,8 +1120,6 @@ class viz:
         - Actual revenue points
         - Markers for recommended, conservative and optimistic prices
         """
-        import plotly.graph_objects as go
-        import numpy as np
 
         # 0) Guards
         if all_gam_results is None or getattr(all_gam_results, "empty", True):

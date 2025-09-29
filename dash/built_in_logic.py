@@ -283,11 +283,11 @@ class DataEngineer:
 class Weighting:
     def __init__(
         self,
-        decay_rate: float = -0.01,   # negative → older rows get smaller weight
-        rarity_cap: float = 1.25,
-        rarity_beta: float = 0.35,
-        clip_min: float = 0.25,
-        clip_max: float = 2.5,
+        decay_rate: float = -0.015,   # negative → older rows get smaller weight
+        rarity_cap: float = 1.15,
+        rarity_beta: float = 0.25,
+        clip_min: float = 0.35,
+        clip_max: float = 2.0,
     ):
         self.decay_rate = float(decay_rate)
         self.rarity_cap = float(rarity_cap)
@@ -360,15 +360,17 @@ class Weighting:
 
 
 # -------------------- ParamSearchCV with interval scoring (updated) --------------------
-def interval_score(y_true, y_low, y_up, alpha=0.05) -> float:
+def interval_score(y_true, y_low, y_up, alpha=0.05, width_penalty=0.5) -> float:
     y_true = np.asarray(y_true, float)
     L = np.asarray(y_low, float)
-    U = np.asarray(y_up, float)
+    U = np.asarray(y_up, float) 
     width = U - L
     below = (L - y_true) * (y_true < L)
     above = (y_true - U) * (y_true > U)
-    score = width + (2.0/alpha) * (below + above)
+    score = width * (1 + width_penalty) + (2.0/alpha) * (below + above)
     return float(np.mean(score))
+
+    
 
 def rmse(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, float)
@@ -394,15 +396,15 @@ class ParamSearchCV:
         numeric_cols=None,
         categorical_cols=None,
         n_splits: int = 3,
-        n_splines_grid: tuple = (12, 16, 20),
-        loglam_range: tuple = (np.log(0.05), np.log(2.0)),
+        n_splines_grid: tuple = (10,14,18), 
+        loglam_range: tuple = (np.log(0.05), np.log(5.0)), # Increased upper bound
         lam_iters: int = 6,
         expectile=(0.025, 0.5, 0.975),
-        alpha: float = 0.05,
+        alpha: float = 0.10,
         random_state: int = 42,
         verbose: bool = False,
         weighting=None,
-        width_penalty: float = 0.0,
+        width_penalty: float = 0.5,
     ):
         self.numeric_cols = numeric_cols
         self.categorical_cols = categorical_cols
@@ -433,7 +435,14 @@ class ParamSearchCV:
             print(msg, flush=True)
 
     def _fit_one(self, e, ns, lam, X, y, w=None):
-        gam = ExpectileGAM(expectile=e, lam=lam, terms=s(0, n_splines=ns))
+        # gam = ExpectileGAM(expectile=e, lam=lam, terms=s(0, n_splines=ns))
+        gam = ExpectileGAM(
+            expectile=e,
+            lam=lam,
+            terms=s(0, n_splines=ns, basis='ps'), 
+            max_iter=500,  # Increased iterations
+            tol=1e-4      # Tighter convergence
+        )
         gam.fit(X, y, weights=w)
         return gam
 
@@ -1140,6 +1149,16 @@ class viz:
         # 1) Figure
         fig = go.Figure()
 
+        # 2) Calculate time-based opacity for actual points
+        if 'order_date' in all_gam_results.columns:
+            dates = pd.to_datetime(all_gam_results['order_date'])
+            # Scale dates to 0-1 range for opacity
+            date_nums = (dates - dates.min()) / (dates.max() - dates.min())
+            # Map to opacity range 0.15-0.55
+            opacities = 0.15 + (0.4 * date_nums)
+        else:
+            opacities = pd.Series(0.55, index=all_gam_results.index)
+
         # 2) Per-product plotting, **sorted by ASP**
         for group_name, g in all_gam_results.groupby("product"):
             g = g.dropna(subset=["asp"]).copy()
@@ -1147,17 +1166,28 @@ class viz:
                 continue
             g = g.sort_values("asp")
 
-            # Actual revenue points
+            # Get opacities for this group
+            group_opacities = opacities[g.index]
+
+            # Actual revenue points with varying opacity
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
                     y=g["revenue_actual"],
                     mode="markers",
-                    opacity=0.55,
+                    marker=dict(
+                        size=8, 
+                        symbol="circle",
+                        opacity=group_opacities  # Individual point opacities
+                    ),
                     name=f"{group_name} • Actual Revenue",
-                    marker=dict(size=8, symbol="circle"),
                     legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Actual Rev=%{y:$,.0f}<extra></extra>",
+                    hovertemplate=(
+                        "ASP=%{x:$,.2f}<br>"
+                        "Actual Rev=%{y:$,.0f}<br>"
+                        "Date=%{customdata}<extra></extra>"
+                    ),
+                    customdata=g['order_date'] if 'order_date' in g.columns else None
                 )
             )
 

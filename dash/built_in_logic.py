@@ -1,3 +1,8 @@
+'''
+build 2 graphs
+- one for BAU the other events
+'''
+
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
@@ -818,150 +823,65 @@ class PricingPipeline:
         return out.reset_index(drop=True)
 
     def _build_core_frames(self):
-        """
-        Build core frames: topsellers (engineered rows), elasticity_df, all_gam_results (predictions + viz columns)
-        """
-        # 1) Base table and required aliases
         topsellers = self.engineer.prepare()
         if "asp" not in topsellers.columns and "price" in topsellers.columns:
             topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
 
-        # 2) Weights for training
+        # weights
         W = Weighting(decay_rate=-0.01)
         w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
+        w_stable = np.clip(
+            np.where(np.isfinite(w_raw), w_raw, 1.0),
+            np.nanquantile(w_raw[np.isfinite(w_raw)], 0.20) if np.isfinite(w_raw).any() else 0.1,
+            None
+        )
 
-        if not np.isfinite(w_raw).any() or np.nansum(w_raw) <= 0:
-            w_stable = np.ones(len(topsellers), dtype=float)
-        else:
-            finite_w = w_raw[np.isfinite(w_raw)]
-            if finite_w.size == 0:
-                w_stable = np.ones(len(topsellers), dtype=float)
-            else:
-                floor = np.nanquantile(finite_w, 0.20)
-                if not np.isfinite(floor) or floor <= 1e-6:
-                    floor = 0.1
-                w_stable = np.clip(w_raw, floor, None)
-
-        # 3) Elasticity (best-effort)
+        # elasticity
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
             elasticity_df = pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
 
-        # 4) Design matrix and target strictly from EXPECTED_COLS
+        # design matrix + target
         X = topsellers[EXPECTED_COLS].copy()
         y = np.asarray(topsellers["shipped_units"], dtype=float)
 
-        # 5) Create new GAM modeler instance and fit
-        param_search = ParamSearchCV(**self.param_search_kwargs)                 
-        # Create new GAM modeler
+        # fit model
+        param_search = ParamSearchCV(**self.param_search_kwargs)
         modeler = GAMModeler(param_search)
-        # Don't override parameters in fit_predict_expectiles
-        res = modeler.fit_predict_expectiles(
-            X_train=X,
-            y_train=y,
-            X_pred=X,
-            w_train=w_stable
-        )
+        res = modeler.fit_predict_expectiles(X_train=X, y_train=y, X_pred=X, w_train=w_stable)
 
-        # 6) Assemble results with predictions
-        all_gam_results = topsellers[["product"]].copy().reset_index(drop=True)
-        
+        # build results
+        all_gam_results = topsellers[["product", "price", "asin", "asp"]].copy().reset_index(drop=True)
+
+        # add predictions (only units_pred_xxx)
         predictions = res.get("predictions", {})
         for k, arr in predictions.items():
-            all_gam_results[k] = np.asarray(arr, dtype=float)
-            
-        # Ensure we have both p50 and avg predictions
-        if "units_pred_0.5" not in all_gam_results.columns:
-            all_gam_results["units_pred_0.5"] = all_gam_results.get("units_pred_avg", np.nan)
-        if "units_pred_avg" not in all_gam_results.columns:
-            pred_cols = [col for col in all_gam_results.columns if col.startswith("units_pred_0.")]
-            if pred_cols:
-                all_gam_results["units_pred_avg"] = all_gam_results[pred_cols].mean(axis=1)
-            else:
-                all_gam_results["units_pred_avg"] = all_gam_results.get("units_pred_0.5", np.nan)
-
-        
-        # Carry identifiers & prices
-        for col in ["asin", "price", "asp"]:
-            if col in topsellers.columns:
-                all_gam_results[col] = topsellers[col].reset_index(drop=True)
-
-        # P50 price used by tables
-        if "pred_0.5" not in all_gam_results.columns:
-            all_gam_results["pred_0.5"] = (
-                all_gam_results["asp"]
-                if "asp" in all_gam_results.columns
-                else all_gam_results.get("price")
-            )
-
-        # Actual daily revenue (price × daily units)
-        if "revenue_actual" not in all_gam_results.columns:
-            price_col = (
-                "asp"
-                if "asp" in topsellers.columns
-                else ("price" if "price" in topsellers.columns else None)
-            )
-            if price_col is not None and "shipped_units" in topsellers.columns:
-                pr = pd.to_numeric(topsellers[price_col], errors="coerce").reset_index(
-                    drop=True
-                )
-                pu = pd.to_numeric(
-                    topsellers["shipped_units"], errors="coerce"
-                ).reset_index(drop=True)
-                all_gam_results["revenue_actual"] = pr * pu
-            else:
-                all_gam_results["revenue_actual"] = pd.Series(
-                    np.nan, index=all_gam_results.index
+            if k.startswith("units_pred_"):
+                all_gam_results[k] = np.asarray(arr, dtype=float)
+                rev_key = k.replace("units_", "revenue_")
+                all_gam_results[rev_key] = (
+                    all_gam_results["price"].to_numpy() * all_gam_results[k]
                 )
 
-        if (
-            "daily_rev" not in all_gam_results.columns
-            and "revenue_actual" in all_gam_results.columns
-        ):
-            all_gam_results["daily_rev"] = pd.to_numeric(
-                all_gam_results["revenue_actual"], errors="coerce"
-            )
+        # add discount info
+        all_gam_results["deal_discount_percent"] = (
+            topsellers["deal_discount_percent"].fillna(0).clip(lower=0).reset_index(drop=True)
+        )
 
-        # Revenue predictions from units × price
-        price_col = "asp" if "asp" in all_gam_results.columns else "price"
-        if price_col in all_gam_results.columns:
-            for q in ("0.025", "0.5", "0.975"):
-                up, rp = f"units_pred_{q}", f"revenue_pred_{q}"
-                if up in all_gam_results.columns and rp not in all_gam_results.columns:
-                    all_gam_results[rp] = pd.to_numeric(
-                        all_gam_results[up], errors="coerce"
-                    ) * pd.to_numeric(all_gam_results[price_col], errors="coerce")
-
-        # Merge elasticity if available
-        if not elasticity_df.empty and "product" in elasticity_df.columns:
-            keep_cols = ["product"] + [
-                c for c in ["ratio", "elasticity_score"] if c in elasticity_df.columns
-            ]
-            all_gam_results = all_gam_results.merge(
-                elasticity_df[keep_cols], on="product", how="left"
-            )
-
-        # Debug: sanity medians
-        try:
-            med_act = float(
-                np.nanmedian(all_gam_results.get("daily_rev", pd.Series([np.nan])))
-            )
-            med_p50 = float(
-                np.nanmedian(
-                    all_gam_results.get("revenue_pred_0.5", pd.Series([np.nan]))
-                )
-            )
-            print(
-                f"[DBG] med(actual_daily_rev)={med_act:.2f}  med(pred50_rev)={med_p50:.2f}",
-                flush=True,
-            )
-        except Exception:
-            pass
+        # add actuals
+        all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(topsellers["shipped_units"], dtype=float)
+        all_gam_results["daily_rev"] = all_gam_results["revenue_actual"]  # alias if KPI needs it
+        all_gam_results["actual_revenue_scaled"] = (
+            topsellers["price"].to_numpy()
+            * (1 - all_gam_results["deal_discount_percent"].to_numpy() / 100.0)
+            * np.asarray(topsellers["shipped_units"], dtype=float)
+        )
 
         return topsellers, elasticity_df, all_gam_results
+
 
     def _compute_best_tables(self, all_gam_results, topsellers):
         """Run Optimizer and ensure required cols are present."""
@@ -999,7 +919,6 @@ class PricingPipeline:
                         "asp",
                         "units_pred_0.5",
                         "revenue_pred_0.5",
-                        "pred_0.5",
                     ],
                 ]
                 .drop_duplicates(subset=["product"])
@@ -1014,7 +933,6 @@ class PricingPipeline:
                     "asp",
                     "units_pred_0.5",
                     "revenue_pred_0.5",
-                    "pred_0.5",
                 ]
             )
         return best50
@@ -1252,19 +1170,8 @@ class viz:
         load_figure_template(templates)
         self.template = template
 
+
     def gam_results(self, all_gam_results: pd.DataFrame):
-        """
-        Single y-axis revenue chart with:
-        - Revenue band (P2.5 - P97.5)
-        - P50 revenue line
-        - Actual revenue points
-        - Markers for recommended, conservative and optimistic prices
-        """
-
-        # 0) Guards
-        if all_gam_results is None or getattr(all_gam_results, "empty", True):
-            return self.empty_fig("No model data")
-
         need_cols = [
             "product",
             "asp",
@@ -1277,80 +1184,68 @@ class viz:
         if missing:
             return self.empty_fig(f"Missing column(s): {', '.join(missing)}")
 
-        # 1) Figure
         fig = go.Figure()
-
-        # 2) Calculate time-based opacity for actual points
         if "order_date" in all_gam_results.columns:
             dates = pd.to_datetime(all_gam_results["order_date"])
-            # Scale dates to 0-1 range for opacity
             date_nums = (dates - dates.min()) / (dates.max() - dates.min())
-            # Map to opacity range 0.15-0.55
             opacities = 0.15 + (0.4 * date_nums)
         else:
             opacities = pd.Series(0.55, index=all_gam_results.index)
 
-        # 2) Per-product plotting, **sorted by ASP**
+
+
         for group_name, g in all_gam_results.groupby("product"):
             g = g.dropna(subset=["asp"]).copy()
             if g.empty:
                 continue
             g = g.sort_values("asp")
 
-            # Get opacities for this group
-            group_opacities = opacities[g.index]
 
-            # Actual revenue points with varying opacity
+            group_opacities = opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
+
+
             fig.add_trace(
                 go.Scatter(
-                    x=g["asp"],
-                    y=g["revenue_actual"],
-                    mode="markers",
-                    marker=dict(
-                        size=8,
-                        symbol="circle",
-                        opacity=group_opacities,  # Individual point opacities
-                    ),
-                    name=f"{group_name} • Actual Revenue",
-                    legendgroup=group_name,
-                    hovertemplate=(
-                        "ASP=%{x:$,.2f}<br>"
-                        "Actual Rev=%{y:$,.0f}<br>"
-                        "Date=%{customdata}<extra></extra>"
-                    ),
-                    customdata=g["order_date"] if "order_date" in g.columns else None,
-                )
+                x=g["asp"],
+                y=g["revenue_actual"],
+                mode="markers",
+                name=f"{group_name} • Actual Revenue",
+                marker=dict(size=7, color="gray", opacity=group_opacities),
+             )
             )
 
-            # Revenue band (P2.5–P97.5), drawn as two traces to avoid self-crossing
+
             fig.add_trace(
                 go.Scatter(
-                    name=f"{group_name} (Rev band upper)",
                     x=g["asp"],
                     y=g["revenue_pred_0.975"],
                     mode="lines",
                     line=dict(width=0),
                     showlegend=False,
-                    hoverinfo="skip",
-                    legendgroup=group_name,
+                    name=f"{group_name} (Rev band upper)",
                 )
             )
             fig.add_trace(
                 go.Scatter(
-                    name=f"{group_name} (Rev band)",
                     x=g["asp"],
                     y=g["revenue_pred_0.025"],
                     mode="lines",
                     line=dict(width=0),
                     fill="tonexty",
                     opacity=0.25,
-                    showlegend=False,
-                    hoverinfo="skip",
-                    legendgroup=group_name,
+                    name=f"{group_name} • Predicted Rev band",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"],
+                    y=g["revenue_pred_0.5"],
+                    mode="lines",
+                    name=f"{group_name} • Predicted Rev (P50)",
                 )
             )
 
-            # Diamonds for recommended / conservative / optimistic prices
+            # ----------------- Diamonds for recommended / conservative / optimistic prices
             best_rows = {
                 "Recommended (P50)": (
                     "revenue_pred_0.5",
@@ -1380,24 +1275,12 @@ class viz:
                             color=marker_colors[label], size=12, symbol="diamond"
                         ),
                         name=f"{group_name} • {label}",
-                        legendgroup=group_name,
+                        # legendgroup=group_name,
                         hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
                     )
                 )
-
-            # P50 line (sorted!)
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"],
-                    y=g["revenue_pred_0.5"],
-                    mode="lines",
-                    name=f"{group_name} • Expected Revenue (P50)",
-                    line=dict(width=2),
-                    legendgroup=group_name,
-                    hovertemplate="ASP=%{x:$,.2f}<br>Expected Rev=%{y:$,.0f}}<extra></extra>",
-                )
-            )
-
+        # ----------------------------------
+        
         # 3) Layout (avoid crashing if self.template is not set)
         template = getattr(self, "template", None)
         fig.update_layout(
@@ -1411,6 +1294,7 @@ class viz:
         fig.update_xaxes(
             title="Average Selling Price (ASP)", tickprefix="$", separatethousands=True
         )
+
         return fig
 
     def elast_dist(self, elast_df: pd.DataFrame):

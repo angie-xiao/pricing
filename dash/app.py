@@ -12,6 +12,7 @@ from navbar import get_navbar
 from home import Homepage
 import overview, opps, faq
 from helpers import Paths, Cache, DataEng
+from built_in_logic import PricingPipeline, DEFAULT_PARAM_SEARCH
 
 import warnings
 
@@ -23,20 +24,10 @@ FORCE_REBUILD = os.getenv("OPTIMA_FORCE_REBUILD", "0") in ("1", "true", "True")
 BASE_DIR = Paths.BASE_DIR
 PROJECT_BASE = Paths.PROJECT_BASE
 
-
-# Example parameters you might want to tune
-param_search_kwargs = {
-    'n_splines_grid': (10, 14, 18),
-    'loglam_range': (np.log(0.05), np.log(15.0)),
-    'width_penalty': 15.5,
-    'alpha': 0.10,
-    # Add any other parameters you want to modify
-}
-
 frames = Cache.build_frames_with_cache(
     PROJECT_BASE,
     force_rebuild=True,  # Set to True when you want to force rebuild
-    param_search_kwargs=param_search_kwargs
+    param_search_kwargs=DEFAULT_PARAM_SEARCH
 )
 
 

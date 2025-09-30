@@ -1,6 +1,8 @@
 '''
 build 2 graphs
 - one for BAU the other events
+
+in dataengineer.prepare(), we did something like, count days at ASP & actual revenue, daily aggregation by asin-event-date, etc. the logic was to discount towards this... idk you have a great point. but i dont want us to duplicate the same thought. make a suggestion how to clean this up. also we have a rarity _rarity_multiplier in weighting class
 '''
 
 # --------- built_in_logic.py  ---------
@@ -46,6 +48,16 @@ EXPECTED_COLS = [
 ]
 CAT_COLS = ["event_encoded", "product_encoded"]
 NUM_COLS = ["price", "deal_discount_percent"]
+
+
+DEFAULT_PARAM_SEARCH = dict(
+    n_splines_grid=(20, 30, 40),
+    loglam_range=(np.log(0.001), np.log(1.0)),
+    expectile=(0.025, 0.5, 0.975),
+    alpha=0.01,
+    random_state=42,
+    verbose=False,
+)
 
 
 def _v_best(obj, msg: str):
@@ -438,14 +450,14 @@ class ParamSearchCV:
         categorical_cols=None,
         n_splits: int = 3,
         n_splines_grid: tuple = (10, 14, 18),
-        loglam_range: tuple = (np.log(0.1), np.log(10.0)),
+        loglam_range: tuple = (np.log(0.001), np.log(1.0)),
         lam_iters: int = 6,
         expectile=(0.025, 0.5, 0.975),
         alpha: float = 0.10,
         random_state: int = 42,
         verbose: bool = False,
         weighting=None,
-        width_penalty: float = 5.5,
+        width_penalty: float = 15.5,
     ):
         self.numeric_cols = numeric_cols
         self.categorical_cols = categorical_cols
@@ -475,15 +487,15 @@ class ParamSearchCV:
 
         self.best_ = None
 
-        print(
-            f"[DBG ParamSearchCV] "
-            f"n_splines_grid={self.n_splines_grid}, "
-            f"loglam_range={self.loglam_range}, "
-            f"lam_iters={self.lam_iters}, "
-            f"alpha={self.alpha}, "
-            f"width_penalty={self.width_penalty}, "
-            f"expectiles={self.expectiles}"
-        )
+        # print(
+        #     f"[DBG ParamSearchCV] "
+        #     f"n_splines_grid={self.n_splines_grid}, "
+        #     f"loglam_range={self.loglam_range}, "
+        #     f"lam_iters={self.lam_iters}, "
+        #     f"alpha={self.alpha}, "
+        #     f"width_penalty={self.width_penalty}, "
+        #     f"expectiles={self.expectiles}"
+        # )
 
 
 
@@ -766,18 +778,7 @@ class Optimizer:
 class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
-        
-        # Store the parameters
-        self.param_search_kwargs = {  # Store as param_search_kwargs
-            'n_splines_grid': (10, 14, 18),
-            'loglam_range': (np.log(0.05), np.log(10.0)),
-            'expectile': (0.025, 0.5, 0.975),
-            'alpha': 0.10,
-            'width_penalty': 5.5,
-            'verbose': True
-        }
-        if param_search_kwargs:
-            self.param_search_kwargs.update(param_search_kwargs)
+        self.param_search_kwargs = param_search_kwargs or DEFAULT_PARAM_SEARCH
 
     @classmethod
     def from_csv_folder(
@@ -870,7 +871,6 @@ class PricingPipeline:
         )
 
         return topsellers, elasticity_df, all_gam_results
-
 
     def _compute_best_tables(self, all_gam_results, topsellers):
         """Run Optimizer and ensure required cols are present."""
@@ -1190,17 +1190,6 @@ class viz:
             g = g.sort_values("asp")
             group_opacities = opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
 
-            # actual
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"],
-                    y=g["revenue_actual"],
-                    mode="markers",
-                    name=f"{group_name} • Actual Revenue",
-                    marker=dict(size=8, color="blue", opacity=group_opacities),
-                )
-            )
-
             # ------- pred bands -------
             fig.add_trace(
                 go.Scatter(
@@ -1229,11 +1218,21 @@ class viz:
                     y=g["revenue_pred_0.5"],
                     mode="lines",
                     name=f"{group_name} • Predicted Rev (P50)",
+                    line=dict(color='rgba(184, 33, 50, 1)')           
                 )
             )
-            # --------------------------------------------------------
 
-            # Diamonds for recommended / conservative / optimistic prices
+            # ----------------------- actual ---------------------------------
+            fig.add_trace(
+                go.Scatter(
+                    x=g["asp"],
+                    y=g["revenue_actual"],
+                    mode="markers",
+                    name=f"{group_name} • Actual Revenue",
+                    marker=dict(size=8, color="#808992", opacity=group_opacities),
+                )
+            )
+            # -------------- Diamonds for pred prices --------------
             best_rows = {
                 "Recommended (P50)": (
                     "revenue_pred_0.5",

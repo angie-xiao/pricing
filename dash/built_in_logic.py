@@ -1,6 +1,10 @@
 """
-build 2 graphs
-- one for BAU the other events
+(1) build 2 graphs
+    - one for BAU the other events
+
+(2) graident boost/grid tune weights
+
+(3) more splines
 """
 
 # --------- built_in_logic.py  ---------
@@ -256,7 +260,7 @@ class Weighting:
     def __init__(
         self,
         decay_rate: float = -0.015,  # negative → older rows get smaller weight
-        rarity_cap: float = 1.15,
+        rarity_cap: float = 2.05,
         rarity_beta: float = 0.25,
         clip_min: float = 0.35,
         clip_max: float = 2.0,
@@ -1220,6 +1224,7 @@ class viz:
                     x=g["asp"],
                     y=g["revenue_actual"],
                     mode="markers",
+                    marker_symbol='x',
                     name=f"{group_name} • Actual Revenue",
                     marker=dict(size=8, color="#808992", opacity=group_opacities),
                 )

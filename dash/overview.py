@@ -219,7 +219,7 @@ def layout(products_lookup):
             dbc.Row(
                 [
                     html.H3(
-                        "Predictive Graph",
+                        "Price vs Expected Revenue",
                         className="mt-3",
                         style={
                             "marginLeft": "50px",

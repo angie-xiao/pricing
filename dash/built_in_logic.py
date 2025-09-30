@@ -108,10 +108,13 @@ class ElasticityAnalyzer:
 
 
 class DataEngineer:
-    def __init__(self, pricing_df, product_df, top_n=10):
+    '''
+    '''
+    def __init__(self, pricing_df, product_df, top_n=10, granularity="daily"):
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
+        self.granularity = granularity  # "daily", "weekly", "monthly", "run"
 
     @staticmethod
     def _nonneg(s: pd.Series) -> pd.Series:
@@ -183,20 +186,20 @@ class DataEngineer:
         df_days = self._days_at_price(df)
         df_days["revenue"] = (df_days["shipped_units"] * df_days["price"]).clip(lower=0)
 
+        # Example: if we collapse to weeks
+        if self.granularity == "weekly":
+            df_days["year"] = df_days["order_date"].dt.year
+            df_days["week"] = df_days["order_date"].dt.isocalendar().week
+            group_cols = ["asin", "product", "event_name", "year", "week"]
+        else:
+            group_cols = ["asin", "product", "event_name", "order_date"]
+
         df_agg = (
             df_days[
-                [
-                    "asin",
-                    "product",
-                    "event_name",
-                    "order_date",
-                    "shipped_units",
-                    "revenue",
-                    "deal_discount_percent",
-                    "current_price",
-                ]
+                group_cols
+                + ["shipped_units", "revenue", "deal_discount_percent", "current_price"]
             ]
-            .groupby(["asin", "product", "event_name", "order_date"])
+            .groupby(group_cols)
             .agg(
                 {
                     "shipped_units": "sum",
@@ -207,6 +210,7 @@ class DataEngineer:
             )
             .reset_index()
         )
+
         df_agg["price"] = (df_agg["revenue"] / df_agg["shipped_units"]).replace(
             [np.inf, -np.inf], np.nan
         )
@@ -1136,6 +1140,17 @@ class viz:
         load_figure_template(templates)
         self.template = template
 
+
+    def revenue_axis_label(self, granularity='weekly'):
+        ''' granualrity = weekly/monthly/daily '''
+        if granularity == "weekly":
+            return "Expected Weekly Revenue ($)"
+        elif granularity == "monthly":
+            return "Expected Monthly Revenue ($)"
+        else:
+            return "Expected Avg Daily Revenue ($)"
+
+
     def gam_results(self, all_gam_results: pd.DataFrame):
         need_cols = [
             "product",
@@ -1209,7 +1224,7 @@ class viz:
                     marker=dict(size=8, color="#808992", opacity=group_opacities),
                 )
             )
-            # -------------- Diamonds for pred prices --------------
+            # ------------------- Diamonds for pred prices -------------------
             best_rows = {
                 "Recommended (P50)": (
                     "revenue_pred_0.5",
@@ -1245,17 +1260,13 @@ class viz:
                 )
 
         # 3) Layout (avoid crashing if self.template is not set)
-        template = getattr(self, "template", None)
+        template = getattr(self, "template", None)  
         fig.update_layout(
-            template=template if template else None,
             legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
-            margin=dict(r=8, t=40, b=40, l=60),
-        )
-        fig.update_yaxes(
-            title="Expected Daily Revenue", tickprefix="$", separatethousands=True
-        )
-        fig.update_xaxes(
-            title="Average Selling Price (ASP)", tickprefix="$", separatethousands=True
+            template=template if template else None,
+            title="Price vs Expected Revenue",
+            yaxis_title=self.revenue_axis_label(granularity="weekly"),
+            xaxis_title="Average Selling Price (ASP)",
         )
 
         return fig

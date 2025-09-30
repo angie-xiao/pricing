@@ -470,6 +470,18 @@ class ParamSearchCV:
 
         self.best_ = None
 
+        print(
+            f"[DBG ParamSearchCV] "
+            f"n_splines_grid={self.n_splines_grid}, "
+            f"loglam_range={self.loglam_range}, "
+            f"lam_iters={self.lam_iters}, "
+            f"alpha={self.alpha}, "
+            f"width_penalty={self.width_penalty}, "
+            f"expectiles={self.expectiles}"
+        )
+
+
+
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
@@ -484,6 +496,8 @@ class ParamSearchCV:
             tol=1e-4,  # Tighter convergence
         )
         gam.fit(X, y, weights=w)
+        self._log(f"[DBG FitOne] e={e}, n_splines={ns}, lam={lam}")
+
         return gam
     
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
@@ -676,6 +690,7 @@ class GAMModeler:
             if model_key in best.models:
                 pred = best.models[model_key].predict(X_pr)
                 preds[pred_key] = np.clip(pred, 0.0, None)
+        print(f"[DBG GAMModeler] Using ParamSearchCV.best_ = {self.param_search.best_}")
 
         # Calculate average prediction if we have all three expectiles
         pred_keys = [f'units_pred_{e}' for e in [0.025, 0.5, 0.975]]

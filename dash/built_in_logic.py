@@ -730,56 +730,38 @@ class GAMModeler:
             }
         }
 
-
 class Optimizer:
     @staticmethod
     def run(all_gam_results: pd.DataFrame) -> dict:
-        """Calculate weighted predictions based on ratio"""
         df = all_gam_results.copy()
-        
-        # Initialize weighted_pred column
-        if "ratio" in df.columns:
-            max_ratio = df["ratio"].max()
-            confidence_weight = 1 - (df["ratio"] / max_ratio)
-        else:
-            confidence_weight = 0.5
-            
-        # Check for required prediction columns
-        required_cols = ["units_pred_0.5", "units_pred_avg"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        
-        if missing_cols:
-            print(f"Warning: Missing columns: {missing_cols}")
-            # If missing p50, try to use avg
-            if "units_pred_0.5" not in df.columns and "units_pred_avg" in df.columns:
-                df["units_pred_0.5"] = df["units_pred_avg"]
-            # If missing avg, try to calculate from available predictions
-            elif "units_pred_avg" not in df.columns:
-                pred_cols = [col for col in df.columns if col.startswith("units_pred_0.")]
-                if pred_cols:
-                    df["units_pred_avg"] = df[pred_cols].mean(axis=1)
-                else:
-                    df["units_pred_avg"] = df.get("units_pred_0.5", pd.Series(np.nan))
 
-        # Calculate weighted prediction
-        if "units_pred_0.5" in df.columns and "units_pred_avg" in df.columns:
+        # choose prediction basis
+        if "revenue_pred_0.5" in df.columns:
+            base_col = "revenue_pred_0.5"
+            avg_col = "revenue_pred_avg" if "revenue_pred_avg" in df.columns else None
+        else:
+            base_col = "units_pred_0.5" if "units_pred_0.5" in df.columns else None
+            avg_col = "units_pred_avg" if "units_pred_avg" in df.columns else None
+
+        if base_col is None:
+            raise ValueError("No prediction columns (units or revenue) found in all_gam_results.")
+
+        # compute weighted_pred
+        if avg_col is not None:
+            max_ratio = df["ratio"].max() if "ratio" in df.columns else 1.0
+            confidence_weight = 1 - (df["ratio"] / max_ratio) if "ratio" in df.columns else 0.5
             df["weighted_pred"] = (
-                df["units_pred_0.5"] * confidence_weight + 
-                df["units_pred_avg"] * (1 - confidence_weight)
+                df[base_col] * confidence_weight +
+                df[avg_col] * (1 - confidence_weight)
             )
         else:
-            # Fallback to available prediction
-            df["weighted_pred"] = df.get("units_pred_0.5", 
-                                       df.get("units_pred_avg", pd.Series(np.nan)))
+            df["weighted_pred"] = df[base_col]
 
         return {
+            "best_avg": DataEng.pick_best_by_group(df, "product", base_col),
             "best_weighted": DataEng.pick_best_by_group(df, "product", "weighted_pred"),
-            "best_avg": DataEng.pick_best_by_group(df, "product", "units_pred_avg"),
-            "best50": DataEng.pick_best_by_group(df, "product", "units_pred_0.5"),
-            "best975": DataEng.pick_best_by_group(df, "product", "units_pred_0.975"),
-            "best25": DataEng.pick_best_by_group(df, "product", "units_pred_0.025"),
-            "all_gam_results": df,
         }
+    
 
 class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
@@ -824,13 +806,20 @@ class PricingPipeline:
 
     def _build_core_frames(self):
         topsellers = self.engineer.prepare()
+
+        # --- Filter to BAU only ---
+        if "event_name" in topsellers.columns:
+            topsellers = topsellers[topsellers["event_name"] == "BAU"].copy()
+        if topsellers.empty:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
         if "asp" not in topsellers.columns and "price" in topsellers.columns:
             topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
 
-        # weights
-        W = Weighting(decay_rate=-0.01)
+        # weights with stronger recency decay
+        W = Weighting(decay_rate=-0.05)
         w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
         w_stable = np.clip(
             np.where(np.isfinite(w_raw), w_raw, 1.0),
@@ -838,17 +827,17 @@ class PricingPipeline:
             None
         )
 
-        # elasticity
+        # elasticity (computed on units)
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
             elasticity_df = pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
 
-        # design matrix + target
+        # design matrix + target (target = shipped units)
         X = topsellers[EXPECTED_COLS].copy()
         y = np.asarray(topsellers["shipped_units"], dtype=float)
 
-        # fit model
+        # fit model on units
         param_search = ParamSearchCV(**self.param_search_kwargs)
         modeler = GAMModeler(param_search)
         res = modeler.fit_predict_expectiles(X_train=X, y_train=y, X_pred=X, w_train=w_stable)
@@ -856,7 +845,7 @@ class PricingPipeline:
         # build results
         all_gam_results = topsellers[["product", "price", "asin", "asp"]].copy().reset_index(drop=True)
 
-        # add predictions (only units_pred_xxx)
+        # add unit predictions + revenue predictions
         predictions = res.get("predictions", {})
         for k, arr in predictions.items():
             if k.startswith("units_pred_"):
@@ -871,9 +860,9 @@ class PricingPipeline:
             topsellers["deal_discount_percent"].fillna(0).clip(lower=0).reset_index(drop=True)
         )
 
-        # add actuals
+        # add actual revenue
         all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(topsellers["shipped_units"], dtype=float)
-        all_gam_results["daily_rev"] = all_gam_results["revenue_actual"]  # alias if KPI needs it
+        all_gam_results["daily_rev"] = all_gam_results["revenue_actual"]
         all_gam_results["actual_revenue_scaled"] = (
             topsellers["price"].to_numpy()
             * (1 - all_gam_results["deal_discount_percent"].to_numpy() / 100.0)
@@ -1171,6 +1160,7 @@ class viz:
         self.template = template
 
 
+
     def gam_results(self, all_gam_results: pd.DataFrame):
         need_cols = [
             "product",
@@ -1185,36 +1175,33 @@ class viz:
             return self.empty_fig(f"Missing column(s): {', '.join(missing)}")
 
         fig = go.Figure()
+
         if "order_date" in all_gam_results.columns:
             dates = pd.to_datetime(all_gam_results["order_date"])
             date_nums = (dates - dates.min()) / (dates.max() - dates.min())
-            opacities = 0.15 + (0.4 * date_nums)
+            opacities = 0.05 + (0.75 * date_nums)
         else:
             opacities = pd.Series(0.55, index=all_gam_results.index)
-
-
 
         for group_name, g in all_gam_results.groupby("product"):
             g = g.dropna(subset=["asp"]).copy()
             if g.empty:
                 continue
             g = g.sort_values("asp")
-
-
             group_opacities = opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
 
-
+            # actual
             fig.add_trace(
                 go.Scatter(
-                x=g["asp"],
-                y=g["revenue_actual"],
-                mode="markers",
-                name=f"{group_name} • Actual Revenue",
-                marker=dict(size=7, color="gray", opacity=group_opacities),
-             )
+                    x=g["asp"],
+                    y=g["revenue_actual"],
+                    mode="markers",
+                    name=f"{group_name} • Actual Revenue",
+                    marker=dict(size=8, color="blue", opacity=group_opacities),
+                )
             )
 
-
+            # ------- pred bands -------
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
@@ -1222,7 +1209,6 @@ class viz:
                     mode="lines",
                     line=dict(width=0),
                     showlegend=False,
-                    name=f"{group_name} (Rev band upper)",
                 )
             )
             fig.add_trace(
@@ -1232,8 +1218,9 @@ class viz:
                     mode="lines",
                     line=dict(width=0),
                     fill="tonexty",
+                    fillcolor='rgba(232, 233, 235, 0.7)', # bright gray, opc = 0.7
                     opacity=0.25,
-                    name=f"{group_name} • Predicted Rev band",
+                    name=f"{group_name} • Predicted Rev Band",
                 )
             )
             fig.add_trace(
@@ -1244,8 +1231,9 @@ class viz:
                     name=f"{group_name} • Predicted Rev (P50)",
                 )
             )
+            # --------------------------------------------------------
 
-            # ----------------- Diamonds for recommended / conservative / optimistic prices
+            # Diamonds for recommended / conservative / optimistic prices
             best_rows = {
                 "Recommended (P50)": (
                     "revenue_pred_0.5",
@@ -1279,8 +1267,8 @@ class viz:
                         hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
                     )
                 )
-        # ----------------------------------
-        
+
+
         # 3) Layout (avoid crashing if self.template is not set)
         template = getattr(self, "template", None)
         fig.update_layout(
@@ -1296,6 +1284,7 @@ class viz:
         )
 
         return fig
+ 
 
     def elast_dist(self, elast_df: pd.DataFrame):
         fig = (

@@ -24,7 +24,22 @@ BASE_DIR = Paths.BASE_DIR
 PROJECT_BASE = Paths.PROJECT_BASE
 
 
-frames = Cache.build_frames_with_cache(PROJECT_BASE, force_rebuild=True)
+# Example parameters you might want to tune
+param_search_kwargs = {
+    'n_splines_grid': (10, 14, 18),
+    'loglam_range': (np.log(0.05), np.log(15.0)),
+    'width_penalty': 15.5,
+    'alpha': 0.10,
+    # Add any other parameters you want to modify
+}
+
+frames = Cache.build_frames_with_cache(
+    PROJECT_BASE,
+    force_rebuild=True,  # Set to True when you want to force rebuild
+    param_search_kwargs=param_search_kwargs
+)
+
+
 price_quant_df = frames["price_quant_df"]
 best_avg_df = frames["best_avg"]
 all_gam_results = frames["all_gam_results"]

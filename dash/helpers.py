@@ -17,7 +17,6 @@ import pandas as pd
 from dash import html
 import dash_bootstrap_components as dbc
 from dash.dash_table import FormatTemplate
-from sklearn.metrics import mean_squared_error
 
 
 # =====================================================================
@@ -115,32 +114,48 @@ class Cache:
         product_file: str = "products.csv",
         top_n: int = 10,
         force_rebuild: bool = True,
+        param_search_kwargs: dict = None  # Add this parameter
     ) -> Dict[str, pd.DataFrame]:
-
         cache_dir = os.path.join(base_dir, ".cache")
         os.makedirs(cache_dir, exist_ok=True)
 
         pricing_path = os.path.join(base_dir, data_folder, pricing_file)
         product_path = os.path.join(base_dir, data_folder, product_file)
+        
+        # Include parameters in signature
+        param_sig = ""
+        if param_search_kwargs:
+            param_items = sorted(param_search_kwargs.items())
+            param_sig = "|".join(f"{k}:{v}" for k, v in param_items)
+        
         sig = Cache.files_sig(
-            [pricing_path, product_path], top_n=top_n, version=Cache.code_sig()
+            [pricing_path, product_path], 
+            top_n=top_n, 
+            version=f"{Cache.code_sig()}|{param_sig}"
         )
 
         cache_fp = os.path.join(cache_dir, f"frames_{sig}.pkl")
 
-        # Force rebuild or use cache if available
+        # Clear cache if force_rebuild
+        if force_rebuild and os.path.exists(cache_fp):
+            os.remove(cache_fp)
+
         if force_rebuild or not os.path.exists(cache_fp):
             from built_in_logic import PricingPipeline
-
             frames = PricingPipeline.from_csv_folder(
-                base_dir, data_folder, pricing_file, product_file, top_n
+                base_dir,
+                data_folder,
+                pricing_file,
+                product_file,
+                top_n,
+                param_search_kwargs  # Pass the parameters
             )
-
-            # Save to cache
+            
+            # Only save to cache if not forcing rebuild
             if not force_rebuild:
                 with open(cache_fp, "wb") as f:
                     pickle.dump(frames, f)
-
+            
             return frames
 
         # Load from cache

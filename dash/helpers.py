@@ -174,12 +174,18 @@ class DataEng:
         out = df.copy()
         out.columns = out.columns.str.strip().str.lower()
         return out
-
+ 
     @staticmethod
-    def compute_product_series(
-        df: pd.DataFrame, tag_col: str = "tag", var_col: str = "variation"
-    ) -> pd.Series:
-        return (df[tag_col].astype(str) + " " + df[var_col].astype(str)).str.upper()
+    def compute_product_series(df, tag_col="tag", var_col="variation"):
+        if tag_col in df.columns and var_col in df.columns:
+            return (df[tag_col].astype(str) + " " + df[var_col].astype(str)).str.upper()
+        elif tag_col in df.columns:
+            return df[tag_col].astype(str).str.upper()
+        elif var_col in df.columns:
+            return df[var_col].astype(str).str.upper()
+        else:
+            # fall back to asin if no descriptive cols
+            return df["asin"].astype(str)
 
     @staticmethod
     def nearest_row_at_price(

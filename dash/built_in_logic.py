@@ -1,9 +1,7 @@
-'''
+"""
 build 2 graphs
 - one for BAU the other events
-
-in dataengineer.prepare(), we did something like, count days at ASP & actual revenue, daily aggregation by asin-event-date, etc. the logic was to discount towards this... idk you have a great point. but i dont want us to duplicate the same thought. make a suggestion how to clean this up. also we have a rarity _rarity_multiplier in weighting class
-'''
+"""
 
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
@@ -13,7 +11,7 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Optional, Tuple, Dict, Any, Iterable, Union
+from typing import Optional, Dict, Any
 
 # viz
 # import seaborn as sns
@@ -22,12 +20,8 @@ import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
 
 # ML
-from sklearn.model_selection import KFold
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
-from sklearn.metrics import mean_squared_error
-from pygam import ExpectileGAM, s, l
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.preprocessing import LabelEncoder
+from pygam import ExpectileGAM, s
 
 # local import
 from helpers import DataEng
@@ -114,7 +108,6 @@ class ElasticityAnalyzer:
 
 
 class DataEngineer:
-
     def __init__(self, pricing_df, product_df, top_n=10):
         self.pricing_df = pricing_df
         self.product_df = product_df
@@ -122,21 +115,10 @@ class DataEngineer:
 
     @staticmethod
     def _nonneg(s: pd.Series) -> pd.Series:
-        """Coerce to numeric and clip at 0."""
         s = pd.to_numeric(s, errors="coerce").fillna(0)
         return s.clip(lower=0)
 
     def _days_at_price(self, df) -> pd.DataFrame:
-        """
-        add a column for the number of days where an ASP was sold at
-
-        param
-            df
-
-        return
-            df [with a new "number of days for a price" column]
-        """
-
         days_at_asp = (
             df[["asin", "order_date", "price"]]
             .groupby(["asin", "price"])
@@ -144,12 +126,7 @@ class DataEngineer:
             .reset_index()
         )
         days_at_asp.rename(columns={"order_date": "days_sold"}, inplace=True)
-
-        res = df.merge(
-            days_at_asp, left_on=["asin", "price"], right_on=["asin", "price"]
-        )
-
-        return res
+        return df.merge(days_at_asp, on=["asin", "price"])
 
     # synthesize order_date when real dates are missing
     def _synthesize_order_dates(
@@ -180,61 +157,54 @@ class DataEngineer:
 
         return res
 
-    def prepare(self) -> pd.DataFrame:
-        """
-        Prepare merged & cleaned Top-N product rows for modeling.
-        - normalizes columns
-        - merges pricing/product
-        - coerces types & nonneg
-        - (optional) synthesize order_date (commented)
-        - expands days_sold, computes daily revenue/units
-        - filters Top-N products by total revenue
-        - encodes categories
-        Returns: DataFrame ready for downstream modeling.
-        """
-        # 1) normalize column names
+    # --- STEP HELPERS ---
+
+    def _normalize_inputs(self):
+        # Always normalize columns to lowercase, safe merge
         self.pricing_df = DataEng.clean_cols(self.pricing_df)
         self.product_df = DataEng.clean_cols(self.product_df)
 
-        # 2) merge on asin
         df = self.pricing_df.merge(self.product_df, how="left", on="asin")
-
-        # 3) product label for grouping
         df["product"] = DataEng.compute_product_series(df)
-
-        # 4) drop unused if present
         for c in ("tag", "variation"):
             if c in df.columns:
                 df.drop(columns=[c], inplace=True)
+        return df
 
-        # 5) types & non-neg
+    def _cast_types(self, df):
         df["order_date"] = pd.to_datetime(df.get("order_date"), errors="coerce")
-        if "shipped_units" in df.columns:
+        if "shipped_units" in df:
             df["shipped_units"] = self._nonneg(df["shipped_units"])
-        if "price" in df.columns:
+        if "price" in df:
             df["price"] = self._nonneg(df["price"])
+        return df
 
-        # 6) (optional) synthesize order_date across a window (keep commented unless you need it)
-        # df = self._synthesize_order_dates(
-        #     df, start="2023-09-17", end="2025-09-17", seed=42, col="order_date"
-        # )
+    def _aggregate_daily(self, df):
+        df_days = self._days_at_price(df)
+        df_days["revenue"] = (df_days["shipped_units"] * df_days["price"]).clip(lower=0)
 
-        # persist back for range/meta to use identical dates
-        self.pricing_df = df.copy()
-
-        # 7) days at ASP & actual revenue
-        df_days_asp = self._days_at_price(df)
-        df_days_asp["revenue"] = (
-            df_days_asp["shipped_units"] * df_days_asp["price"]
-        ).clip(lower=0)
-
-        # 8) daily aggregation by asin-event-date
         df_agg = (
-            df_days_asp[
-                ["asin", "event_name", "order_date", "shipped_units", "revenue"]
+            df_days[
+                [
+                    "asin",
+                    "product",
+                    "event_name",
+                    "order_date",
+                    "shipped_units",
+                    "revenue",
+                    "deal_discount_percent",
+                    "current_price",
+                ]
             ]
-            .groupby(["asin", "event_name", "order_date"])[["revenue", "shipped_units"]]
-            .sum()
+            .groupby(["asin", "product", "event_name", "order_date"])
+            .agg(
+                {
+                    "shipped_units": "sum",
+                    "revenue": "sum",
+                    "deal_discount_percent": "first",
+                    "current_price": "first",
+                }
+            )
             .reset_index()
         )
         df_agg["price"] = (df_agg["revenue"] / df_agg["shipped_units"]).replace(
@@ -243,57 +213,39 @@ class DataEngineer:
         df_agg["price"] = (
             pd.to_numeric(df_agg["price"], errors="coerce").fillna(0).round(2)
         )
+        return df_days, df_agg
 
-        df_agg_event = df_agg.merge(
-            df_days_asp[
-                [
-                    "asin",
-                    "product",
-                    "order_date",
-                    "deal_discount_percent",
-                    "current_price",
-                    "days_sold",
-                ]
-            ],
-            on=["asin", "order_date"],
-            how="left",
-        )
+    def _add_temporal_features(self, df):
+        df["year"] = df["order_date"].dt.year
+        df["month"] = df["order_date"].dt.month
+        df["week"] = df["order_date"].dt.isocalendar().week
+        return df
 
-        # 9) derive daily revenue/units (guard days_sold==0)
-        den = pd.to_numeric(df_agg_event["days_sold"], errors="coerce").replace(
-            0, np.nan
-        )
-        df_agg_event["daily_rev"] = (
-            pd.to_numeric(df_agg_event["revenue"], errors="coerce") / den
-        ).clip(lower=0)
-        df_agg_event["daily_units"] = (
-            pd.to_numeric(df_agg_event["shipped_units"], errors="coerce") / den
-        ).clip(lower=0)
-        df_agg_event.drop(columns=["revenue", "shipped_units"], inplace=True)
-        df_agg_event.rename(
-            columns={"daily_rev": "revenue", "daily_units": "shipped_units"},
-            inplace=True,
-        )
-
-        # 10) Top-N products by total revenue
-        top_n_products = (
-            df_agg_event.groupby("product")["revenue"]
+    def _filter_top_n(self, df):
+        top_n = (
+            df.groupby("product")["revenue"]
             .sum()
             .reset_index()
             .sort_values("revenue", ascending=False)["product"]
             .head(self.top_n)
             .tolist()
         )
+        return df[df["product"].isin(top_n)].copy()
 
-        # 11) filter to Top-N; normalize dtypes; encode categories
-        filtered = df_days_asp[df_days_asp["product"].isin(top_n_products)].copy()
-        filtered["asin"] = filtered["asin"].astype(str)
-        filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)
-        filtered["revenue_share_amt"] = self._nonneg(filtered["revenue_share_amt"])
+    def prepare(self):
+        df = self._normalize_inputs()
+        df = self._cast_types(df)
+        df_days, df_agg = self._aggregate_daily(df)
+        df_agg = self._add_temporal_features(df_agg)
+        df_filtered = self._filter_top_n(df_agg)
 
-        res = self._label_encoder(filtered)
+        df_filtered["asin"] = df_filtered["asin"].astype(str)
+        df_filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)
+        df_filtered["revenue_share_amt"] = self._nonneg(
+            df_filtered["revenue_share_amt"]
+        )
 
-        return res
+        return self._label_encoder(df_filtered)
 
 
 class Weighting:
@@ -377,9 +329,9 @@ class Weighting:
         return w.astype(float)
 
 
-# -------------------- ParamSearchCV with interval scoring (updated) --------------------
-
-def interval_score(y_true, y_low, y_up, y_mid, alpha=0.15, width_penalty=1.5, sample_weight=None) -> float:
+def interval_score(
+    y_true, y_low, y_up, y_mid, alpha=0.15, width_penalty=1.5, sample_weight=None
+) -> float:
     """
     Enhanced scoring that considers both interval width and P50 accuracy.
     Parameters:
@@ -497,8 +449,6 @@ class ParamSearchCV:
         #     f"expectiles={self.expectiles}"
         # )
 
-
-
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
@@ -516,22 +466,22 @@ class ParamSearchCV:
         self._log(f"[DBG FitOne] e={e}, n_splines={ns}, lam={lam}")
 
         return gam
-    
+
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
         """
         Fit models using training weights and evaluate using validation weights.
         Parameters:
             X_train, y_train: Training data
-            X_val, y_val: Validation data 
+            X_val, y_val: Validation data
             w_train: Sample weights for training
             w_val: Sample weights for validation scoring
         """
         # Training weights
         train_weights = w_train
-        
-        # Validation weights (default to uniform if None)  
+
+        # Validation weights (default to uniform if None)
         val_weights = w_val if w_val is not None else np.ones_like(y_val)
-        
+
         best_pair = None
 
         for ns in self.n_splines_grid:
@@ -539,10 +489,12 @@ class ParamSearchCV:
                 # Fit models
                 models = {}
                 predictions = {}
-                
+
                 # Fit all expectile models
                 for e in self.expectiles:
-                    key = "p50" if abs(e - 0.5) < 1e-6 else f'p{str(e).replace("0.", "")}'
+                    key = (
+                        "p50" if abs(e - 0.5) < 1e-6 else f'p{str(e).replace("0.", "")}'
+                    )
                     model = self._fit_one(e, ns, lam, X_train, y_train, train_weights)
                     models[key] = model
                     predictions[key] = model.predict(X_val)
@@ -550,31 +502,36 @@ class ParamSearchCV:
                 # Calculate metrics based on available predictions
                 if len(self.expectiles) >= 3:
                     p025 = predictions.get("p025")
-                    p50 = predictions.get("p50") 
+                    p50 = predictions.get("p50")
                     p975 = predictions.get("p975")
 
                     if all(x is not None for x in [p025, p50, p975]):
                         # Calculate separate metrics
                         r50 = rmse(y_val, p50)
                         width = np.average(p975 - p025, weights=val_weights)
-                        cov = np.average((y_val >= p025) & (y_val <= p975), weights=val_weights)
-                        
+                        cov = np.average(
+                            (y_val >= p025) & (y_val <= p975), weights=val_weights
+                        )
+
                         # Calculate interval score (excludes RMSE)
                         iscore = interval_score(
-                            y_val, p025, p975, p50,
+                            y_val,
+                            p025,
+                            p975,
+                            p50,
                             alpha=self.alpha,
                             width_penalty=self.width_penalty,
-                            sample_weight=val_weights
+                            sample_weight=val_weights,
                         )
 
                         # Combined score with balanced weighting
                         score = iscore + r50  # RMSE has equal weight to interval score
-                        
+
                         metrics = {
                             "interval_score": iscore,
                             "rmse_p50": r50,
                             "coverage": cov,
-                            "width": width
+                            "width": width,
                         }
 
                         self._log(
@@ -591,9 +548,7 @@ class ParamSearchCV:
                     score = r50
                     metrics = {"rmse": r50}
 
-                    self._log(
-                        f"[TUNE] ns={ns} lam={lam:.4g} rmse={r50:.4g}"
-                    )
+                    self._log(f"[TUNE] ns={ns} lam={lam:.4g} rmse={r50:.4g}")
 
                 # Update best if score improved
                 if (best_pair is None) or (score < best_pair[0]):
@@ -601,7 +556,6 @@ class ParamSearchCV:
 
         self.best_ = best_pair[1]
         return self.best_
-
 
     def predict_expectiles(self, X):
         if self.best_ is None:
@@ -646,7 +600,7 @@ class GAMModeler:
         y_train,
         X_pred,
         w_train=None,
-        expectiles=None  # Make this optional
+        expectiles=None,  # Make this optional
     ):
         """
         Fit expectile GAMs via ParamSearchCV using a simple temporal holdout (or index split if no date),
@@ -687,7 +641,7 @@ class GAMModeler:
         # ---- 3) Update ParamSearchCV expectiles only if explicitly provided ----
         if expectiles is not None:
             self.param_search.expectiles = expectiles
-            
+
         # ---- 4) Fit model ----
         best = self.param_search.fit(
             X_trn, y_trn, X_val, y_val, w_train=w_trn, w_val=w_val
@@ -698,49 +652,53 @@ class GAMModeler:
         # Get predictions for each expectile
         for e in self.param_search.expectiles:  # Use param_search's expectiles
             if abs(e - 0.5) < 1e-6:
-                model_key = 'p50'
-                pred_key = 'units_pred_0.5'
+                model_key = "p50"
+                pred_key = "units_pred_0.5"
             else:
                 model_key = f'p{str(e).replace("0.", "")}'
-                pred_key = f'units_pred_{e}'
-                
+                pred_key = f"units_pred_{e}"
+
             if model_key in best.models:
                 pred = best.models[model_key].predict(X_pr)
                 preds[pred_key] = np.clip(pred, 0.0, None)
         print(f"[DBG GAMModeler] Using ParamSearchCV.best_ = {self.param_search.best_}")
 
         # Calculate average prediction if we have all three expectiles
-        pred_keys = [f'units_pred_{e}' for e in [0.025, 0.5, 0.975]]
+        pred_keys = [f"units_pred_{e}" for e in [0.025, 0.5, 0.975]]
         if all(key in preds for key in pred_keys):
-            preds['units_pred_avg'] = np.mean([
-                preds['units_pred_0.025'],
-                preds['units_pred_0.5'],
-                preds['units_pred_0.975']
-            ], axis=0)
+            preds["units_pred_avg"] = np.mean(
+                [
+                    preds["units_pred_0.025"],
+                    preds["units_pred_0.5"],
+                    preds["units_pred_0.975"],
+                ],
+                axis=0,
+            )
 
         # ---- 6) Compute final metrics ----
-        metrics = best.metrics.copy() if best and hasattr(best, 'metrics') else {}
-        
+        metrics = best.metrics.copy() if best and hasattr(best, "metrics") else {}
+
         # Ensure RMSE is included
-        if 'units_pred_0.5' in preds:
-            rmse_val = rmse(y_val, best.models['p50'].predict(X_val))
-            metrics['rmse_p50'] = rmse_val
-        
+        if "units_pred_0.5" in preds:
+            rmse_val = rmse(y_val, best.models["p50"].predict(X_val))
+            metrics["rmse_p50"] = rmse_val
+
         # Add coverage metrics if available
-        if all(k in preds for k in ['units_pred_0.025', 'units_pred_0.975']):
-            p025_val = best.models['p025'].predict(X_val)
-            p975_val = best.models['p975'].predict(X_val)
+        if all(k in preds for k in ["units_pred_0.025", "units_pred_0.975"]):
+            p025_val = best.models["p025"].predict(X_val)
+            p975_val = best.models["p975"].predict(X_val)
             coverage = np.mean((y_val >= p025_val) & (y_val <= p975_val))
-            metrics['coverage'] = coverage
+            metrics["coverage"] = coverage
 
         return {
             "predictions": preds,
             "metrics": metrics,
             "params": {
                 "n_splines": best.n_splines if best else None,
-                "lambda": best.lam if best else None
-            }
+                "lambda": best.lam if best else None,
+            },
         }
+
 
 class Optimizer:
     @staticmethod
@@ -756,15 +714,18 @@ class Optimizer:
             avg_col = "units_pred_avg" if "units_pred_avg" in df.columns else None
 
         if base_col is None:
-            raise ValueError("No prediction columns (units or revenue) found in all_gam_results.")
+            raise ValueError(
+                "No prediction columns (units or revenue) found in all_gam_results."
+            )
 
         # compute weighted_pred
         if avg_col is not None:
             max_ratio = df["ratio"].max() if "ratio" in df.columns else 1.0
-            confidence_weight = 1 - (df["ratio"] / max_ratio) if "ratio" in df.columns else 0.5
-            df["weighted_pred"] = (
-                df[base_col] * confidence_weight +
-                df[avg_col] * (1 - confidence_weight)
+            confidence_weight = (
+                1 - (df["ratio"] / max_ratio) if "ratio" in df.columns else 0.5
+            )
+            df["weighted_pred"] = df[base_col] * confidence_weight + df[avg_col] * (
+                1 - confidence_weight
             )
         else:
             df["weighted_pred"] = df[base_col]
@@ -773,7 +734,7 @@ class Optimizer:
             "best_avg": DataEng.pick_best_by_group(df, "product", base_col),
             "best_weighted": DataEng.pick_best_by_group(df, "product", "weighted_pred"),
         }
-    
+
 
 class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
@@ -788,27 +749,34 @@ class PricingPipeline:
         pricing_file="pricing.csv",
         product_file="products.csv",
         top_n=10,
-        param_search_kwargs=None
+        param_search_kwargs=None,
     ):
         pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
         product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
-        return cls(pricing_df, product_df, top_n, param_search_kwargs).assemble_dashboard_frames()
+        return cls(
+            pricing_df, product_df, top_n, param_search_kwargs
+        ).assemble_dashboard_frames()
 
-    def _build_curr_price_df(self) -> pd.DataFrame:
-        """current price df with product tag"""
-        if "current_price" not in self.engineer.product_df.columns:
-            return pd.DataFrame(columns=["asin", "product", "current_price"])
-
+    def _build_curr_price_df(self):
         product = self.engineer.product_df.copy()
-        product["product"] = DataEng.compute_product_series(product)
-        out = product[["asin", "product", "current_price"]].copy()
-        out["current_price"] = pd.to_numeric(out["current_price"], errors="coerce")
-        return out.reset_index(drop=True)
+
+        # Ensure asin exists
+        if "asin" not in product.columns:
+            raise KeyError("product_df must contain an 'asin' column for mapping")
+
+        # Compute product label safely
+        if "tag" not in product.columns and "variation" not in product.columns:
+            product["product"] = product["asin"].astype(str)
+        else:
+            product["product"] = DataEng.compute_product_series(product)
+
+        return product
 
     def _build_core_frames(self):
+
         topsellers = self.engineer.prepare()
 
-        # --- Filter to BAU only ---
+        # -------- only focus on BAU for now
         if "event_name" in topsellers.columns:
             topsellers = topsellers[topsellers["event_name"] == "BAU"].copy()
         if topsellers.empty:
@@ -819,34 +787,40 @@ class PricingPipeline:
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
 
-        # weights with stronger recency decay
         W = Weighting(decay_rate=-0.05)
         w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
         w_stable = np.clip(
             np.where(np.isfinite(w_raw), w_raw, 1.0),
-            np.nanquantile(w_raw[np.isfinite(w_raw)], 0.20) if np.isfinite(w_raw).any() else 0.1,
-            None
+            (
+                np.nanquantile(w_raw[np.isfinite(w_raw)], 0.20)
+                if np.isfinite(w_raw).any()
+                else 0.1
+            ),
+            None,
         )
 
-        # elasticity (computed on units)
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
-            elasticity_df = pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
+            elasticity_df = pd.DataFrame(
+                columns=["product", "ratio", "elasticity_score"]
+            )
 
-        # design matrix + target (target = shipped units)
         X = topsellers[EXPECTED_COLS].copy()
         y = np.asarray(topsellers["shipped_units"], dtype=float)
 
-        # fit model on units
         param_search = ParamSearchCV(**self.param_search_kwargs)
         modeler = GAMModeler(param_search)
-        res = modeler.fit_predict_expectiles(X_train=X, y_train=y, X_pred=X, w_train=w_stable)
+        res = modeler.fit_predict_expectiles(
+            X_train=X, y_train=y, X_pred=X, w_train=w_stable
+        )
 
-        # build results
-        all_gam_results = topsellers[["product", "price", "asin", "asp"]].copy().reset_index(drop=True)
+        all_gam_results = (
+            topsellers[["product", "price", "asin", "asp"]]
+            .copy()
+            .reset_index(drop=True)
+        )
 
-        # add unit predictions + revenue predictions
         predictions = res.get("predictions", {})
         for k, arr in predictions.items():
             if k.startswith("units_pred_"):
@@ -856,13 +830,16 @@ class PricingPipeline:
                     all_gam_results["price"].to_numpy() * all_gam_results[k]
                 )
 
-        # add discount info
         all_gam_results["deal_discount_percent"] = (
-            topsellers["deal_discount_percent"].fillna(0).clip(lower=0).reset_index(drop=True)
+            topsellers["deal_discount_percent"]
+            .fillna(0)
+            .clip(lower=0)
+            .reset_index(drop=True)
         )
 
-        # add actual revenue
-        all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(topsellers["shipped_units"], dtype=float)
+        all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(
+            topsellers["shipped_units"], dtype=float
+        )
         all_gam_results["daily_rev"] = all_gam_results["revenue_actual"]
         all_gam_results["actual_revenue_scaled"] = (
             topsellers["price"].to_numpy()
@@ -1159,8 +1136,6 @@ class viz:
         load_figure_template(templates)
         self.template = template
 
-
-
     def gam_results(self, all_gam_results: pd.DataFrame):
         need_cols = [
             "product",
@@ -1188,7 +1163,9 @@ class viz:
             if g.empty:
                 continue
             g = g.sort_values("asp")
-            group_opacities = opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
+            group_opacities = (
+                opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
+            )
 
             # ------- pred bands -------
             fig.add_trace(
@@ -1207,7 +1184,7 @@ class viz:
                     mode="lines",
                     line=dict(width=0),
                     fill="tonexty",
-                    fillcolor='rgba(232, 233, 235, 0.7)', # bright gray, opc = 0.7
+                    fillcolor="rgba(232, 233, 235, 0.7)",  # bright gray, opc = 0.7
                     opacity=0.25,
                     name=f"{group_name} • Predicted Rev Band",
                 )
@@ -1218,7 +1195,7 @@ class viz:
                     y=g["revenue_pred_0.5"],
                     mode="lines",
                     name=f"{group_name} • Predicted Rev (P50)",
-                    line=dict(color='rgba(184, 33, 50, 1)')           
+                    line=dict(color="rgba(184, 33, 50, 1)"),
                 )
             )
 
@@ -1267,7 +1244,6 @@ class viz:
                     )
                 )
 
-
         # 3) Layout (avoid crashing if self.template is not set)
         template = getattr(self, "template", None)
         fig.update_layout(
@@ -1283,7 +1259,6 @@ class viz:
         )
 
         return fig
- 
 
     def elast_dist(self, elast_df: pd.DataFrame):
         fig = (

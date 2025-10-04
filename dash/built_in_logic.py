@@ -1,16 +1,13 @@
 """
-(1) build 2 graphs
-    - one for BAU the other events
-
-(2) graident boost/grid tune weights
-
-(3) more splines
+1. Flat or near-zero curves
+2. Explosive spikes
+3. Misaligned uncertainty bands
+4. Categorical signals ignored
 """
 
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
-import random
 import os
 import pandas as pd
 import numpy as np
@@ -24,8 +21,11 @@ import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
 
 # ML
-from sklearn.preprocessing import LabelEncoder
-from pygam import ExpectileGAM, s
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import root_mean_squared_error
+from sklearn.model_selection import train_test_split
+
+from pygam import ExpectileGAM, s, f
 
 # local import
 from helpers import DataEng
@@ -112,8 +112,6 @@ class ElasticityAnalyzer:
 
 
 class DataEngineer:
-    '''
-    '''
     def __init__(self, pricing_df, product_df, top_n=10, granularity="daily"):
         self.pricing_df = pricing_df
         self.product_df = product_df
@@ -337,53 +335,6 @@ class Weighting:
         return w.astype(float)
 
 
-def interval_score(
-    y_true, y_low, y_up, y_mid, alpha=0.15, width_penalty=1.5, sample_weight=None
-) -> float:
-    """
-    Enhanced scoring that considers both interval width and P50 accuracy.
-    Parameters:
-        y_true: actual values
-        y_low: lower bound predictions (P2.5)
-        y_up: upper bound predictions (P97.5)
-        y_mid: middle predictions (P50)
-        alpha: coverage level (default 0.15)
-        width_penalty: penalty for wide intervals (default 1.5)
-        sample_weight: optional weights for observations
-    """
-    y_true = np.asarray(y_true, float)
-    L = np.asarray(y_low, float)
-    U = np.asarray(y_up, float)
-    mid = np.asarray(y_mid, float)
-
-    # Use uniform weights if none provided
-    if sample_weight is None:
-        sample_weight = np.ones_like(y_true)
-    w = np.asarray(sample_weight, float)
-
-    # Normalize weights
-    w = w / w.sum()
-
-    # Interval components
-    width = U - L
-    below = (L - y_true) * (y_true < L)  # Penalty for being below interval
-    above = (y_true - U) * (y_true > U)  # Penalty for being above interval
-
-    # Weighted interval score (includes width penalty)
-    interval_penalty = np.average(
-        width * width_penalty + (2.0 / alpha) * (below + above), weights=w
-    )
-
-    # Return only interval penalty
-    return float(interval_penalty)  # Remove RMSE component
-
-
-def rmse(y_true, y_pred) -> float:
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-
-
 class _TuneResult:
     def __init__(
         self,
@@ -400,6 +351,8 @@ class _TuneResult:
 
 class ParamSearchCV:
     """
+    Handles training and returning trained models + metrics.
+
     Joint expectile tuning for (0.025, 0.5, 0.975) using interval score + optional width penalty.
     Backward-compatible signature: keeps numeric/categorical preprocessing args, n_splits, lam_iters, weighting.
     """
@@ -447,120 +400,151 @@ class ParamSearchCV:
 
         self.best_ = None
 
-        # print(
-        #     f"[DBG ParamSearchCV] "
-        #     f"n_splines_grid={self.n_splines_grid}, "
-        #     f"loglam_range={self.loglam_range}, "
-        #     f"lam_iters={self.lam_iters}, "
-        #     f"alpha={self.alpha}, "
-        #     f"width_penalty={self.width_penalty}, "
-        #     f"expectiles={self.expectiles}"
-        # )
-
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
 
     def _fit_one(self, e, ns, lam, X, y, w=None):
-        # gam = ExpectileGAM(expectile=e, lam=lam, terms=s(0, n_splines=ns))
-        gam = ExpectileGAM(
-            expectile=e,
-            lam=lam,
-            terms=s(0, n_splines=ns, basis="ps"),
-            max_iter=500,  # Increased iterations
-            tol=1e-4,  # Tighter convergence
-        )
-        gam.fit(X, y, weights=w)
-        self._log(f"[DBG FitOne] e={e}, n_splines={ns}, lam={lam}")
 
+        # --- Ensure X is DataFrame ---
+        if isinstance(X, np.ndarray):
+            # recover column names safely
+            candidate_cols = []
+            if getattr(self, "numeric_cols", None):
+                candidate_cols += list(self.numeric_cols)
+            if getattr(self, "categorical_cols", None):
+                candidate_cols += list(self.categorical_cols)
+
+            if not candidate_cols or len(candidate_cols) != X.shape[1]:
+                candidate_cols = [f"feature_{i}" for i in range(X.shape[1])]
+            X = pd.DataFrame(X, columns=candidate_cols)
+
+        # --- Identify columns dynamically ---
+        if getattr(self, "numeric_cols", None):
+            num_cols = [c for c in self.numeric_cols if c in X.columns]
+        else:
+            num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
+
+        if getattr(self, "categorical_cols", None):
+            cat_cols = [c for c in self.categorical_cols if c in X.columns]
+        else:
+            cat_cols = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
+
+        # --- Normalize numeric features safely ---
+        if num_cols:
+            X[num_cols] = StandardScaler().fit_transform(X[num_cols])
+
+        # --- Build GAM terms ---
+        terms = None
+        if num_cols:
+            terms = s(0, n_splines=ns, basis="ps")
+            for i in range(1, len(num_cols)):
+                terms += s(i, n_splines=ns, basis="ps")
+
+        if cat_cols:
+            for j in range(len(cat_cols)):
+                terms = terms + f(len(num_cols) + j) if terms else f(j)
+
+        # --- Fit model ---
+        gam = ExpectileGAM(expectile=e, lam=lam, terms=terms, max_iter=1000, tol=1e-4)
+        gam.fit(X, y, weights=w)
+
+        self._log(
+            f"[DBG FitOne] e={e}, n_splines={ns}, lam={lam}, features={list(X.columns)}"
+        )
         return gam
 
-    def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
+    def interval_score(
+        self, y_true, y_low, y_high, y_pred=None, alpha=0.05, width_penalty=0.1
+    ):
         """
-        Fit models using training weights and evaluate using validation weights.
+        Interval score for (1-alpha) predictive intervals.
+
+        Parameters
+            y_true: Actual vals [array]
+            y_low: Lower bound of predictive interval [array]
+            y_high: Upper bound of predictive interval [array]
+            y_pred: Point prediction (median or mean). Used for tie-breaking [array, optional]
+            alpha: Miscoverage rate (0.05 = 95% interval) [float]
+            width_penalty: Additional penalty on interval width to discourage overly wide bands. [float]
+
+        Returns
+            score : Lower is better [float]
+        """
+        y_true = np.asarray(y_true)
+        y_low = np.asarray(y_low)
+        y_high = np.asarray(y_high)
+
+        # Interval width
+        width = np.maximum(y_high - y_low, 0)
+
+        # Penalty: points outside the interval
+        under = (y_true < y_low).astype(float)
+        over = (y_true > y_high).astype(float)
+
+        penalty = (2 / alpha) * ((y_low - y_true) * under + (y_true - y_high) * over)
+
+        score = np.mean(width + penalty)
+
+        if y_pred is not None:
+            # small tie-breaker: prefer models with lower point RMSE
+            rmse = root_mean_squared_error(y_true, y_pred)
+            score += width_penalty * rmse
+
+        return float(score)
+
+    def fit(self, X_train, y_train, X_val=None, y_val=None, w_train=None, w_val=None):
+        """
+        Try multiple combos of hyperparameters across all expectiles
+        & find the best performing model
+
         Parameters:
             X_train, y_train: Training data
             X_val, y_val: Validation data
             w_train: Sample weights for training
             w_val: Sample weights for validation scoring
         """
-        # Training weights
-        train_weights = w_train
-
-        # Validation weights (default to uniform if None)
-        val_weights = w_val if w_val is not None else np.ones_like(y_val)
-
         best_pair = None
+
+        # Default to training data if val not provided
+        if X_val is None or y_val is None:
+            X_val, y_val, w_val = X_train, y_train, w_train
 
         for ns in self.n_splines_grid:
             for lam in self.lam_grid:
-                # Fit models
-                models = {}
-                predictions = {}
+                models, preds_val = {}, {}
 
-                # Fit all expectile models
                 for e in self.expectiles:
-                    key = (
-                        "p50" if abs(e - 0.5) < 1e-6 else f'p{str(e).replace("0.", "")}'
-                    )
-                    model = self._fit_one(e, ns, lam, X_train, y_train, train_weights)
-                    models[key] = model
-                    predictions[key] = model.predict(X_val)
+                    model = self._fit_one(e, ns, lam, X_train, y_train, w_train)
+                    models[e] = model
+                    preds_val[e] = model.predict(X_val)
 
-                # Calculate metrics based on available predictions
-                if len(self.expectiles) >= 3:
-                    p025 = predictions.get("p025")
-                    p50 = predictions.get("p50")
-                    p975 = predictions.get("p975")
+                # Evaluate on validation set
+                p025 = preds_val.get(0.025)
+                p50 = preds_val.get(0.5)
+                p975 = preds_val.get(0.975)
 
-                    if all(x is not None for x in [p025, p50, p975]):
-                        # Calculate separate metrics
-                        r50 = rmse(y_val, p50)
-                        width = np.average(p975 - p025, weights=val_weights)
-                        cov = np.average(
-                            (y_val >= p025) & (y_val <= p975), weights=val_weights
-                        )
+                # Compute interval & RMSE
+                iscore = self.interval_score(
+                    y_val,
+                    p025,
+                    p975,
+                    p50,
+                    alpha=self.alpha,
+                    width_penalty=self.width_penalty,
+                )
+                r50 = np.sqrt(np.mean((y_val - p50) ** 2))
+                score = iscore + r50
 
-                        # Calculate interval score (excludes RMSE)
-                        iscore = interval_score(
-                            y_val,
-                            p025,
-                            p975,
-                            p50,
-                            alpha=self.alpha,
-                            width_penalty=self.width_penalty,
-                            sample_weight=val_weights,
-                        )
+                metrics = {
+                    "interval_score": iscore,
+                    "rmse_val": r50,
+                    "n_splines": ns,
+                    "lam": float(lam),
+                }
 
-                        # Combined score with balanced weighting
-                        score = iscore + r50  # RMSE has equal weight to interval score
-
-                        metrics = {
-                            "interval_score": iscore,
-                            "rmse_p50": r50,
-                            "coverage": cov,
-                            "width": width,
-                        }
-
-                        self._log(
-                            f"[TUNE] ns={ns} lam={lam:.4g} "
-                            f"interval={iscore:.4g} rmse={r50:.4g} "
-                            f"width={width:.0f} cov={cov:.3f}"
-                        )
-
-                else:
-                    # Single expectile case - use only RMSE
-                    key = list(predictions.keys())[0]
-                    pred = predictions[key]
-                    r50 = rmse(y_val, pred)
-                    score = r50
-                    metrics = {"rmse": r50}
-
-                    self._log(f"[TUNE] ns={ns} lam={lam:.4g} rmse={r50:.4g}")
-
-                # Update best if score improved
                 if (best_pair is None) or (score < best_pair[0]):
-                    best_pair = (score, _TuneResult(ns, float(lam), models, metrics))
+                    best_pair = (score, _TuneResult(ns, lam, models, metrics))
 
         self.best_ = best_pair[1]
         return self.best_
@@ -569,17 +553,6 @@ class ParamSearchCV:
         if self.best_ is None:
             raise RuntimeError("ParamSearchCV has not been fit yet.")
         return {k: m.predict(X) for k, m in self.best_.models.items()}
-
-    def fit_predict_expectiles(
-        self, X_train, y_train, X_val, y_val, X_pred, w_train=None, w_val=None
-    ):
-        best = self.fit(X_train, y_train, X_val, y_val, w_train=w_train, w_val=w_val)
-        preds = self.predict_expectiles(X_pred)
-        return {
-            "params": {"n_splines": best.n_splines, "lam": best.lam},
-            "metrics": best.metrics,
-            "pred": preds,
-        }
 
 
 class GAMModeler:
@@ -593,6 +566,10 @@ class GAMModeler:
     def __init__(self, param_search: ParamSearchCV):
         self.param_search = param_search
 
+    def _log(self, msg: str):
+        """Timestamped console log for debugging."""
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
     def _to_df(self, X) -> pd.DataFrame:
         if isinstance(X, pd.DataFrame):
             df = X[EXPECTED_COLS].copy()
@@ -603,108 +580,50 @@ class GAMModeler:
         return df
 
     def fit_predict_expectiles(
-        self,
-        X_train,
-        y_train,
-        X_pred,
-        w_train=None,
-        expectiles=None,  # Make this optional
+        self, X_train, y_train, X_pred, X_val=None, y_val=None, w_train=None, w_val=None
     ):
         """
-        Fit expectile GAMs via ParamSearchCV using a simple temporal holdout (or index split if no date),
-        then predict expectiles on X_pred.
+        Fit the best GAMs for each expectile and generate predictions for X_pred.
+
+        Parameters
+            X_train : pd.DataFrame or np.ndarray
+                Training feature matrix.
+            y_train : array-like
+                Training target values.
+            X_pred : pd.DataFrame or np.ndarray
+                Feature matrix to predict on (usually same as X_train for in-sample plots).
+            w_train : array-like, optional
+                Sample weights (time-decay, rarity, etc).
+
+        Returns
+            dict with keys:
+            - "params":  tuned parameters (n_splines, lam)
+            - "metrics": model performance summary (interval score, RMSE, etc.)
+            - "predictions": dict of arrays keyed by "units_pred_<expectile>"
         """
-        # ---- 1) Prepare arrays and optional weights ----
-        X_tr = np.asarray(X_train, dtype=float)
-        y_tr = np.asarray(y_train, dtype=float).ravel()
-        X_pr = np.asarray(X_pred, dtype=float)
-        sw = None
-        if w_train is not None:
-            sw = np.asarray(w_train, dtype=float)
-            if sw.shape[0] != y_tr.shape[0]:
-                sw = None  # guard against mismatched lengths
 
-        # ---- 2) Build a validation split ----
-        n = X_tr.shape[0]
-        if n >= 10:
-            try:
-                # Use time-based split if possible
-                idx = np.arange(n)
-                cut = max(1, int(0.8 * n))
-                tr_idx, va_idx = idx[:cut], idx[cut:]
-            except Exception:
-                idx = np.arange(n)
-                cut = max(1, int(0.8 * n))
-                tr_idx, va_idx = idx[:cut], idx[cut:]
-        else:
-            # For very small datasets, use leave-one-out style
-            idx = np.arange(n)
-            tr_idx, va_idx = idx[:-1], idx[-1:]
-
-        X_trn, y_trn = X_tr[tr_idx], y_tr[tr_idx]
-        X_val, y_val = X_tr[va_idx], y_tr[va_idx]
-        w_trn = sw[tr_idx] if sw is not None else None
-        w_val = sw[va_idx] if sw is not None else None
-
-        # ---- 3) Update ParamSearchCV expectiles only if explicitly provided ----
-        if expectiles is not None:
-            self.param_search.expectiles = expectiles
-
-        # ---- 4) Fit model ----
         best = self.param_search.fit(
-            X_trn, y_trn, X_val, y_val, w_train=w_trn, w_val=w_val
+            X_train, y_train, X_val, y_val, w_train=w_train, w_val=w_val
         )
 
-        # ---- 5) Get predictions and prepare metrics ----
         preds = {}
-        # Get predictions for each expectile
-        for e in self.param_search.expectiles:  # Use param_search's expectiles
-            if abs(e - 0.5) < 1e-6:
-                model_key = "p50"
-                pred_key = "units_pred_0.5"
-            else:
-                model_key = f'p{str(e).replace("0.", "")}'
-                pred_key = f"units_pred_{e}"
+        for e, model in best.models.items():
+            try:
+                preds[f"units_pred_{e}"] = model.predict(X_pred)
+            except Exception as err:
+                self._log(f"[WARN] Prediction failed for expectile={e}: {err}")
+                preds[f"units_pred_{e}"] = np.full(len(X_pred), np.nan)
 
-            if model_key in best.models:
-                pred = best.models[model_key].predict(X_pr)
-                preds[pred_key] = np.clip(pred, 0.0, None)
-        print(f"[DBG GAMModeler] Using ParamSearchCV.best_ = {self.param_search.best_}")
-
-        # Calculate average prediction if we have all three expectiles
-        pred_keys = [f"units_pred_{e}" for e in [0.025, 0.5, 0.975]]
-        if all(key in preds for key in pred_keys):
-            preds["units_pred_avg"] = np.mean(
-                [
-                    preds["units_pred_0.025"],
-                    preds["units_pred_0.5"],
-                    preds["units_pred_0.975"],
-                ],
-                axis=0,
-            )
-
-        # ---- 6) Compute final metrics ----
-        metrics = best.metrics.copy() if best and hasattr(best, "metrics") else {}
-
-        # Ensure RMSE is included
-        if "units_pred_0.5" in preds:
-            rmse_val = rmse(y_val, best.models["p50"].predict(X_val))
-            metrics["rmse_p50"] = rmse_val
-
-        # Add coverage metrics if available
-        if all(k in preds for k in ["units_pred_0.025", "units_pred_0.975"]):
-            p025_val = best.models["p025"].predict(X_val)
-            p975_val = best.models["p975"].predict(X_val)
-            coverage = np.mean((y_val >= p025_val) & (y_val <= p975_val))
-            metrics["coverage"] = coverage
+        self._log(
+            f"[DBG GAMModeler] Using ParamSearchCV.best_ = {best}\n"
+            f"    Validation metrics: {getattr(best, 'metrics', {})}\n"
+            f"    Prediction keys: {list(preds.keys())}"
+        )
 
         return {
+            "params": getattr(best, "params", {}),
+            "metrics": getattr(best, "metrics", {}),
             "predictions": preds,
-            "metrics": metrics,
-            "params": {
-                "n_splines": best.n_splines if best else None,
-                "lambda": best.lam if best else None,
-            },
         }
 
 
@@ -781,22 +700,29 @@ class PricingPipeline:
         return product
 
     def _build_core_frames(self):
+        """
+        pipeline glue
 
+        return
+            dfs
+        """
         topsellers = self.engineer.prepare()
 
-        # -------- only focus on BAU for now
-        if "event_name" in topsellers.columns:
-            topsellers = topsellers[topsellers["event_name"] == "BAU"].copy()
+        # Keep BOTH BAU + promo
         if topsellers.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+        # Ensure ASP and intercept
         if "asp" not in topsellers.columns and "price" in topsellers.columns:
             topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
 
+        # --- Weights (decay + rarity) ---
         W = Weighting(decay_rate=-0.05)
         w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
+        rarity = 1.0 / (1.0 + topsellers.groupby("price")["price"].transform("count"))
+        w_raw *= rarity.values
         w_stable = np.clip(
             np.where(np.isfinite(w_raw), w_raw, 1.0),
             (
@@ -807,6 +733,7 @@ class PricingPipeline:
             None,
         )
 
+        # Elasticity diagnostic
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
@@ -814,37 +741,74 @@ class PricingPipeline:
                 columns=["product", "ratio", "elasticity_score"]
             )
 
+        # --- Feature Matrix ---
         X = topsellers[EXPECTED_COLS].copy()
-        y = np.asarray(topsellers["shipped_units"], dtype=float)
+        y = np.asarray(topsellers["shipped_units"], dtype=int)
 
-        param_search = ParamSearchCV(**self.param_search_kwargs)
-        modeler = GAMModeler(param_search)
-        res = modeler.fit_predict_expectiles(
-            X_train=X, y_train=y, X_pred=X, w_train=w_stable
+        # Scale numeric features
+        num_cols = ["price", "deal_discount_percent", "asp"]
+        if all(col in X.columns for col in num_cols):
+            X[num_cols] = StandardScaler().fit_transform(X[num_cols])
+
+        # Split into training and validation
+        X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
+            X, y, w_stable, test_size=0.2, random_state=42
         )
 
+        # --- Fit + Predict ---
+        param_search = ParamSearchCV(
+            numeric_cols=num_cols,
+            categorical_cols=["event_encoded", "product_encoded"],
+            **self.param_search_kwargs,
+        )
+        modeler = GAMModeler(param_search)
+        res = modeler.fit_predict_expectiles(
+            X_train=X_train,
+            y_train=y_train,
+            X_pred=X,  # still predict on full set for dashboard
+            X_val=X_val,
+            y_val=y_val,
+            w_train=w_train,
+            w_val=w_val,
+        )
+
+        # --- Results Assembly ---
         all_gam_results = (
             topsellers[["product", "price", "asin", "asp"]]
             .copy()
             .reset_index(drop=True)
         )
 
-        predictions = res.get("predictions", {})
-        for k, arr in predictions.items():
+        # Get predictions flexibly
+        res_preds = res.get("predictions", res.get("pred", {}))
+
+        if not res_preds:
+            raise ValueError(
+                f"[GAMModeler] No predictions found. Available keys: {list(res.keys())}"
+            )
+
+        # Add unit + revenue predictions
+        for k, arr in res_preds.items():
             if k.startswith("units_pred_"):
                 all_gam_results[k] = np.asarray(arr, dtype=float)
                 rev_key = k.replace("units_", "revenue_")
-                all_gam_results[rev_key] = (
-                    all_gam_results["price"].to_numpy() * all_gam_results[k]
-                )
+                all_gam_results[rev_key] = all_gam_results["price"].to_numpy() * all_gam_results[k]
 
+        # Sanity check
+        pred_cols = [c for c in all_gam_results.columns if c.startswith(("units_pred_", "revenue_pred_"))]
+        if not pred_cols:
+            raise ValueError(
+                f"[_build_core_frames] Prediction assembly failed. Found keys={list(res_preds.keys())}, "
+                f"DataFrame cols={list(all_gam_results.columns)}"
+            )
+        
+        # deal discount
         all_gam_results["deal_discount_percent"] = (
             topsellers["deal_discount_percent"]
             .fillna(0)
             .clip(lower=0)
             .reset_index(drop=True)
         )
-
         all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(
             topsellers["shipped_units"], dtype=float
         )
@@ -858,7 +822,9 @@ class PricingPipeline:
         return topsellers, elasticity_df, all_gam_results
 
     def _compute_best_tables(self, all_gam_results, topsellers):
-        """Run Optimizer and ensure required cols are present."""
+        """
+        Run Optimizer and ensure required cols are present.
+        """
         bests = Optimizer.run(all_gam_results)
         best_avg = bests["best_avg"].copy()
 
@@ -1144,16 +1110,14 @@ class viz:
         load_figure_template(templates)
         self.template = template
 
-
-    def revenue_axis_label(self, granularity='weekly'):
-        ''' granualrity = weekly/monthly/daily '''
+    def revenue_axis_label(self, granularity="weekly"):
+        """granualrity = weekly/monthly/daily"""
         if granularity == "weekly":
             return "Expected Weekly Revenue ($)"
         elif granularity == "monthly":
             return "Expected Monthly Revenue ($)"
         else:
             return "Expected Avg Daily Revenue ($)"
-
 
     def gam_results(self, all_gam_results: pd.DataFrame):
         need_cols = [
@@ -1224,7 +1188,7 @@ class viz:
                     x=g["asp"],
                     y=g["revenue_actual"],
                     mode="markers",
-                    marker_symbol='x',
+                    marker_symbol="x",
                     name=f"{group_name} • Actual Revenue",
                     marker=dict(size=8, color="#808992", opacity=group_opacities),
                 )
@@ -1265,11 +1229,10 @@ class viz:
                 )
 
         # 3) Layout (avoid crashing if self.template is not set)
-        template = getattr(self, "template", None)  
+        template = getattr(self, "template", None)
         fig.update_layout(
             legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
             template=template if template else None,
-            title="Price vs Expected Revenue",
             yaxis_title=self.revenue_axis_label(granularity="weekly"),
             xaxis_title="Average Selling Price (ASP)",
         )

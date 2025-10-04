@@ -504,14 +504,22 @@ class ParamSearchCV:
             w_train: Sample weights for training
             w_val: Sample weights for validation scoring
         """
+        print("🔍 Searching hyperparameter grid...")
         best_pair = None
 
         # Default to training data if val not provided
         if X_val is None or y_val is None:
             X_val, y_val, w_val = X_train, y_train, w_train
 
+        total = len(self.n_splines_grid) * len(self.lam_grid)
+        counter = 0
         for ns in self.n_splines_grid:
             for lam in self.lam_grid:
+                counter += 1
+                print(
+                    f"    → [{counter}/{total}] Trying n_splines={ns}, λ={lam:.4f}",
+                    flush=True,
+                )
                 models, preds_val = {}, {}
 
                 for e in self.expectiles:
@@ -519,12 +527,12 @@ class ParamSearchCV:
                     models[e] = model
                     preds_val[e] = model.predict(X_val)
 
-                # Evaluate on validation set
-                p025 = preds_val.get(0.025)
-                p50 = preds_val.get(0.5)
-                p975 = preds_val.get(0.975)
-
-                # Compute interval & RMSE
+                # Evaluate
+                p025, p50, p975 = (
+                    preds_val.get(0.025),
+                    preds_val.get(0.5),
+                    preds_val.get(0.975),
+                )
                 iscore = self.interval_score(
                     y_val,
                     p025,
@@ -535,18 +543,25 @@ class ParamSearchCV:
                 )
                 r50 = np.sqrt(np.mean((y_val - p50) ** 2))
                 score = iscore + r50
-
                 metrics = {
                     "interval_score": iscore,
                     "rmse_val": r50,
                     "n_splines": ns,
-                    "lam": float(lam),
+                    "lam": lam,
                 }
 
                 if (best_pair is None) or (score < best_pair[0]):
                     best_pair = (score, _TuneResult(ns, lam, models, metrics))
+                    print(
+                        f"        🌟 New best: n_splines={ns}, λ={lam:.4f} (score={score:.2f})"
+                    )
 
         self.best_ = best_pair[1]
+        best_ns, best_lam = self.best_.n_splines, self.best_.lam
+        print(f"\n✅ Best config found: n_splines={best_ns} | λ={best_lam:.4f}")
+        print(
+            f"📈 Validation RMSE={self.best_.metrics['rmse_val']:.2f} | Interval Score={self.best_.metrics['interval_score']:.2f}\n"
+        )
         return self.best_
 
     def predict_expectiles(self, X):
@@ -706,6 +721,9 @@ class PricingPipeline:
         return
             dfs
         """
+        print(
+            "\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────"
+        )
         topsellers = self.engineer.prepare()
 
         # Keep BOTH BAU + promo
@@ -717,6 +735,7 @@ class PricingPipeline:
             topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
+        print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
         # --- Weights (decay + rarity) ---
         W = Weighting(decay_rate=-0.05)
@@ -732,6 +751,7 @@ class PricingPipeline:
             ),
             None,
         )
+        print("⚖️  Weights computed (time-decay × rarity).")
 
         # Elasticity diagnostic
         try:
@@ -751,11 +771,20 @@ class PricingPipeline:
             X[num_cols] = StandardScaler().fit_transform(X[num_cols])
 
         # Split into training and validation
+        print(
+            "\n─────────────────────────────── ✂️  Splitting Train / Validation ───────────────────────────────"
+        )
         X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
             X, y, w_stable, test_size=0.2, random_state=42
         )
+        print(
+            f"📊 Training set: {len(X_train):,} rows | Validation set: {len(X_val):,} rows"
+        )
 
         # --- Fit + Predict ---
+        print(
+            "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────"
+        )
         param_search = ParamSearchCV(
             numeric_cols=num_cols,
             categorical_cols=["event_encoded", "product_encoded"],
@@ -770,6 +799,9 @@ class PricingPipeline:
             y_val=y_val,
             w_train=w_train,
             w_val=w_val,
+        )
+        print(
+            "\n─────────────────────────────── ✅ Generating Prediction Frames ───────────────────────────────"
         )
 
         # --- Results Assembly ---
@@ -786,22 +818,29 @@ class PricingPipeline:
             raise ValueError(
                 f"[GAMModeler] No predictions found. Available keys: {list(res.keys())}"
             )
+        print(f"✨ Predictions added: {list(res_preds.keys())}")
 
         # Add unit + revenue predictions
         for k, arr in res_preds.items():
             if k.startswith("units_pred_"):
                 all_gam_results[k] = np.asarray(arr, dtype=float)
                 rev_key = k.replace("units_", "revenue_")
-                all_gam_results[rev_key] = all_gam_results["price"].to_numpy() * all_gam_results[k]
+                all_gam_results[rev_key] = (
+                    all_gam_results["price"].to_numpy() * all_gam_results[k]
+                )
 
         # Sanity check
-        pred_cols = [c for c in all_gam_results.columns if c.startswith(("units_pred_", "revenue_pred_"))]
+        pred_cols = [
+            c
+            for c in all_gam_results.columns
+            if c.startswith(("units_pred_", "revenue_pred_"))
+        ]
         if not pred_cols:
             raise ValueError(
                 f"[_build_core_frames] Prediction assembly failed. Found keys={list(res_preds.keys())}, "
                 f"DataFrame cols={list(all_gam_results.columns)}"
             )
-        
+
         # deal discount
         all_gam_results["deal_discount_percent"] = (
             topsellers["deal_discount_percent"]
@@ -817,6 +856,10 @@ class PricingPipeline:
             topsellers["price"].to_numpy()
             * (1 - all_gam_results["deal_discount_percent"].to_numpy() / 100.0)
             * np.asarray(topsellers["shipped_units"], dtype=float)
+        )
+
+        print(
+            "\n─────────────────────────────── 🎯 Pipeline Complete ───────────────────────────────\n"
         )
 
         return topsellers, elasticity_df, all_gam_results

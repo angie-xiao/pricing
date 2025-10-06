@@ -301,47 +301,25 @@ class ParamSearchCV:
 
     def __init__(
         self,
-        numeric_cols=None,
-        categorical_cols=None,
-        n_splits: int = 3,
-        n_splines_grid: tuple = (10, 14, 18),
-        loglam_range: tuple = (np.log(0.001), np.log(1.0)),
-        lam_iters: int = 6,
+        n_splines_grid=(15, 20, 25),
+        loglam_range=(np.log(0.005), np.log(1.0)),
+        n_lam=6,
         expectile=(0.025, 0.5, 0.975),
-        alpha: float = 0.10,
-        random_state: int = 42,
-        verbose: bool = False,
-        weighting=None,
-        width_penalty: float = 15.5,
+        alpha=0.10,
+        random_state=42,
+        verbose=False,
+        **kwargs,
     ):
-        self.numeric_cols = numeric_cols
-        self.categorical_cols = categorical_cols
-        self.n_splits = int(n_splits)
-        self.n_splines_grid = tuple(n_splines_grid)
-        self.loglam_range = (float(loglam_range[0]), float(loglam_range[1]))
-        self.lam_iters = int(lam_iters)
-        self.alpha = float(alpha)
-        self.random_state = int(random_state)
-        self.verbose = bool(verbose)
-        self.weighting = weighting
-        self.width_penalty = float(width_penalty)
-
-        # normalize expectiles
-        if isinstance(expectile, (list, tuple)):
-            es = [float(e) for e in expectile]
-        else:
-            es = [float(expectile)]
-        self.expectiles = tuple(sorted(set(es)))
-
-        # lam grid using lam_iters
-        self.lam_grid = np.exp(
-            np.linspace(
-                self.loglam_range[0], self.loglam_range[1], max(1, self.lam_iters)
-            )
-        )
+        self.n_splines_grid = n_splines_grid
+        self.loglam_range = loglam_range
+        self.n_lam = n_lam
+        self.expectiles = expectile
+        self.alpha = alpha
+        self.random_state = random_state
+        self.verbose = verbose
 
         self.best_ = None
-
+            
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
@@ -397,69 +375,117 @@ class ParamSearchCV:
         return gam
 
     def _tune_decay(
-        self, X_train, y_train, X_val, y_val,
-        base_ns, base_lam, expectiles
+        self, X_train, y_train, X_val, y_val, base_ns, base_lam, expectiles
     ):
         """
-        Adaptively tune time-decay rate after best (n_splines, lam) found.
-        Re-fits GAMs with decay-weighted samples and evaluates on weighted validation set.
+        Adaptively tune time-decay rate with directional expansion.
+        Expands toward improving direction and shrinks otherwise.
         """
         print("\n🌊 Fine-tuning time-decay rate adaptively...")
         import time
+
         start = time.time()
 
-        search_min, search_max = -0.20, -0.01
+        search_min, search_max = -0.25, -0.01
         best_score, best_decay = float("inf"), None
+        patience = 2  # stop early if no improvement
 
-        for step in range(6):  # about 6 adaptive iterations
-            candidates = np.linspace(search_min, search_max, num=3)
+        for step in range(8):
+            candidates = np.linspace(search_min, search_max, num=4)
             scores = []
 
             for d in candidates:
-                # --- Recompute weights for this decay candidate ---
+                # --- Combine base weights × recency decay ---
                 W = Weighting(decay_rate=d)
-                w_train_d = np.asarray(W._make_weights(X_train), dtype=float)
-                w_val_d   = np.asarray(W._make_weights(X_val), dtype=float)
+                w_train_d = np.asarray(
+                    W._make_weights(X_train), dtype=float
+                ) * np.asarray(w_train)
+                w_val_d = np.asarray(W._make_weights(X_val), dtype=float) * np.asarray(
+                    w_val
+                )
 
-                # --- Refit GAM models (same spline and lambda) ---
+                # --- Refit models (fixed spline & lam) ---
                 preds_val = {}
                 for e in expectiles:
-                    model = self._fit_one(e, base_ns, base_lam, X_train, y_train, w_train_d)
+                    model = self._fit_one(
+                        e, base_ns, base_lam, X_train, y_train, w_train_d
+                    )
                     preds_val[e] = model.predict(X_val)
 
-                # --- Weighted validation metrics ---
-                p025, p50, p975 = preds_val.get(0.025), preds_val.get(0.5), preds_val.get(0.975)
-
-                # weighted RMSE
+                # --- Weighted metrics ---
+                p025, p50, p975 = (
+                    preds_val.get(0.025),
+                    preds_val.get(0.5),
+                    preds_val.get(0.975),
+                )
                 rmse = np.sqrt(np.average((y_val - p50) ** 2, weights=w_val_d))
-
-                # weighted interval score
                 interval_width = p975 - p025
-                # penalize uncovered points more if they're recent (high weight)
-                penalty = np.where(y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0))
-                iscore = np.average(interval_width + (2 / self.alpha) * penalty, weights=w_val_d)
-
+                penalty = np.where(
+                    y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0)
+                )
+                iscore = np.average(
+                    interval_width + (2 / self.alpha) * penalty, weights=w_val_d
+                )
                 score = iscore + rmse
+
+                coverage = np.average(
+                    ((y_val >= p025) & (y_val <= p975)), weights=w_val_d
+                )
                 scores.append((score, d))
+                print(
+                    f"   → decay={d:6.3f} | score={score:8.2f} | RMSE={rmse:6.2f} | cov={coverage:4.2f}"
+                )
 
-                print(f"   → decay={d:6.3f} | score={score:8.2f} | RMSE={rmse:6.2f}")
+            # --- Analyze trend ---
+            scores.sort()
+            best_local_score, best_local_decay = scores[0]
 
-            # --- Find local best & narrow range ---
-            best_local_score, best_local_decay = min(scores, key=lambda x: x[0])
             if best_local_score < best_score:
                 best_score, best_decay = best_local_score, best_local_decay
+                patience = 2  # reset patience on improvement
+            else:
+                patience -= 1
+                if patience == 0:
+                    print("   💤 No further improvement. Early stop.")
+                    break
 
-            # adaptive zoom-in around best decay
-            span = (search_max - search_min) * 0.4
-            search_min = best_local_decay - span / 2
-            search_max = best_local_decay + span / 2
+            # --- Directional expansion or contraction ---
+            idx = [d for _, d in scores].index(best_local_decay)
+            left_edge, right_edge = scores[0][1], scores[-1][1]
+
+            if idx == 0:  # best at lower bound → expand left
+                width = search_max - search_min
+                search_min, search_max = (
+                    left_edge - 0.5 * width,
+                    left_edge + 0.3 * width,
+                )
+                print(
+                    f"   ↙ Expanding left → new range [{search_min:.3f}, {search_max:.3f}]"
+                )
+            elif idx == len(scores) - 1:  # best at upper bound → expand right
+                width = search_max - search_min
+                search_min, search_max = (
+                    right_edge - 0.3 * width,
+                    right_edge + 0.5 * width,
+                )
+                print(
+                    f"   ↗ Expanding right → new range [{search_min:.3f}, {search_max:.3f}]"
+                )
+            else:
+                # best inside → contract range around it
+                span = (search_max - search_min) * 0.4
+                search_min = best_local_decay - span / 2
+                search_max = best_local_decay + span / 2
+                print(
+                    f"   🔍 Contracting → new range [{search_min:.3f}, {search_max:.3f}]"
+                )
 
         duration = time.time() - start
-        print(f"🌟 Optimal decay rate ≈ {best_decay:.4f} (score={best_score:.2f}) "
-            f"after {duration:.1f}s\n")
+        print(
+            f"🌟 Optimal decay rate ≈ {best_decay:.4f} (score={best_score:.2f}) after {duration:.1f}s\n"
+        )
 
         return best_decay, best_score
-
 
     def interval_score(
         self, y_true, y_low, y_high, y_pred=None, alpha=0.05, width_penalty=0.1
@@ -500,86 +526,139 @@ class ParamSearchCV:
 
         return float(score)
 
-    def fit(self, X_train, y_train, X_val=None, y_val=None, w_train=None, w_val=None):
+    def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
         """
-        Try multiple combos of hyperparameters across all expectiles
-        & find the best performing model
-
-        Parameters:
-            X_train, y_train: Training data
-            X_val, y_val: Validation data
-            w_train: Sample weights for training
-            w_val: Sample weights for validation scoring
+        Adaptive grid search for (n_splines, λ) with directional expansion.
+        Expands λ grid toward better regions and adjusts n_splines adaptively.
         """
-        print("🔍 Searching hyperparameter grid...")
-        best_pair = None
+        print(
+            "\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────"
+        )
 
-        # Default to training data if val not provided
-        if X_val is None or y_val is None:
-            X_val, y_val, w_val = X_train, y_train, w_train
+        start = time.time()
+        best_score, best_result = float("inf"), None
 
-        total = len(self.n_splines_grid) * len(self.lam_grid)
-        counter = 0
-        for ns in self.n_splines_grid:
-            for lam in self.lam_grid:
-                counter += 1
-                print(
-                    f"    → [{counter}/{total}] Trying n_splines={ns}, λ={lam:.4f}",
-                    flush=True,
-                )
-                models, preds_val = {}, {}
+        # Initial coarse grids
+        n_splines_grid = list(self.n_splines_grid)
+        lam_grid = np.geomspace(
+            np.exp(self.loglam_range[0]), np.exp(self.loglam_range[1]), num=self.n_lam
+        )
+        step = 0
 
-                for e in self.expectiles:
-                    model = self._fit_one(e, ns, lam, X_train, y_train, w_train)
-                    models[e] = model
-                    preds_val[e] = model.predict(X_val)
+        while True:
+            scores = []
+            print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
 
-                # Evaluate
-                p025, p50, p975 = (
-                    preds_val.get(0.025),
-                    preds_val.get(0.5),
-                    preds_val.get(0.975),
-                )
-                iscore = self.interval_score(
-                    y_val,
-                    p025,
-                    p975,
-                    p50,
-                    alpha=self.alpha,
-                    width_penalty=self.width_penalty,
-                )
-                r50 = np.sqrt(np.mean((y_val - p50) ** 2))
-                score = iscore + r50
-                metrics = {
-                    "interval_score": iscore,
-                    "rmse_val": r50,
-                    "n_splines": ns,
-                    "lam": lam,
-                }
-
-                if (best_pair is None) or (score < best_pair[0]):
-                    best_pair = (score, _TuneResult(ns, lam, models, metrics))
-                    print(
-                        f"        🌟 New best: n_splines={ns}, λ={lam:.4f} (score={score:.2f})"
+            for ns in n_splines_grid:
+                for lam in lam_grid:
+                    res = self._fit_one_cycle(
+                        X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
                     )
+                    scores.append(res)
 
-        self.best_ = best_pair[1]
- 
-        # Adaptive fine-tune of decay
+            # Find best config in this round
+            scores.sort(key=lambda x: x["score"])
+            best_local = scores[0]
+
+            # always update best_result at least once
+            if best_result is None or best_local["score"] < best_score:
+                best_score = best_local["score"]
+                best_result = best_local
+                print(f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f}, score={best_score:.2f}")
+            else:
+                print("   💤 No improvement — stopping adaptive search.")
+                break
+
+            # --- Adaptive λ range adjustment ---
+            lam_best = best_local["lam"]
+            lam_min, lam_max = min(lam_grid), max(lam_grid)
+
+            if lam_best == lam_min:
+                lam_grid = np.geomspace(lam_min / 3, lam_max / 2, num=self.n_lam)
+                print(
+                    f"   ↙ Expanding left (lower λ): new grid {np.round(lam_grid, 4)}"
+                )
+            elif lam_best == lam_max:
+                lam_grid = np.geomspace(lam_min * 0.5, lam_max * 2, num=self.n_lam)
+                print(
+                    f"   ↗ Expanding right (higher λ): new grid {np.round(lam_grid, 4)}"
+                )
+            else:
+                lam_grid = np.geomspace(lam_best / 2, lam_best * 2, num=self.n_lam)
+                print(
+                    f"   🔍 Contracting around λ={lam_best:.4f}: new grid {np.round(lam_grid, 4)}"
+                )
+
+            # --- Optionally refine n_splines grid ---
+            ns_best = best_local["n_splines"]
+            if ns_best == max(n_splines_grid):
+                n_splines_grid = [ns_best, ns_best + 5, ns_best + 10]
+                print(f"   ↗ Expanding n_splines: {n_splines_grid}")
+            elif ns_best == min(n_splines_grid):
+                n_splines_grid = [max(5, ns_best - 5), ns_best, ns_best + 5]
+                print(f"   ↙ Expanding n_splines down: {n_splines_grid}")
+            else:
+                n_splines_grid = [ns_best - 5, ns_best, ns_best + 5]
+                print(f"   🔍 Contracting n_splines around {ns_best}: {n_splines_grid}")
+
+            # stopping condition
+            step += 1
+            if step >= 5:  # prevent endless search
+                print("   🧭 Max adaptive iterations reached.")
+                break
+
+        # --- Fine-tune decay rate ---
         best_decay, best_score = self._tune_decay(
-            X_train, y_train, X_val, y_val,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            w_train,
+            w_val,
             base_ns=self.best_.n_splines,
             base_lam=self.best_.lam,
-            expectiles=self.expectiles
+            expectiles=self.expectiles,
         )
 
-        self.best_.metrics["decay_rate"] = best_decay
-        self.best_.metrics["final_score"] = best_score
-        print(f"✅ Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f}, decay={best_decay:.4f}")
-        print(
-            f"📈 Validation RMSE={self.best_.metrics['rmse_val']:.2f} | Interval Score={self.best_.metrics['interval_score']:.2f}\n"
+        self.best_.decay_rate = best_decay
+        self.best_.final_score = best_score
+
+        # Save result
+        self.best_ = _TuneResult(
+            n_splines=best_result["n_splines"],
+            lam=best_result["lam"],
+            score=best_result["score"],
         )
+
+        duration = time.time() - start
+        print(
+            f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f}, decay={self.best_.decay_rate:.4f} "
+            f"(score={self.best_.final_score:.2f}) after {duration:.1f}s\n"
+        )
+
         return self.best_
+
+    def _fit_one_cycle(self, X_train, y_train, X_val, y_val, w_train, w_val, ns, lam):
+        """Single (n_splines, λ) trial with validation score."""
+        preds_val = {}
+        for e in self.expectiles:
+            model = self._fit_one(e, ns, lam, X_train, y_train, w_train)
+            preds_val[e] = model.predict(X_val)
+
+        p025, p50, p975 = preds_val.get(0.025), preds_val.get(0.5), preds_val.get(0.975)
+        rmse = np.sqrt(np.average((y_val - p50) ** 2, weights=w_val))
+        interval_width = p975 - p025
+        penalty = np.where(
+            y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0)
+        )
+        iscore = np.average(interval_width + (2 / self.alpha) * penalty, weights=w_val)
+        score = iscore + rmse
+
+        return {
+            "n_splines": ns,
+            "lam": lam,
+            "score": score,
+        }
 
     def predict_expectiles(self, X):
         if self.best_ is None:

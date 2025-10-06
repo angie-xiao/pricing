@@ -12,7 +12,6 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import Optional, Dict, Any
 import time
 
 # viz
@@ -278,18 +277,15 @@ class Weighting:
 
 
 class _TuneResult:
-    def __init__(
-        self,
-        n_splines: int,
-        lam: float,
-        models: Dict[str, Any],
-        metrics: Dict[str, float],
-    ):
+    """Container for best hyperparameter results and trained models."""
+    def __init__(self, n_splines=None, lam=None, score=None,
+                 decay_rate=None, final_score=None, models=None):
         self.n_splines = n_splines
         self.lam = lam
-        self.models = models
-        self.metrics = metrics
-
+        self.score = score
+        self.decay_rate = decay_rate
+        self.final_score = final_score
+        self.models = models or {}
 
 class ParamSearchCV:
     """
@@ -304,22 +300,20 @@ class ParamSearchCV:
         n_splines_grid=(15, 20, 25),
         loglam_range=(np.log(0.005), np.log(1.0)),
         n_lam=6,
-        expectile=(0.025, 0.5, 0.975),
+        expectiles=(0.025, 0.5, 0.975),
         alpha=0.10,
         random_state=42,
-        verbose=False,
-        **kwargs,
+        verbose=False
     ):
         self.n_splines_grid = n_splines_grid
         self.loglam_range = loglam_range
         self.n_lam = n_lam
-        self.expectiles = expectile
+        self.expectiles = expectiles
         self.alpha = alpha
         self.random_state = random_state
         self.verbose = verbose
-
         self.best_ = None
-            
+ 
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
@@ -374,117 +368,33 @@ class ParamSearchCV:
         )
         return gam
 
-    def _tune_decay(
-        self, X_train, y_train, X_val, y_val, base_ns, base_lam, expectiles
-    ):
-        """
-        Adaptively tune time-decay rate with directional expansion.
-        Expands toward improving direction and shrinks otherwise.
-        """
-        print("\n🌊 Fine-tuning time-decay rate adaptively...")
-        import time
-
+    def _tune_decay(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None, *, base_ns=None, base_lam=None, expectiles=None):
+        """Adaptive tuning of decay rate with gradient-like steps."""
         start = time.time()
+        print("🌊 Fine-tuning time-decay rate adaptively...")
 
-        search_min, search_max = -0.25, -0.01
-        best_score, best_decay = float("inf"), None
-        patience = 2  # stop early if no improvement
+        W = Weighting()
+        search_range = np.linspace(-0.3, -0.05, 10)
+        best_decay, best_score = 0, float("inf")
 
-        for step in range(8):
-            candidates = np.linspace(search_min, search_max, num=4)
-            scores = []
+        for decay in search_range:
+            w_train_d = np.asarray(W._make_weights(X_train, decay_rate=decay), dtype=float)
+            w_val_d = np.asarray(W._make_weights(X_val, decay_rate=decay), dtype=float)
 
-            for d in candidates:
-                # --- Combine base weights × recency decay ---
-                W = Weighting(decay_rate=d)
-                w_train_d = np.asarray(
-                    W._make_weights(X_train), dtype=float
-                ) * np.asarray(w_train)
-                w_val_d = np.asarray(W._make_weights(X_val), dtype=float) * np.asarray(
-                    w_val
-                )
+            preds_val = []
+            for e in expectiles or self.expectiles:
+                model = ExpectileGAM(expectile=e, n_splines=base_ns, lam=base_lam)
+                model.fit(X_train, y_train, weights=w_train_d)
+                preds_val.append(model.predict(X_val))
 
-                # --- Refit models (fixed spline & lam) ---
-                preds_val = {}
-                for e in expectiles:
-                    model = self._fit_one(
-                        e, base_ns, base_lam, X_train, y_train, w_train_d
-                    )
-                    preds_val[e] = model.predict(X_val)
+            preds_val = np.vstack(preds_val).T
+            rmse_val = np.sqrt(np.mean((y_val - preds_val[:, 1]) ** 2))
+            if rmse_val < best_score:
+                best_score = rmse_val
+                best_decay = decay
+            print(f"   → decay={decay:+.3f} | RMSE={rmse_val:6.2f}")
 
-                # --- Weighted metrics ---
-                p025, p50, p975 = (
-                    preds_val.get(0.025),
-                    preds_val.get(0.5),
-                    preds_val.get(0.975),
-                )
-                rmse = np.sqrt(np.average((y_val - p50) ** 2, weights=w_val_d))
-                interval_width = p975 - p025
-                penalty = np.where(
-                    y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0)
-                )
-                iscore = np.average(
-                    interval_width + (2 / self.alpha) * penalty, weights=w_val_d
-                )
-                score = iscore + rmse
-
-                coverage = np.average(
-                    ((y_val >= p025) & (y_val <= p975)), weights=w_val_d
-                )
-                scores.append((score, d))
-                print(
-                    f"   → decay={d:6.3f} | score={score:8.2f} | RMSE={rmse:6.2f} | cov={coverage:4.2f}"
-                )
-
-            # --- Analyze trend ---
-            scores.sort()
-            best_local_score, best_local_decay = scores[0]
-
-            if best_local_score < best_score:
-                best_score, best_decay = best_local_score, best_local_decay
-                patience = 2  # reset patience on improvement
-            else:
-                patience -= 1
-                if patience == 0:
-                    print("   💤 No further improvement. Early stop.")
-                    break
-
-            # --- Directional expansion or contraction ---
-            idx = [d for _, d in scores].index(best_local_decay)
-            left_edge, right_edge = scores[0][1], scores[-1][1]
-
-            if idx == 0:  # best at lower bound → expand left
-                width = search_max - search_min
-                search_min, search_max = (
-                    left_edge - 0.5 * width,
-                    left_edge + 0.3 * width,
-                )
-                print(
-                    f"   ↙ Expanding left → new range [{search_min:.3f}, {search_max:.3f}]"
-                )
-            elif idx == len(scores) - 1:  # best at upper bound → expand right
-                width = search_max - search_min
-                search_min, search_max = (
-                    right_edge - 0.3 * width,
-                    right_edge + 0.5 * width,
-                )
-                print(
-                    f"   ↗ Expanding right → new range [{search_min:.3f}, {search_max:.3f}]"
-                )
-            else:
-                # best inside → contract range around it
-                span = (search_max - search_min) * 0.4
-                search_min = best_local_decay - span / 2
-                search_max = best_local_decay + span / 2
-                print(
-                    f"   🔍 Contracting → new range [{search_min:.3f}, {search_max:.3f}]"
-                )
-
-        duration = time.time() - start
-        print(
-            f"🌟 Optimal decay rate ≈ {best_decay:.4f} (score={best_score:.2f}) after {duration:.1f}s\n"
-        )
-
+        print(f"🌟 Optimal decay rate ≈ {best_decay:+.3f} (score={best_score:.2f}) after {time.time() - start:.1f}s")
         return best_decay, best_score
 
     def interval_score(
@@ -531,65 +441,56 @@ class ParamSearchCV:
         Adaptive grid search for (n_splines, λ) with directional expansion.
         Expands λ grid toward better regions and adjusts n_splines adaptively.
         """
-        print(
-            "\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────"
-        )
 
+        print("\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────")
         start = time.time()
         best_score, best_result = float("inf"), None
 
-        # Initial coarse grids
         n_splines_grid = list(self.n_splines_grid)
-        lam_grid = np.geomspace(
-            np.exp(self.loglam_range[0]), np.exp(self.loglam_range[1]), num=self.n_lam
-        )
+        lam_grid = np.geomspace(np.exp(self.loglam_range[0]), np.exp(self.loglam_range[1]), num=self.n_lam)
         step = 0
 
         while True:
             scores = []
             print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
-
             for ns in n_splines_grid:
                 for lam in lam_grid:
-                    res = self._fit_one_cycle(
-                        X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
-                    )
-                    scores.append(res)
+                    cycle_scores = []
+                    for e in self.expectiles:
+                        res = self._fit_one_cycle(
+                            X_train, y_train, X_val, y_val,
+                            w_train=w_train, w_val=w_val,
+                            n_splines=ns, lam=lam, expectile=e
+                        )
+                        cycle_scores.append(res["score"])
+                    mean_score = np.mean(cycle_scores)
+                    scores.append({"n_splines": ns, "lam": lam, "score": mean_score})
 
-            # Find best config in this round
             scores.sort(key=lambda x: x["score"])
             best_local = scores[0]
 
-            # always update best_result at least once
-            if best_result is None or best_local["score"] < best_score:
+            if best_local["score"] < best_score:
                 best_score = best_local["score"]
                 best_result = best_local
-                print(f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f}, score={best_score:.2f}")
+                print(f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.2f})")
             else:
                 print("   💤 No improvement — stopping adaptive search.")
                 break
 
-            # --- Adaptive λ range adjustment ---
+            # Adaptive λ adjustment
             lam_best = best_local["lam"]
             lam_min, lam_max = min(lam_grid), max(lam_grid)
-
             if lam_best == lam_min:
                 lam_grid = np.geomspace(lam_min / 3, lam_max / 2, num=self.n_lam)
-                print(
-                    f"   ↙ Expanding left (lower λ): new grid {np.round(lam_grid, 4)}"
-                )
+                print(f"   ↙ Expanding left (lower λ): new grid {np.round(lam_grid, 4)}")
             elif lam_best == lam_max:
                 lam_grid = np.geomspace(lam_min * 0.5, lam_max * 2, num=self.n_lam)
-                print(
-                    f"   ↗ Expanding right (higher λ): new grid {np.round(lam_grid, 4)}"
-                )
+                print(f"   ↗ Expanding right (higher λ): new grid {np.round(lam_grid, 4)}")
             else:
                 lam_grid = np.geomspace(lam_best / 2, lam_best * 2, num=self.n_lam)
-                print(
-                    f"   🔍 Contracting around λ={lam_best:.4f}: new grid {np.round(lam_grid, 4)}"
-                )
+                print(f"   🔍 Contracting around λ={lam_best:.4f}: new grid {np.round(lam_grid, 4)}")
 
-            # --- Optionally refine n_splines grid ---
+            # Adaptive spline refinement
             ns_best = best_local["n_splines"]
             if ns_best == max(n_splines_grid):
                 n_splines_grid = [ns_best, ns_best + 5, ns_best + 10]
@@ -601,27 +502,10 @@ class ParamSearchCV:
                 n_splines_grid = [ns_best - 5, ns_best, ns_best + 5]
                 print(f"   🔍 Contracting n_splines around {ns_best}: {n_splines_grid}")
 
-            # stopping condition
             step += 1
-            if step >= 5:  # prevent endless search
+            if step >= 5:
                 print("   🧭 Max adaptive iterations reached.")
                 break
-
-        # --- Fine-tune decay rate ---
-        best_decay, best_score = self._tune_decay(
-            X_train,
-            y_train,
-            X_val,
-            y_val,
-            w_train,
-            w_val,
-            base_ns=self.best_.n_splines,
-            base_lam=self.best_.lam,
-            expectiles=self.expectiles,
-        )
-
-        self.best_.decay_rate = best_decay
-        self.best_.final_score = best_score
 
         # Save result
         self.best_ = _TuneResult(
@@ -630,35 +514,43 @@ class ParamSearchCV:
             score=best_result["score"],
         )
 
-        duration = time.time() - start
-        print(
-            f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f}, decay={self.best_.decay_rate:.4f} "
-            f"(score={self.best_.final_score:.2f}) after {duration:.1f}s\n"
-        )
+        # Train final models for chosen config
+        final_models = {}
+        for e in self.expectiles:
+            res = self._fit_one_cycle(
+                X_train, y_train, X_val, y_val,
+                w_train=w_train, w_val=w_val,
+                n_splines=self.best_.n_splines,
+                lam=self.best_.lam,
+                expectile=e,
+            )
+            final_models[e] = res["model"]
+        self.best_.models = final_models
 
+        duration = time.time() - start
+        print(f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.2f}) after {duration:.1f}s\n")
         return self.best_
 
-    def _fit_one_cycle(self, X_train, y_train, X_val, y_val, w_train, w_val, ns, lam):
-        """Single (n_splines, λ) trial with validation score."""
-        preds_val = {}
-        for e in self.expectiles:
-            model = self._fit_one(e, ns, lam, X_train, y_train, w_train)
-            preds_val[e] = model.predict(X_val)
+    def _fit_one_cycle(
+        self,
+        X_train, y_train, X_val, y_val,
+        w_train=None, w_val=None,
+        n_splines=None, lam=None, expectile=0.5
+    ):
+        """Fit a single ExpectileGAM and return validation score + model."""
 
-        p025, p50, p975 = preds_val.get(0.025), preds_val.get(0.5), preds_val.get(0.975)
-        rmse = np.sqrt(np.average((y_val - p50) ** 2, weights=w_val))
-        interval_width = p975 - p025
-        penalty = np.where(
-            y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0)
+        model = ExpectileGAM(
+            expectile=expectile,
+            n_splines=n_splines,
+            lam=lam,
         )
-        iscore = np.average(interval_width + (2 / self.alpha) * penalty, weights=w_val)
-        score = iscore + rmse
+        model.fit(X_train, y_train, weights=w_train)
+        preds_val = model.predict(X_val)
 
-        return {
-            "n_splines": ns,
-            "lam": lam,
-            "score": score,
-        }
+        rmse = np.sqrt(np.mean((y_val - preds_val) ** 2))
+        score = rmse  # could later combine with interval_score
+
+        return {"expectile": expectile, "model": model, "score": score}
 
     def predict_expectiles(self, X):
         if self.best_ is None:
@@ -691,28 +583,19 @@ class GAMModeler:
         return df
 
     def fit_predict_expectiles(
-        self, X_train, y_train, X_pred, X_val=None, y_val=None, w_train=None, w_val=None
+        self, X_train, y_train, X_val, y_val, w_train=None, w_val=None, X_pred=None
     ):
         """
-        Fit the best GAMs for each expectile and generate predictions for X_pred.
+        Fit expectile GAMs with validation and produce predictions.
 
-        Parameters
-            X_train : pd.DataFrame or np.ndarray
-                Training feature matrix.
-            y_train : array-like
-                Training target values.
-            X_pred : pd.DataFrame or np.ndarray
-                Feature matrix to predict on (usually same as X_train for in-sample plots).
-            w_train : array-like, optional
-                Sample weights (time-decay, rarity, etc).
-
-        Returns
-            dict with keys:
-            - "params":  tuned parameters (n_splines, lam)
-            - "metrics": model performance summary (interval score, RMSE, etc.)
-            - "predictions": dict of arrays keyed by "units_pred_<expectile>"
+        Return
+            a structured dict: 
+                {"params": ..., "metrics": ..., "predictions": {...}}
         """
+        if X_pred is None:
+            X_pred = X_val
 
+        # ──────────────────────────── Fit model ────────────────────────────
         best = self.param_search.fit(
             X_train, y_train, X_val, y_val, w_train=w_train, w_val=w_val
         )
@@ -725,18 +608,40 @@ class GAMModeler:
                 self._log(f"[WARN] Prediction failed for expectile={e}: {err}")
                 preds[f"units_pred_{e}"] = np.full(len(X_pred), np.nan)
 
+        # add revenue predictions if price column available
+        if isinstance(X_pred, pd.DataFrame) and "price" in X_pred.columns:
+            for e in best.models.keys():
+                preds[f"revenue_pred_{e}"] = preds[f"units_pred_{e}"] * X_pred["price"].to_numpy()
+
+        # ──────────────────────────── Collect metadata ────────────────────────────
+        metrics = {
+            "interval_score": getattr(best, "interval_score", None),
+            "rmse_val": getattr(best, "rmse_val", None),
+            "n_splines": getattr(best, "n_splines", None),
+            "lam": getattr(best, "lam", None),
+            "decay_rate": getattr(best, "decay_rate", None),
+            "final_score": getattr(best, "final_score", None),
+        }
+
+        params = {
+            "expectiles": self.param_search.expectiles,
+            "n_splines": best.n_splines,
+            "lam": best.lam,
+        }
+
         self._log(
             f"[DBG GAMModeler] Using ParamSearchCV.best_ = {best}\n"
-            f"    Validation metrics: {getattr(best, 'metrics', {})}\n"
+            f"    Validation metrics: {metrics}\n"
             f"    Prediction keys: {list(preds.keys())}"
         )
 
+        print("─────────────────────────────── ✅ Generating Prediction Frames ───────────────────────────────")
         return {
-            "params": getattr(best, "params", {}),
-            "metrics": getattr(best, "metrics", {}),
+            "params": params,
+            "metrics": metrics,
             "predictions": preds,
         }
-
+    
 
 class Optimizer:
     @staticmethod
@@ -882,20 +787,23 @@ class PricingPipeline:
             "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────"
         )
         param_search = ParamSearchCV(
-            numeric_cols=num_cols,
-            categorical_cols=["event_encoded", "product_encoded"],
-            **self.param_search_kwargs,
+            n_splines_grid=(15, 20, 25),
+            loglam_range=(np.log(0.005), np.log(1.0)),
+            n_lam=6,
+            expectiles=(0.025, 0.5, 0.975),
+            alpha=0.10,
+            random_state=42,
+            verbose=False
         )
+
         modeler = GAMModeler(param_search)
         res = modeler.fit_predict_expectiles(
-            X_train=X_train,
-            y_train=y_train,
-            X_pred=X,  # still predict on full set for dashboard
-            X_val=X_val,
-            y_val=y_val,
-            w_train=w_train,
-            w_val=w_val,
+            X_train, y_train, X_val, y_val,
+            w_train=w_train, w_val=w_val,
+            X_pred=X  # <— pass the full frame here
         )
+
+
         print(
             "\n─────────────────────────────── ✅ Generating Prediction Frames ───────────────────────────────"
         )

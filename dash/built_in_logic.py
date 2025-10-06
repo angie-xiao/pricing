@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any
+import time
 
 # viz
 # import seaborn as sns
@@ -24,7 +25,6 @@ from dash_bootstrap_templates import load_figure_template
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
-
 from pygam import ExpectileGAM, s, f
 
 # local import
@@ -255,84 +255,26 @@ class DataEngineer:
 
 
 class Weighting:
-    def __init__(
-        self,
-        decay_rate: float = -0.015,  # negative → older rows get smaller weight
-        rarity_cap: float = 2.05,
-        rarity_beta: float = 0.25,
-        clip_min: float = 0.35,
-        clip_max: float = 2.0,
-    ):
-        self.decay_rate = float(decay_rate)
-        self.rarity_cap = float(rarity_cap)
-        self.rarity_beta = float(rarity_beta)
-        self.clip_min = float(clip_min)
-        self.clip_max = float(clip_max)
+    def __init__(self, decay_rate=-0.05, normalize=True):
+        self.decay_rate = decay_rate
+        self.normalize = normalize
 
-    def _time_decay(self, df: pd.DataFrame) -> np.ndarray:
-        """
-        Exponential time-decay using 'order_date' if present.
-        weight = exp(decay_rate * days_since_order)
-        Missing/invalid dates → 1.0
-        """
-        if df is None or df.empty:
-            return np.array([], dtype=float)
+    def _make_weights(self, df, col="order_date"):
+        """Compute exponential time-decay weights based on recency."""
+        if col not in df.columns:
+            return np.ones(len(df))
 
-        if "order_date" not in df.columns:
-            return np.ones(len(df), dtype=float)
+        dates = pd.to_datetime(df[col], errors="coerce")
+        max_date = dates.max()
+        delta_days = (max_date - dates).dt.days.fillna(0)
 
-        odt = pd.to_datetime(df["order_date"], errors="coerce")
-        if odt.notna().any():
-            ref = odt.max().normalize()
-            days = (ref - odt).dt.days.astype("float64")
-            days = np.where(np.isfinite(days), days, 0.0)
-        else:
-            return np.ones(len(df), dtype=float)
+        # Exponential decay
+        w = np.exp(self.decay_rate * delta_days)
 
-        return np.exp(self.decay_rate * days).astype(float)
+        if self.normalize:
+            w = w / np.nanmean(w[w > 0])
 
-    def _rarity_multiplier(self, prices: np.ndarray) -> np.ndarray:
-        """
-        Rarity = inverse frequency at (rounded) price.
-        Round to cents to avoid fragmentation.
-        """
-        p = pd.to_numeric(prices, errors="coerce").astype(float)
-        if p.size == 0:
-            return np.array([], dtype=float)
-
-        bucketed = np.round(p, 2)
-        vc = pd.Series(bucketed).value_counts(dropna=False)
-        counts = pd.Series(bucketed).map(vc).to_numpy(dtype=float)
-
-        valid = np.isfinite(counts) & (counts > 0)
-        if not valid.any():
-            return np.ones_like(counts, dtype=float)
-
-        mean_c = counts[valid].mean()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            raw = mean_c / counts  # fewer transactions → bigger weight
-        raw = np.where(np.isfinite(raw), raw, 1.0)
-
-        w = np.power(raw, self.rarity_beta)
-        w = np.clip(w, 1.0 / self.rarity_cap, self.rarity_cap)
-        return np.where(np.isfinite(w), w, 1.0).astype(float)
-
-    def _make_weights(
-        self, df: pd.DataFrame, base_weights: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        decay = self._time_decay(df)
-        prices = pd.to_numeric(df.get("price", np.nan), errors="coerce").to_numpy()
-        rarity = self._rarity_multiplier(prices)
-
-        w = decay * rarity
-        if base_weights is not None:
-            w = w * np.asarray(base_weights, dtype=float)
-
-        w = np.nan_to_num(w, nan=1.0, posinf=self.clip_max, neginf=self.clip_min)
-        w = np.clip(w, self.clip_min, self.clip_max)
-        mean = w.mean() if w.size else 1.0
-        w = w / (mean if mean else 1.0)
-        return w.astype(float)
+        return w
 
 
 class _TuneResult:
@@ -454,6 +396,71 @@ class ParamSearchCV:
         )
         return gam
 
+    def _tune_decay(
+        self, X_train, y_train, X_val, y_val,
+        base_ns, base_lam, expectiles
+    ):
+        """
+        Adaptively tune time-decay rate after best (n_splines, lam) found.
+        Re-fits GAMs with decay-weighted samples and evaluates on weighted validation set.
+        """
+        print("\n🌊 Fine-tuning time-decay rate adaptively...")
+        import time
+        start = time.time()
+
+        search_min, search_max = -0.20, -0.01
+        best_score, best_decay = float("inf"), None
+
+        for step in range(6):  # about 6 adaptive iterations
+            candidates = np.linspace(search_min, search_max, num=3)
+            scores = []
+
+            for d in candidates:
+                # --- Recompute weights for this decay candidate ---
+                W = Weighting(decay_rate=d)
+                w_train_d = np.asarray(W._make_weights(X_train), dtype=float)
+                w_val_d   = np.asarray(W._make_weights(X_val), dtype=float)
+
+                # --- Refit GAM models (same spline and lambda) ---
+                preds_val = {}
+                for e in expectiles:
+                    model = self._fit_one(e, base_ns, base_lam, X_train, y_train, w_train_d)
+                    preds_val[e] = model.predict(X_val)
+
+                # --- Weighted validation metrics ---
+                p025, p50, p975 = preds_val.get(0.025), preds_val.get(0.5), preds_val.get(0.975)
+
+                # weighted RMSE
+                rmse = np.sqrt(np.average((y_val - p50) ** 2, weights=w_val_d))
+
+                # weighted interval score
+                interval_width = p975 - p025
+                # penalize uncovered points more if they're recent (high weight)
+                penalty = np.where(y_val < p025, p025 - y_val, np.where(y_val > p975, y_val - p975, 0))
+                iscore = np.average(interval_width + (2 / self.alpha) * penalty, weights=w_val_d)
+
+                score = iscore + rmse
+                scores.append((score, d))
+
+                print(f"   → decay={d:6.3f} | score={score:8.2f} | RMSE={rmse:6.2f}")
+
+            # --- Find local best & narrow range ---
+            best_local_score, best_local_decay = min(scores, key=lambda x: x[0])
+            if best_local_score < best_score:
+                best_score, best_decay = best_local_score, best_local_decay
+
+            # adaptive zoom-in around best decay
+            span = (search_max - search_min) * 0.4
+            search_min = best_local_decay - span / 2
+            search_max = best_local_decay + span / 2
+
+        duration = time.time() - start
+        print(f"🌟 Optimal decay rate ≈ {best_decay:.4f} (score={best_score:.2f}) "
+            f"after {duration:.1f}s\n")
+
+        return best_decay, best_score
+
+
     def interval_score(
         self, y_true, y_low, y_high, y_pred=None, alpha=0.05, width_penalty=0.1
     ):
@@ -557,8 +564,18 @@ class ParamSearchCV:
                     )
 
         self.best_ = best_pair[1]
-        best_ns, best_lam = self.best_.n_splines, self.best_.lam
-        print(f"\n✅ Best config found: n_splines={best_ns} | λ={best_lam:.4f}")
+ 
+        # Adaptive fine-tune of decay
+        best_decay, best_score = self._tune_decay(
+            X_train, y_train, X_val, y_val,
+            base_ns=self.best_.n_splines,
+            base_lam=self.best_.lam,
+            expectiles=self.expectiles
+        )
+
+        self.best_.metrics["decay_rate"] = best_decay
+        self.best_.metrics["final_score"] = best_score
+        print(f"✅ Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f}, decay={best_decay:.4f}")
         print(
             f"📈 Validation RMSE={self.best_.metrics['rmse_val']:.2f} | Interval Score={self.best_.metrics['interval_score']:.2f}\n"
         )

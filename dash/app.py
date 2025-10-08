@@ -12,7 +12,6 @@ from navbar import get_navbar
 from home import Homepage
 import overview, opps, faq
 from helpers import Paths, Cache, DataEng
-from built_in_logic import PricingPipeline, DEFAULT_PARAM_SEARCH
 
 import warnings
 
@@ -27,7 +26,6 @@ PROJECT_BASE = Paths.PROJECT_BASE
 frames = Cache.build_frames_with_cache(
     PROJECT_BASE,
     force_rebuild=True,  # Set to True when you want to force rebuild
-    param_search_kwargs=DEFAULT_PARAM_SEARCH
 )
 
 

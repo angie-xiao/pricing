@@ -272,7 +272,15 @@ class Weighting:
         rarity = np.power(1.0 / (1.0 + counts), self.rarity_power)
         w = w_time * rarity.values
 
-        # Clip light tails to reduce leverage spikes
+        # --- curvature factor to re-emphasize mid-range transitions ---
+        if "price" in df.columns and df["price"].nunique() > 3:
+            price = df["price"].to_numpy()
+            d_price = np.abs(np.gradient(price))
+            curv_factor = 1 + 0.3 * (d_price / np.nanmax(d_price))
+            w = w * curv_factor
+        # -------------------------------------------------------------------
+
+        # Light tail clipping to avoid over-leverage
         lo, hi = np.nanquantile(w, [0.05, 0.95])
         w = np.clip(w, lo, hi)
 
@@ -280,6 +288,7 @@ class Weighting:
             w = w / np.nanmean(w[w > 0])
 
         return np.asarray(w, dtype=float)
+
 
     def tune(self, df, X_train, y_train, X_val, y_val,
              decay_grid=None, rarity_grid=None,
@@ -349,10 +358,10 @@ class ParamSearchCV:
         n_splines_grid=(15, 20, 25),
         loglam_range=(np.log(0.005), np.log(1.0)),
         n_lam=6,
-        expectiles=(0.025, 0.5, 0.975),
+        expectiles=(0.025, 0.5, 0.975),  
         alpha=0.10,
         random_state=42,
-        verbose=False
+        verbose=False,
     ):
         self.n_splines_grid = n_splines_grid
         self.loglam_range = loglam_range
@@ -361,14 +370,9 @@ class ParamSearchCV:
         self.alpha = alpha
         self.random_state = random_state
         self.verbose = verbose
-        self.best_ = None
- 
-    def _log(self, msg: str):
-        if self.verbose:
-            print(msg, flush=True)
 
-    def _default_grids(self, n_rows: int, n_unique_prices: int):
-        # n_splines: scale with unique price support, cap modestly
+    def _default_grids(self, n_rows: int = 1000, n_unique_prices: int = 10):
+        """Return sensible default grids based on dataset scale."""
         if n_unique_prices <= 6:
             ns_grid = (12, 15, 18)
         elif n_unique_prices <= 10:
@@ -376,7 +380,6 @@ class ParamSearchCV:
         else:
             ns_grid = (18, 22, 26)
 
-        # λ range: wider when sample small to avoid overfit
         if n_rows < 400:
             lam_low, lam_high = 0.006, 1.2
         elif n_rows < 1500:
@@ -384,7 +387,19 @@ class ParamSearchCV:
         else:
             lam_low, lam_high = 0.004, 0.5
 
-        return ns_grid, (np.log(lam_low), np.log(lam_high)), 7  # n_lam
+        return dict(
+            n_splines_grid=ns_grid,
+            loglam_range=(np.log(lam_low), np.log(lam_high)),
+            n_lam=7,
+            expectiles=(0.025, 0.5, 0.975),
+            alpha=0.10,
+            random_state=42,
+            verbose=False,
+        )
+
+    def _log(self, msg: str):
+        if self.verbose:
+            print(msg, flush=True)
 
     def _fit_one(self, e, ns, lam, X, y, w=None):
 
@@ -535,7 +550,14 @@ class ParamSearchCV:
         no_improve = 0
 
         n_splines_grid = list(self.n_splines_grid)
-        lam_grid = np.geomspace(np.exp(self.loglam_range[0]), np.exp(self.loglam_range[1]), num=self.n_lam)
+
+        # λ × support scaling - so it tightens (less smoothing) when there's enough data
+        n_support = len(X_train)
+        lam_low, lam_high = np.exp(self.loglam_range)
+        # shrink λ slightly if support is decent
+        scale = np.clip(n_support / 500.0, 0.5, 1.2)
+        lam_grid = np.geomspace(lam_low * scale, lam_high / scale, num=self.n_lam)
+
         step = 0
         last_scores = None  # keep for fallback
 
@@ -798,7 +820,17 @@ class Optimizer:
 class PricingPipeline:
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
-        self.param_search_kwargs = param_search_kwargs or DEFAULT_PARAM_SEARCH
+
+        # param search
+        if param_search_kwargs is None:
+            # derive adaptive defaults dynamically
+            n_rows = len(pricing_df)
+            n_unique_prices = pricing_df["price"].nunique() if "price" in pricing_df else 10
+            temp = ParamSearchCV()
+            param_search_kwargs = temp._default_grids(n_rows, n_unique_prices)
+
+        self.param_search = ParamSearchCV(**param_search_kwargs)
+
 
     @classmethod
     def from_csv_folder(
@@ -912,9 +944,9 @@ class PricingPipeline:
         #     "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────\n"
         # )
         param_search = ParamSearchCV(
-            n_splines_grid=(18, 22, 26),
-            loglam_range=(np.log(0.005), np.log(0.5)),  # loosen smoothness
-            n_lam=6,
+            n_splines_grid=(16, 20, 24, 30),
+            loglam_range=(np.log(0.002), np.log(2.0)),  # expand in both directions
+            n_lam=7,
             expectiles=(0.025, 0.5, 0.975),
             alpha=0.10,
             random_state=42,

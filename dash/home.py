@@ -130,7 +130,7 @@ def abstract_section():
                             html.P(),
 
                             html.P(
-                                "data engineering → modeling → tuning → generating the final presentation layer",
+                                "🎯 data engineering → modeling → tuning → generating the final presentation layer",
                                 style={
                                     "color": "#5f6b7a",
                                     "marginLeft": "150px",

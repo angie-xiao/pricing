@@ -47,16 +47,6 @@ CAT_COLS = ["event_encoded", "product_encoded"]
 NUM_COLS = ["price", "deal_discount_percent"]
 
 
-DEFAULT_PARAM_SEARCH = dict(
-    n_splines_grid=(20, 30, 40),
-    loglam_range=(np.log(0.001), np.log(1.0)),
-    expectile=(0.025, 0.5, 0.975),
-    alpha=0.01,
-    random_state=42,
-    verbose=False,
-)
-
-
 def _v_best(obj, msg: str):
     """
     Logging func -
@@ -254,27 +244,86 @@ class DataEngineer:
 
 
 class Weighting:
-    def __init__(self, decay_rate=-0.05, normalize=True):
+    """
+    Computes combined time-decay * rarity weights with light adaptive tuning.
+    Avoids over-aggressive weighting by bounding and normalization.
+    """
+    def __init__(self, decay_rate=-0.05, rarity_power=1.0, normalize=True):
         self.decay_rate = decay_rate
+        self.rarity_power = rarity_power
         self.normalize = normalize
 
     def _make_weights(self, df, col="order_date"):
-        """Compute exponential time-decay weights based on recency."""
+        """Base exponential time-decay weights."""
         if col not in df.columns:
             return np.ones(len(df))
-
         dates = pd.to_datetime(df[col], errors="coerce")
         max_date = dates.max()
         delta_days = (max_date - dates).dt.days.fillna(0)
-
-        # Exponential decay
         w = np.exp(self.decay_rate * delta_days)
+        if self.normalize:
+            w = w / np.nanmean(w[w > 0])
+        return np.asarray(w, dtype=float)
+
+    def _combine(self, df, time_col="order_date", rarity_col="price"):
+        """Combine time-decay and rarity weighting with bounded scaling."""
+        w_time = self._make_weights(df, col=time_col)
+        counts = df.groupby(rarity_col)[rarity_col].transform("count")
+        rarity = np.power(1.0 / (1.0 + counts), self.rarity_power)
+        w = w_time * rarity.values
+
+        # Clip light tails to reduce leverage spikes
+        lo, hi = np.nanquantile(w, [0.05, 0.95])
+        w = np.clip(w, lo, hi)
 
         if self.normalize:
             w = w / np.nanmean(w[w > 0])
 
-        return w
+        return np.asarray(w, dtype=float)
 
+    def tune(self, df, X_train, y_train, X_val, y_val,
+             decay_grid=None, rarity_grid=None,
+             expectiles=(0.5,), base_ns=20, base_lam=0.1):
+        """
+        Lightweight tuning of decay_rate × rarity_power based on validation RMSE.
+        Updates self.decay_rate and self.rarity_power in place.
+        """
+        print("🧮  Grid-tuning decay × rarity weights ...")
+        from pygam import ExpectileGAM
+
+        decay_grid = decay_grid or [-0.30, -0.15, -0.08, -0.05, -0.03]
+        rarity_grid = rarity_grid or [0.5, 1.0, 1.5]
+
+        best_cfg, best_rmse = None, float("inf")
+        for d in decay_grid:
+            for rp in rarity_grid:
+                self.decay_rate = d
+                self.rarity_power = rp
+
+                w_train = self._combine(df.loc[X_train.index])
+                w_val = self._combine(df.loc[X_val.index])
+
+                preds = []
+                for e in expectiles:
+                    gam = ExpectileGAM(expectile=e, n_splines=base_ns, lam=base_lam)
+                    gam.fit(X_train, y_train, weights=w_train)
+                    preds.append(gam.predict(X_val))
+
+                preds = np.vstack(preds).T
+                rmse_val = np.sqrt(np.mean((y_val - preds[:, 0]) ** 2))
+                print(f"   decay={d:+.3f} | rarity_pow={rp:.1f} → RMSE={rmse_val:6.3f}")
+
+                if rmse_val < best_rmse:
+                    best_rmse = rmse_val
+                    best_cfg = (d, rp)
+
+        if best_cfg:
+            self.decay_rate, self.rarity_power = best_cfg
+            print(f"🌟 Best weighting params: decay={self.decay_rate:+.3f}, rarity_pow={self.rarity_power:.2f} (RMSE={best_rmse:.3f})")
+        else:
+            print("⚠️  No improvement found; keeping defaults.")
+
+        return self
 
 class _TuneResult:
     """Container for best hyperparameter results and trained models."""
@@ -317,6 +366,25 @@ class ParamSearchCV:
     def _log(self, msg: str):
         if self.verbose:
             print(msg, flush=True)
+
+    def _default_grids(self, n_rows: int, n_unique_prices: int):
+        # n_splines: scale with unique price support, cap modestly
+        if n_unique_prices <= 6:
+            ns_grid = (12, 15, 18)
+        elif n_unique_prices <= 10:
+            ns_grid = (15, 20, 25)
+        else:
+            ns_grid = (18, 22, 26)
+
+        # λ range: wider when sample small to avoid overfit
+        if n_rows < 400:
+            lam_low, lam_high = 0.006, 1.2
+        elif n_rows < 1500:
+            lam_low, lam_high = 0.005, 0.8
+        else:
+            lam_low, lam_high = 0.004, 0.5
+
+        return ns_grid, (np.log(lam_low), np.log(lam_high)), 7  # n_lam
 
     def _fit_one(self, e, ns, lam, X, y, w=None):
 
@@ -442,11 +510,23 @@ class ParamSearchCV:
         Adaptive grid search for (n_splines, λ) with directional expansion and patience.
         Explores both sides around best λ; stops only after several non-improving rounds.
         """
-
-
         print("\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────")
         start = time.time()
 
+        # derive defaults from data if using the class defaults
+        if self.n_splines_grid in ((15, 20, 25),) and self.n_lam == 6:
+            n_rows = len(X_train) + len(X_val)
+            # infer unique price support if column exists
+            try:
+                n_unique_prices = int(pd.concat([X_train, X_val])["price"].nunique())
+            except Exception:
+                n_unique_prices = 8
+            ns_grid, loglam_range, n_lam = self._default_grids(n_rows, n_unique_prices)
+            self.n_splines_grid = ns_grid
+            self.loglam_range = loglam_range
+            self.n_lam = n_lam
+            print(f"   🧮 Grids → n_splines={self.n_splines_grid}, λ∈[e^{self.loglam_range[0]:.3f}, e^{self.loglam_range[1]:.3f}], n_lam={self.n_lam}")
+            
         patience = getattr(self, "patience", 2)
         max_steps = getattr(self, "max_steps", 8)
         rel_tol = getattr(self, "rel_tol", 1e-3)
@@ -566,9 +646,6 @@ class ParamSearchCV:
         duration = time.time() - start
         print(f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n")
         return self.best_
-
-
-
 
     def _fit_one_cycle(
         self,
@@ -777,21 +854,30 @@ class PricingPipeline:
             topsellers["__intercept__"] = 1.0
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
-        # --- Weights (decay + rarity) ---
-        W = Weighting(decay_rate=-0.05)
-        w_raw = np.asarray(W._make_weights(topsellers), dtype=float)
-        rarity = 1.0 / (1.0 + topsellers.groupby("price")["price"].transform("count"))
-        w_raw *= rarity.values
-        w_stable = np.clip(
-            np.where(np.isfinite(w_raw), w_raw, 1.0),
-            (
-                np.nanquantile(w_raw[np.isfinite(w_raw)], 0.20)
-                if np.isfinite(w_raw).any()
-                else 0.1
-            ),
-            None,
+        # -------------------------------------------- Weights --------------------------------------------
+        # --- Quick split for weight tuning ---
+        X_tmp, X_val, y_tmp, y_val = train_test_split(
+            topsellers[["price", "deal_discount_percent", "asp"]],
+            topsellers["shipped_units"],
+            test_size=0.25,
+            random_state=42,
         )
-        print("⚖️  Weights computed (time-decay × rarity).")
+
+        W = Weighting()
+        W.tune(
+            df=topsellers,
+            X_train=X_tmp, y_train=y_tmp,
+            X_val=X_val, y_val=y_val,
+            # broader but still small:
+            decay_grid=[-0.40, -0.30, -0.20, -0.12, -0.08],
+            rarity_grid=[0.6, 0.9, 1.2, 1.6, 1.9],   # keeps “rarity push” modest to strong
+            expectiles=(0.5,),
+            base_ns=18,
+            base_lam=0.08,
+        )
+        w_stable = W._combine(topsellers)
+        print(f"⚖️  Weights tuned: decay={W.decay_rate:+.3f}, rarity_pow={W.rarity_power:.2f}")
+
 
         # Elasticity diagnostic
         try:
@@ -826,8 +912,8 @@ class PricingPipeline:
         #     "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────\n"
         # )
         param_search = ParamSearchCV(
-            n_splines_grid=(15, 20, 25),
-            loglam_range=(np.log(0.005), np.log(1.0)),
+            n_splines_grid=(18, 22, 26),
+            loglam_range=(np.log(0.005), np.log(0.5)),  # loosen smoothness
             n_lam=6,
             expectiles=(0.025, 0.5, 0.975),
             alpha=0.10,

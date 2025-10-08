@@ -127,14 +127,19 @@ def abstract_section():
                                     "marginRight": "200px",
                                 },
                             ),
+                            html.P(),
+
                             html.P(
-                                "\tfrom data engineering, to modeling, and finally generating the final presentation layer.\n",
+                                "data engineering → modeling → tuning → generating the final presentation layer",
                                 style={
                                     "color": "#5f6b7a",
-                                    "marginLeft": "100px",
+                                    "marginLeft": "150px",
                                     "marginRight": "200px",
                                 },
                             ),
+
+                            html.P(),
+
                             html.P(
                                 html.I(
                                     "As the user, your role is streamlined: review the interactive graphs and outputs, and focus your attention where it matters most: on making strategic decisions. "

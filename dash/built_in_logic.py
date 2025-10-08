@@ -437,18 +437,27 @@ class ParamSearchCV:
         return float(score)
 
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
+
         """
-        Adaptive grid search for (n_splines, λ) with directional expansion.
-        Expands λ grid toward better regions and adjusts n_splines adaptively.
+        Adaptive grid search for (n_splines, λ) with directional expansion and patience.
+        Explores both sides around best λ; stops only after several non-improving rounds.
         """
+
 
         print("\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────")
         start = time.time()
+
+        patience = getattr(self, "patience", 2)
+        max_steps = getattr(self, "max_steps", 8)
+        rel_tol = getattr(self, "rel_tol", 1e-3)
+
         best_score, best_result = float("inf"), None
+        no_improve = 0
 
         n_splines_grid = list(self.n_splines_grid)
         lam_grid = np.geomspace(np.exp(self.loglam_range[0]), np.exp(self.loglam_range[1]), num=self.n_lam)
         step = 0
+        last_scores = None  # keep for fallback
 
         while True:
             scores = []
@@ -463,58 +472,85 @@ class ParamSearchCV:
                             n_splines=ns, lam=lam, expectile=e
                         )
                         cycle_scores.append(res["score"])
-                    mean_score = np.mean(cycle_scores)
-                    scores.append({"n_splines": ns, "lam": lam, "score": mean_score})
+                    mean_score = float(np.mean(cycle_scores))
+                    scores.append({"n_splines": int(ns), "lam": float(lam), "score": mean_score})
 
             scores.sort(key=lambda x: x["score"])
             best_local = scores[0]
+            last_scores = scores  # save for fallback
 
-            if best_local["score"] < best_score:
-                best_score = best_local["score"]
-                best_result = best_local
-                print(f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.2f})")
+            # --- First round: always accept as baseline
+            if best_result is None:
+                best_result = dict(best_local)
+                best_score = float(best_local["score"])
+                no_improve = 0
+                print(f"   🌟 Baseline: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.4f})")
             else:
-                print("   💤 No improvement — stopping adaptive search.")
-                break
+                # relative improvement check (finite-safe)
+                denom = max(1.0, abs(best_score))
+                improved = (best_score - best_local["score"]) > (rel_tol * denom)
+                if improved:
+                    best_result = dict(best_local)
+                    best_score = float(best_local["score"])
+                    no_improve = 0
+                    print(f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.4f})")
+                else:
+                    no_improve += 1
+                    print(f"   💤 No improvement (streak {no_improve}/{patience})")
 
-            # Adaptive λ adjustment
-            lam_best = best_local["lam"]
-            lam_min, lam_max = min(lam_grid), max(lam_grid)
-            if lam_best == lam_min:
-                lam_grid = np.geomspace(lam_min / 3, lam_max / 2, num=self.n_lam)
-                print(f"   ↙ Expanding left (lower λ): new grid {np.round(lam_grid, 4)}")
-            elif lam_best == lam_max:
-                lam_grid = np.geomspace(lam_min * 0.5, lam_max * 2, num=self.n_lam)
-                print(f"   ↗ Expanding right (higher λ): new grid {np.round(lam_grid, 4)}")
+            # --- Build next λ grid: always explore both sides
+            lam_best = float(best_local["lam"])
+            lam_min, lam_max = float(min(lam_grid)), float(max(lam_grid))
+
+            left = np.geomspace(max(lam_best * 1e-3, lam_min / 3), max(lam_best / 2, lam_min * 0.5), num=max(3, self.n_lam // 2))
+            center = np.geomspace(max(lam_best / 2, 1e-12), lam_best * 2, num=max(3, self.n_lam // 2))
+            right = np.geomspace(min(lam_best * 2, lam_max * 2), max(lam_max * 4, lam_best * 4), num=max(3, self.n_lam // 2))
+
+            lam_next = np.unique(np.clip(np.concatenate([left, center, right]), 1e-12, np.inf))
+            if lam_next.size > max(self.n_lam, 6):
+                qs = np.linspace(0, 1, num=max(self.n_lam, 6))
+                lam_grid = np.quantile(lam_next, qs)
             else:
-                lam_grid = np.geomspace(lam_best / 2, lam_best * 2, num=self.n_lam)
-                print(f"   🔍 Contracting around λ={lam_best:.4f}: new grid {np.round(lam_grid, 4)}")
+                lam_grid = lam_next
 
-            # Adaptive spline refinement
-            ns_best = best_local["n_splines"]
+            print(f"   🔁 Bi-directional λ refresh: {np.round(lam_grid, 6)}")
+
+            # --- Adaptive n_splines refinement (keep your existing logic)
+            ns_best = int(best_local["n_splines"])
             if ns_best == max(n_splines_grid):
-                n_splines_grid = [ns_best, ns_best + 5, ns_best + 10]
-                print(f"   ↗ Expanding n_splines: {n_splines_grid}")
+                n_splines_grid = sorted(set([max(5, ns_best - 5), ns_best, ns_best + 5, ns_best + 10]))
+                print(f"   ↗ Expanding n_splines up: {n_splines_grid}")
             elif ns_best == min(n_splines_grid):
-                n_splines_grid = [max(5, ns_best - 5), ns_best, ns_best + 5]
+                n_splines_grid = sorted(set([max(5, ns_best - 10), max(5, ns_best - 5), ns_best, ns_best + 5]))
                 print(f"   ↙ Expanding n_splines down: {n_splines_grid}")
             else:
-                n_splines_grid = [ns_best - 5, ns_best, ns_best + 5]
+                n_splines_grid = sorted(set([max(5, ns_best - 5), ns_best, ns_best + 5]))
                 print(f"   🔍 Contracting n_splines around {ns_best}: {n_splines_grid}")
 
             step += 1
-            if step >= 5:
+            if no_improve >= patience:
+                print("   🧯 Patience exhausted — stopping adaptive search.")
+                break
+            if step >= max_steps:
                 print("   🧭 Max adaptive iterations reached.")
                 break
 
-        # Save result
+        # --- Fallback if we ended with no accepted improvement beyond baseline
+        if best_result is None and last_scores:
+            best_result = dict(last_scores[0])
+            best_score = float(last_scores[0]["score"])
+
+        # --- Final safety: if still None, raise with guidance (avoid silent None subscript)
+        if best_result is None:
+            raise RuntimeError("ParamSearchCV.fit failed to find any configuration. Check data/weights.")
+
+        # --- Save and train final models
         self.best_ = _TuneResult(
-            n_splines=best_result["n_splines"],
-            lam=best_result["lam"],
-            score=best_result["score"],
+            n_splines=int(best_result["n_splines"]),
+            lam=float(best_result["lam"]),
+            score=float(best_score),
         )
 
-        # Train final models for chosen config
         final_models = {}
         for e in self.expectiles:
             res = self._fit_one_cycle(
@@ -528,8 +564,11 @@ class ParamSearchCV:
         self.best_.models = final_models
 
         duration = time.time() - start
-        print(f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.2f}) after {duration:.1f}s\n")
+        print(f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n")
         return self.best_
+
+
+
 
     def _fit_one_cycle(
         self,
@@ -635,7 +674,7 @@ class GAMModeler:
             f"    Prediction keys: {list(preds.keys())}"
         )
 
-        print("─────────────────────────────── ✅ Generating Prediction Frames ───────────────────────────────")
+        print("\n" + "─ " * 10 + "✅ Generating Prediction Frames" + "─ " * 10 + "\n")
         return {
             "params": params,
             "metrics": metrics,
@@ -783,9 +822,9 @@ class PricingPipeline:
         )
 
         # --- Fit + Predict ---
-        print(
-            "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────"
-        )
+        # print(
+        #     "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────\n"
+        # )
         param_search = ParamSearchCV(
             n_splines_grid=(15, 20, 25),
             loglam_range=(np.log(0.005), np.log(1.0)),
@@ -803,10 +842,7 @@ class PricingPipeline:
             X_pred=X  # <— pass the full frame here
         )
 
-
-        print(
-            "\n─────────────────────────────── ✅ Generating Prediction Frames ───────────────────────────────"
-        )
+        print("\n" + "─ " * 10 + "✅ Generating Prediction Frames" + "─ " * 10 + "\n")
 
         # --- Results Assembly ---
         all_gam_results = (

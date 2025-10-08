@@ -120,14 +120,22 @@ def abstract_section():
                                 },
                             ),
                             html.Span(
-                                "Simply place your data in the designated folder, and the application will take care of the rest: from data engineering, to modeling, and finally generating the final presentation layer. ",
+                                "Simply place your data in the designated folder, and the application will take care of the rest: ",
                                 style={
                                     "color": "#5f6b7a",
                                     "marginLeft": "100px",
                                     "marginRight": "200px",
                                 },
                             ),
-                            html.Span(
+                            html.P(
+                                "\tfrom data engineering, to modeling, and finally generating the final presentation layer.\n",
+                                style={
+                                    "color": "#5f6b7a",
+                                    "marginLeft": "100px",
+                                    "marginRight": "200px",
+                                },
+                            ),
+                            html.P(
                                 html.I(
                                     "As the user, your role is streamlined: review the interactive graphs and outputs, and focus your attention where it matters most: on making strategic decisions. "
                                 ),

@@ -35,16 +35,27 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+# dtpes
 EXPECTED_COLS = [
     "price",
     "deal_discount_percent",
     "event_encoded",
     "product_encoded",
-    "asp",
-    "__intercept__",
+    "year",
+    "month",
+    "week",
 ]
+
 CAT_COLS = ["event_encoded", "product_encoded"]
 NUM_COLS = ["price", "deal_discount_percent"]
+
+# features
+FEAT_COLS = [
+    "price", "deal_discount_percent", "event_encoded", "product_encoded",
+    "year", "month", "week",
+]
+TARGET_COL = "shipped_units"
+WEIGHT_COL = "w"
 
 
 def _v_best(obj, msg: str):
@@ -243,96 +254,115 @@ class DataEngineer:
         return self._label_encoder(df_filtered)
 
 
+
+
 class Weighting:
     """
-    Computes combined time-decay * rarity weights with light adaptive tuning.
-    Avoids over-aggressive weighting by bounding and normalization.
+    Lightweight, safe weighting:
+      - optional time decay (order_date)
+      - rarity as inverse local frequency over `rarity_col` (e.g., price/SKU),
+        gently blended & tightly bounded so it cannot dominate
+      - single normalization path (median -> 1) keeps scale stable
+      - quantile clip + final sanitization (finite, >0) avoids NaN/Inf issues
     """
-    def __init__(self, decay_rate=-0.05, rarity_power=1.0, normalize=True):
-        self.decay_rate = decay_rate
-        self.rarity_power = rarity_power
-        self.normalize = normalize
 
-    def _make_weights(self, df, col="order_date"):
-        """Base exponential time-decay weights."""
-        if col not in df.columns:
-            return np.ones(len(df))
-        dates = pd.to_datetime(df[col], errors="coerce")
-        max_date = dates.max()
-        delta_days = (max_date - dates).dt.days.fillna(0)
-        w = np.exp(self.decay_rate * delta_days)
+    def __init__(
+        self,
+        *,
+        time_col: str = "order_date",
+        rarity_col: str = "price",
+        half_life_days: int | None = 90,          # None to disable time decay
+        rarity_gamma: float = 0.30,               # 0=off, 1=full strength
+        rarity_bounds: tuple[float, float] = (0.90, 1.12),
+        normalize: bool = True,
+        clip_quantiles: tuple[float, float] = (0.05, 0.95),
+        nan_fill: float = 1.0,
+        posinf_fill: float = 3.0,
+        neginf_fill: float = 0.0,
+    ):
+        self.time_col = time_col
+        self.rarity_col = rarity_col
+        self.half_life_days = half_life_days
+        self.rarity_gamma = float(rarity_gamma)
+        self.rarity_bounds = rarity_bounds
+        self.normalize = bool(normalize)
+        self.clip_quantiles = clip_quantiles
+        self.nan_fill = float(nan_fill)
+        self.posinf_fill = float(posinf_fill)
+        self.neginf_fill = float(neginf_fill)
+
+    def build(self, df: pd.DataFrame) -> np.ndarray:
+        """Return 1-D numpy array of final sample weights aligned to df.index (finite, >0)."""
+        w_time = self._time_weights(df, col=self.time_col)
+        w_rar  = self._rarity_multiplier(df, col=self.rarity_col)
+
+        # combine
+        w = w_time * w_rar
+
+        # single normalization (median -> 1)
         if self.normalize:
-            w = w / np.nanmean(w[w > 0])
-        return np.asarray(w, dtype=float)
+            med = np.nanmedian(w)
+            if np.isfinite(med) and med > 0:
+                w = w / med
 
-    def _combine(self, df, time_col="order_date", rarity_col="price"):
-        """Combine time-decay and rarity weighting with bounded scaling."""
-        w_time = self._make_weights(df, col=time_col)
-        counts = df.groupby(rarity_col)[rarity_col].transform("count")
-        rarity = np.power(1.0 / (1.0 + counts), self.rarity_power)
-        w = w_time * rarity.values
+        # light clipping
+        lo_q, hi_q = self.clip_quantiles
+        finite_mask = np.isfinite(w)
+        if finite_mask.any():
+            qlo, qhi = np.nanquantile(w[finite_mask], [lo_q, hi_q])
+            if np.isfinite(qlo) and np.isfinite(qhi) and qhi > qlo:
+                w = np.clip(w, qlo, qhi)
 
-        # --- curvature factor to re-emphasize mid-range transitions ---
-        if "price" in df.columns and df["price"].nunique() > 3:
-            price = df["price"].to_numpy()
-            d_price = np.abs(np.gradient(price))
-            curv_factor = 1 + 0.3 * (d_price / np.nanmax(d_price))
-            w = w * curv_factor
-        # -------------------------------------------------------------------
+        # final sanitization
+        w = np.nan_to_num(w, nan=self.nan_fill, posinf=self.posinf_fill, neginf=self.neginf_fill)
+        w[w <= 0] = 1e-6
+        return w.astype(float, copy=False)
 
-        # Light tail clipping to avoid over-leverage
-        lo, hi = np.nanquantile(w, [0.05, 0.95])
-        w = np.clip(w, lo, hi)
+    def _time_weights(self, df: pd.DataFrame, *, col: str) -> np.ndarray:
+        if self.half_life_days is None or col not in df.columns:
+            return np.ones(len(df), dtype=float)
 
-        if self.normalize:
-            w = w / np.nanmean(w[w > 0])
-
-        return np.asarray(w, dtype=float)
-
-
-    def tune(self, df, X_train, y_train, X_val, y_val,
-             decay_grid=None, rarity_grid=None,
-             expectiles=(0.5,), base_ns=20, base_lam=0.1):
-        """
-        Lightweight tuning of decay_rate × rarity_power based on validation RMSE.
-        Updates self.decay_rate and self.rarity_power in place.
-        """
-        print("🧮  Grid-tuning decay × rarity weights ...")
-        from pygam import ExpectileGAM
-
-        decay_grid = decay_grid or [-0.30, -0.15, -0.08, -0.05, -0.03]
-        rarity_grid = rarity_grid or [0.5, 1.0, 1.5]
-
-        best_cfg, best_rmse = None, float("inf")
-        for d in decay_grid:
-            for rp in rarity_grid:
-                self.decay_rate = d
-                self.rarity_power = rp
-
-                w_train = self._combine(df.loc[X_train.index])
-                w_val = self._combine(df.loc[X_val.index])
-
-                preds = []
-                for e in expectiles:
-                    gam = ExpectileGAM(expectile=e, n_splines=base_ns, lam=base_lam)
-                    gam.fit(X_train, y_train, weights=w_train)
-                    preds.append(gam.predict(X_val))
-
-                preds = np.vstack(preds).T
-                rmse_val = np.sqrt(np.mean((y_val - preds[:, 0]) ** 2))
-                print(f"   decay={d:+.3f} | rarity_pow={rp:.1f} → RMSE={rmse_val:6.3f}")
-
-                if rmse_val < best_rmse:
-                    best_rmse = rmse_val
-                    best_cfg = (d, rp)
-
-        if best_cfg:
-            self.decay_rate, self.rarity_power = best_cfg
-            print(f"🌟 Best weighting params: decay={self.decay_rate:+.3f}, rarity_pow={self.rarity_power:.2f} (RMSE={best_rmse:.3f})")
+        s = pd.to_datetime(df[col], errors="coerce")
+        if s.notna().any():
+            ref = s.max()
+            dt_days = (ref - s).dt.days.to_numpy()
+            # fill NaT deltas with median
+            if np.isnan(dt_days).any():
+                med_days = np.nanmedian(dt_days)
+                if not np.isfinite(med_days):
+                    med_days = 0.0
+                dt_days = np.where(np.isfinite(dt_days), dt_days, med_days)
+            hl = max(1.0, float(self.half_life_days))
+            w = 0.5 ** (np.clip(dt_days, 0.0, None) / hl)
+            return w.astype(float, copy=False)
         else:
-            print("⚠️  No improvement found; keeping defaults.")
+            return np.ones(len(df), dtype=float)
 
-        return self
+    def _rarity_multiplier(self, df: pd.DataFrame, *, col: str) -> np.ndarray:
+        n = len(df)
+        if col not in df.columns or n == 0:
+            return np.ones(n, dtype=float)
+
+        counts = df.groupby(col)[col].transform("count").to_numpy()
+        if np.any(counts > 0):
+            dens_ref = float(np.nanmedian(counts[counts > 0]))
+            if not (np.isfinite(dens_ref) and dens_ref > 0):
+                dens_ref = 1.0
+        else:
+            dens_ref = 1.0
+
+        counts = np.where(np.isfinite(counts) & (counts > 0), counts, dens_ref)
+        rarity_raw = dens_ref / counts  # higher when sparser
+
+        g = float(self.rarity_gamma)
+        rarity = 1.0 + g * (rarity_raw - 1.0) if g != 1.0 else rarity_raw
+
+        lo, hi = self.rarity_bounds
+        rarity = np.clip(rarity, float(lo), float(hi))
+        rarity = np.nan_to_num(rarity, nan=1.0, posinf=hi, neginf=lo)
+        rarity[rarity <= 0] = 1e-6
+        return rarity.astype(float, copy=False)
+    
 
 class _TuneResult:
     """Container for best hyperparameter results and trained models."""
@@ -344,6 +374,7 @@ class _TuneResult:
         self.decay_rate = decay_rate
         self.final_score = final_score
         self.models = models or {}
+
 
 class ParamSearchCV:
     """
@@ -563,7 +594,7 @@ class ParamSearchCV:
 
         while True:
             scores = []
-            print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
+            print(f"🔍 Round {step+1}: \n\tλ grid = \n\t{[round(x,4) for x in lam_grid]}")
             for ns in n_splines_grid:
                 for lam in lam_grid:
                     cycle_scores = []
@@ -870,9 +901,7 @@ class PricingPipeline:
         return
             dfs
         """
-        print(
-            "\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────"
-        )
+        print("\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────")
         topsellers = self.engineer.prepare()
 
         # Keep BOTH BAU + promo
@@ -884,98 +913,89 @@ class PricingPipeline:
             topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
         if "__intercept__" not in topsellers.columns:
             topsellers["__intercept__"] = 1.0
+
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
         # -------------------------------------------- Weights --------------------------------------------
-        # --- Quick split for weight tuning ---
-        X_tmp, X_val, y_tmp, y_val = train_test_split(
-            topsellers[["price", "deal_discount_percent", "asp"]],
-            topsellers["shipped_units"],
-            test_size=0.25,
-            random_state=42,
-        )
-
         W = Weighting()
-        W.tune(
-            df=topsellers,
-            X_train=X_tmp, y_train=y_tmp,
-            X_val=X_val, y_val=y_val,
-            # broader but still small:
-            decay_grid=[-0.40, -0.30, -0.20, -0.12, -0.08],
-            rarity_grid=[0.6, 0.9, 1.2, 1.6, 1.9],   # keeps “rarity push” modest to strong
-            expectiles=(0.5,),
-            base_ns=18,
-            base_lam=0.08,
-        )
-        w_stable = W._combine(topsellers)
-        print(f"⚖️  Weights tuned: decay={W.decay_rate:+.3f}, rarity_pow={W.rarity_power:.2f}")
+        w_stable = W.build(topsellers)
+        topsellers[WEIGHT_COL] = w_stable
+        print(f"⚖️  Weights computed | median={np.nanmedian(w_stable):.3f} | p95={np.nanpercentile(w_stable,95):.3f}")
 
+        # --- Assemble features/target with strict alignment ---
+        need_cols = FEAT_COLS + [TARGET_COL, WEIGHT_COL]
+        ts = topsellers[need_cols].copy()
 
-        # Elasticity diagnostic
+        # Ensure numerics (encoded cols should already be numeric; this is safety)
+        for c in FEAT_COLS + [TARGET_COL, WEIGHT_COL]:
+            ts[c] = pd.to_numeric(ts[c], errors="coerce")
+
+        # Drop rows that can’t be used
+        ts = ts.dropna(subset=need_cols).reset_index(drop=True)
+
+        # Build matrices
+        X = ts[FEAT_COLS].to_numpy(dtype=float)
+        y = ts[TARGET_COL].to_numpy(dtype=float)
+        w = ts[WEIGHT_COL].to_numpy(dtype=float)
+
+        # Safety for downstream learners (no NaN/Inf/≤0 in weights)
+        w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
+        w[w <= 0] = 1e-6
+
+        # Lightweight weight summary (debug)
+        w_med = float(np.nanmedian(w))
+        w_p95 = float(np.nanpercentile(w, 95))
+        print(f"⚖️  Weights ready | median={w_med:.3f} | p95={w_p95:.3f} | n={len(w):,}")
+
+        # --------------- Elasticity diagnostic (best-effort) ---------------
         try:
             elasticity_df = ElasticityAnalyzer.compute(topsellers)
         except Exception:
-            elasticity_df = pd.DataFrame(
-                columns=["product", "ratio", "elasticity_score"]
-            )
+            elasticity_df = pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
 
-        # --- Feature Matrix ---
-        X = topsellers[EXPECTED_COLS].copy()
-        y = np.asarray(topsellers["shipped_units"], dtype=int)
+        # --------------- Fit + Predict ---------------
+        print("\n─────────────────────────────── 🤖 Modeling & Prediction ───────────────────────────────")
 
-        # Scale numeric features
-        num_cols = ["price", "deal_discount_percent", "asp"]
-        if all(col in X.columns for col in num_cols):
-            X[num_cols] = StandardScaler().fit_transform(X[num_cols])
-
-        # Split into training and validation
-        print(
-            "\n─────────────────────────────── ✂️  Splitting Train / Validation ───────────────────────────────"
-        )
-        X_train, X_val, y_train, y_val, w_train, w_val = train_test_split(
-            X, y, w_stable, test_size=0.2, random_state=42
-        )
-        print(
-            f"📊 Training set: {len(X_train):,} rows | Validation set: {len(X_val):,} rows"
-        )
-
-        # --- Fit + Predict ---
-        # print(
-        #     "\n─────────────────────────────── ⚙️  Tuning Expectile GAMs (Grid Search) ───────────────────────────────\n"
-        # )
         param_search = ParamSearchCV(
             n_splines_grid=(16, 20, 24, 30),
-            loglam_range=(np.log(0.002), np.log(2.0)),  # expand in both directions
+            loglam_range=(np.log(0.002), np.log(2.0)),
             n_lam=7,
             expectiles=(0.025, 0.5, 0.975),
             alpha=0.10,
             random_state=42,
-            verbose=False
+            verbose=False,
         )
-
         modeler = GAMModeler(param_search)
-        res = modeler.fit_predict_expectiles(
-            X_train, y_train, X_val, y_val,
-            w_train=w_train, w_val=w_val,
-            X_pred=X  # <— pass the full frame here
+
+        # Split X, y, and w TOGETHER to keep perfect alignment
+        X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
+            X, y, w, test_size=0.20, random_state=42
         )
 
+        # Weight safety
+        w_tr = np.clip(np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
+        w_val = np.clip(np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
+
+        # ---- Call modeler with the required arguments ----
+        res = modeler.fit_predict_expectiles(
+            X_train=X_tr,
+            y_train=y_tr,
+            X_val=X_val,
+            y_val=y_val,
+            w_train=w_tr,
+            w_val=w_val,
+            X_pred=X,          # keep full-frame predictions for downstream assembly
+        )
         print("\n" + "─ " * 10 + "✅ Generating Prediction Frames" + "─ " * 10 + "\n")
 
-        # --- Results Assembly ---
-        all_gam_results = (
-            topsellers[["product", "price", "asin", "asp"]]
-            .copy()
-            .reset_index(drop=True)
-        )
+        # --------------- Results Assembly ---------------
+        all_gam_results = topsellers[["product", "price", "asin", "asp"]].copy().reset_index(drop=True)
 
         # Get predictions flexibly
         res_preds = res.get("predictions", res.get("pred", {}))
-
         if not res_preds:
-            raise ValueError(
-                f"[GAMModeler] No predictions found. Available keys: {list(res.keys())}"
-            )
+            raise ValueError(f"[GAMModeler] No predictions found. Available keys: {list(res.keys())}")
+
         print(f"✨ Predictions added: {list(res_preds.keys())}")
 
         # Add unit + revenue predictions
@@ -983,28 +1003,19 @@ class PricingPipeline:
             if k.startswith("units_pred_"):
                 all_gam_results[k] = np.asarray(arr, dtype=float)
                 rev_key = k.replace("units_", "revenue_")
-                all_gam_results[rev_key] = (
-                    all_gam_results["price"].to_numpy() * all_gam_results[k]
-                )
+                all_gam_results[rev_key] = all_gam_results["price"].to_numpy() * all_gam_results[k]
 
         # Sanity check
-        pred_cols = [
-            c
-            for c in all_gam_results.columns
-            if c.startswith(("units_pred_", "revenue_pred_"))
-        ]
+        pred_cols = [c for c in all_gam_results.columns if c.startswith(("units_pred_", "revenue_pred_"))]
         if not pred_cols:
             raise ValueError(
                 f"[_build_core_frames] Prediction assembly failed. Found keys={list(res_preds.keys())}, "
                 f"DataFrame cols={list(all_gam_results.columns)}"
             )
 
-        # deal discount
+        # deal discount passthrough + actual revenue
         all_gam_results["deal_discount_percent"] = (
-            topsellers["deal_discount_percent"]
-            .fillna(0)
-            .clip(lower=0)
-            .reset_index(drop=True)
+            topsellers["deal_discount_percent"].fillna(0).clip(lower=0).reset_index(drop=True)
         )
         all_gam_results["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(
             topsellers["shipped_units"], dtype=float
@@ -1016,10 +1027,7 @@ class PricingPipeline:
             * np.asarray(topsellers["shipped_units"], dtype=float)
         )
 
-        print(
-            "\n─────────────────────────────── 🎯 Pipeline Complete ───────────────────────────────\n"
-        )
-
+        print("\n─────────────────────────────── 🎯 Pipeline Complete ───────────────────────────────\n")
         return topsellers, elasticity_df, all_gam_results
 
     def _compute_best_tables(self, all_gam_results, topsellers):
@@ -1591,10 +1599,10 @@ class viz:
         return fig
 
 
-# if __name__ == "__main__":
-#     pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
+if __name__ == "__main__":
+    pricing_df, product_df = pd.read_csv('data/pricing.csv'), pd.read_csv('data/products.csv')
 
-#     PricingPipeline(pricing_df,product_df,top_n=10, use_grid_search=True).assemble_dashboard_frames()
+    PricingPipeline(pricing_df,product_df,top_n=10,).assemble_dashboard_frames()
 
 
 # all_gam_results = GAMModeler(

@@ -58,19 +58,6 @@ TARGET_COL = "shipped_units"
 WEIGHT_COL = "w"
 
 
-def _v_best(obj, msg: str):
-    """
-    Logging func -
-    Print only when obj._verbose is True. Use for 'best only' logs.
-    """
-    if getattr(obj, "_verbose", False):
-
-        print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] {obj.__class__.__name__} {msg}",
-            flush=True,
-        )
-
-
 class ElasticityAnalyzer:
     @staticmethod
     def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
@@ -1002,6 +989,8 @@ class PricingPipeline:
         for k, arr in res_preds.items():
             if k.startswith("units_pred_"):
                 all_gam_results[k] = np.asarray(arr, dtype=float)
+                all_gam_results[k] = np.maximum(arr, 0.0)             # <-- hard floor at 0
+
                 rev_key = k.replace("units_", "revenue_")
                 all_gam_results[rev_key] = all_gam_results["price"].to_numpy() * all_gam_results[k]
 

@@ -568,160 +568,160 @@ class ParamSearchCV:
 
         return float(score)
 
+    # =============================
+    #   λ & spline setup helpers
+    # =============================
+    def _init_lambda_grid(self, X_train):
+        n_obs = len(X_train)
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
+        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
+
+        lam_base = 0.05 * (40 / max(eff_bins, 8)) * (800 / max(n_obs, 200))
+        lam_low, lam_high = lam_base / 4, lam_base * 20
+        lam_grid = np.exp(
+            np.linspace(np.log(lam_low), np.log(lam_high), num=self.n_lam)
+        )
+        lam_grid = np.clip(lam_grid, 1e-4, np.inf)
+        lam_floor = max(lam_low, 1e-4)
+        return lam_grid, lam_floor
+
+    def _init_spline_grid(self, X_train):
+        n_obs = len(X_train)
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
+        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
+        n_splines_cap = max(5, min(int(eff_bins // 2 + 4), int(0.10 * n_obs)))
+        grid = [ns for ns in self.n_splines_grid if ns <= n_splines_cap] or [
+            min(self.n_splines_grid)
+        ]
+        return grid
+
+    # =============================
+    #   candidate evaluation
+    # =============================
+    def _evaluate_candidate(
+        self, X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+    ):
+        cycle_scores = []
+        for e in self.expectiles:
+            res = self._fit_one_cycle(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                w_train=w_train,
+                w_val=w_val,
+                n_splines=ns,
+                lam=lam,
+                expectile=e,
+            )
+            cycle_scores.append(res["score"])
+        mean_score = float(np.mean(cycle_scores))
+        n_obs = len(y_train)
+        complexity_penalty = 0.1 * (ns / max(n_obs, 50)) / max(lam, 1e-6)
+        return mean_score + complexity_penalty, mean_score, complexity_penalty
+
+    # =============================
+    #   adaptive refresh logic
+    # =============================
+    def _refresh_lambda_grid(self, lam_best, lam_grid, lam_floor):
+        lam_min, lam_max = float(min(lam_grid)), float(max(lam_grid))
+        left = np.geomspace(
+            max(lam_best * 1e-3, lam_min / 3),
+            max(lam_best / 2, lam_min * 0.5),
+            num=max(3, self.n_lam // 2),
+        )
+        center = np.geomspace(
+            max(lam_best / 2, 1e-12), lam_best * 2, num=max(3, self.n_lam // 2)
+        )
+        right = np.geomspace(
+            min(lam_best * 2, lam_max * 2),
+            max(lam_max * 4, lam_best * 4),
+            num=max(3, self.n_lam // 2),
+        )
+        lam_next = np.unique(
+            np.clip(np.concatenate([left, center, right]), 1e-12, np.inf)
+        )
+        if lam_next.size > max(self.n_lam, 6):
+            qs = np.linspace(0, 1, num=max(self.n_lam, 6))
+            lam_grid = np.quantile(lam_next, qs)
+            lam_grid = np.clip(lam_grid, lam_floor, np.inf)
+        else:
+            lam_grid = lam_next
+        print(f"   🔁 Bi-directional λ refresh: {np.round(lam_grid, 6)}")
+        return lam_grid
+
+    def _update_spline_grid(self, ns_best, n_splines_grid):
+        if ns_best == max(n_splines_grid):
+            new_grid = sorted(
+                set([max(5, ns_best - 5), ns_best, ns_best + 5, ns_best + 10])
+            )
+            msg = f"↗ Expanding n_splines up: {new_grid}"
+        elif ns_best == min(n_splines_grid):
+            new_grid = sorted(
+                set([max(5, ns_best - 10), max(5, ns_best - 5), ns_best, ns_best + 5])
+            )
+            msg = f"↙ Expanding n_splines down: {new_grid}"
+        else:
+            new_grid = sorted(set([max(5, ns_best - 5), ns_best, ns_best + 5]))
+            msg = f"🔍 Contracting n_splines around {ns_best}: {new_grid}"
+        print(f"   {msg}")
+        return new_grid
+
+    # =============================
+    #   main orchestration
+    # =============================
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
-        """
-        Adaptive grid search for (n_splines, λ) with directional expansion and patience.
-        Explores both sides around best λ; stops only after several non-improving rounds.
-        Robust to unstable candidates (SVD) by skipping np.inf scores.
-        """
         print(
             "\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────"
         )
         start = time.time()
 
-        # derive defaults from data if using the class defaults
-        if self.n_splines_grid in ((15, 20, 25),) and self.n_lam == 6:
-            n_rows = len(X_train) + len(X_val)
-            # infer unique price support if column exists; fallback if X is ndarray
-            try:
-                n_unique_prices = int(pd.concat([X_train, X_val])["price"].nunique())
-            except Exception:
-                n_unique_prices = 8
-            ns_grid, loglam_range, n_lam = self._default_grids(n_rows, n_unique_prices)
-            self.n_splines_grid = ns_grid
-            self.loglam_range = loglam_range
-            self.n_lam = n_lam
-            print(
-                f"   🧮 Grids → n_splines={self.n_splines_grid}, λ∈[e^{self.loglam_range[0]:.3f}, e^{self.loglam_range[1]:.3f}], n_lam={self.n_lam}"
-            )
-
         patience = getattr(self, "patience", 2)
         max_steps = getattr(self, "max_steps", 8)
         rel_tol = getattr(self, "rel_tol", 1e-3)
 
+        n_splines_grid = self._init_spline_grid(X_train)
+        lam_grid, lam_floor = self._init_lambda_grid(X_train)
+
         best_score, best_result = float("inf"), None
-        no_improve = 0
-        n_splines_grid = list(self.n_splines_grid)
-
-        # ----- adaptive λ grid and n_splines bounds based on data density -----
-        # derive per-product data support
-        n_obs = len(X_train)
-
-        # estimate "effective support" = how many bins have enough samples
-        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
-        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
-
-        # spline cap ~ one spline per 2–3 supported bins, at most 10% of obs
-        n_splines_cap = max(5, min(int(eff_bins // 2 + 4), int(0.10 * n_obs)))
-        # shrink grid so we never test absurdly large n_splines
-        n_splines_grid = [ns for ns in n_splines_grid if ns <= n_splines_cap] or [
-            min(self.n_splines_grid)
-        ]
-
-        # λ base increases automatically when data is sparse (fewer bins/obs)
-        lam_base = 0.05 * (40 / max(eff_bins, 8)) * (800 / max(n_obs, 200))
-        lam_low = lam_base / 4
-        lam_high = lam_base * 20
-        lam_grid = np.exp(
-            np.linspace(np.log(lam_low), np.log(lam_high), num=self.n_lam)
-        )
-        lam_grid = np.clip(lam_grid, 1e-4, np.inf)
-        # -------------------------------------------------
-
-        # floor to prevent the later “left/center/right” sweep from dipping too low again
-        lam_floor = max(lam_low, 1e-3)
-
-        step = 0
-        last_scores = None  # keep for fallback
-        retried_empty_round = False
+        no_improve, step = 0, 0
 
         while True:
             scores = []
             print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
             for ns in n_splines_grid:
                 for lam in lam_grid:
-                    cycle_scores = []
-                    for e in self.expectiles:
-                        res = self._fit_one_cycle(
-                            X_train,
-                            y_train,
-                            X_val,
-                            y_val,
-                            w_train=w_train,
-                            w_val=w_val,
-                            n_splines=ns,
-                            lam=lam,
-                            expectile=e,
-                        )
-                        cycle_scores.append(res["score"])
-                    mean_score = float(np.mean(cycle_scores))
-
-                    # --- Compute model complexity penalty -----------------------------
-                    # n_obs: number of training samples (available via len(y_train))
-                    # Larger n_splines / smaller λ → higher penalty for complex fits
-                    n_obs = len(y_train)
-                    complexity_penalty = 0.1 * (ns / max(n_obs, 50)) / max(lam, 1e-6)
-                    score_with_penalty = mean_score + complexity_penalty
-                    # ------------------------------------------------------------------
-
+                    score_with_penalty, mean_score, penalty = self._evaluate_candidate(
+                        X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+                    )
                     scores.append(
                         {
-                            "n_splines": int(ns),
-                            "lam": float(lam),
+                            "n_splines": ns,
+                            "lam": lam,
                             "score": score_with_penalty,
                             "base_score": mean_score,
-                            "penalty": complexity_penalty,
+                            "penalty": penalty,
                         }
-                    )
-
-                    # skip unstable candidates (np.inf / NaN)
-                    if not np.isfinite(mean_score):
-                        continue
-                    scores.append(
-                        {"n_splines": int(ns), "lam": float(lam), "score": mean_score}
-                    )
-
-            # if an entire round produced no finite candidates, try a one-time wider λ sweep
-            if not scores:
-                if not retried_empty_round:
-                    retried_empty_round = True
-                    print(
-                        "   ⚠ No finite candidates this round. Widening λ once and retrying..."
-                    )
-                    lam_min, lam_max = float(min(lam_grid)), float(max(lam_grid))
-                    lam_grid = np.geomspace(
-                        max(lam_min * 0.1, 1e-6),
-                        max(lam_max * 10, lam_min * 10),
-                        num=max(self.n_lam, 6),
-                    )
-                    lam_grid = np.clip(lam_grid, lam_floor, np.inf)
-
-                    continue
-                else:
-                    raise RuntimeError(
-                        "ParamSearchCV.fit found no stable (n_splines, λ) candidates. Check features/weights."
                     )
 
             scores.sort(key=lambda x: x["score"])
             best_local = scores[0]
-            last_scores = scores  # save for fallback
 
-            # --- First round: always accept as baseline
             if best_result is None:
                 best_result = dict(best_local)
-                best_score = float(best_local["score"])
-                no_improve = 0
+                best_score = best_local["score"]
                 print(
                     f"   🌟 Baseline: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.4f})"
                 )
             else:
-                # relative improvement check (finite-safe)
-                denom = max(1.0, abs(best_score))
-                improved = (best_score - best_local["score"]) > (rel_tol * denom)
+                improved = (best_score - best_local["score"]) > rel_tol * max(
+                    1.0, abs(best_score)
+                )
                 if improved:
                     best_result = dict(best_local)
-                    best_score = float(best_local["score"])
+                    best_score = best_local["score"]
                     no_improve = 0
                     print(
                         f"   🌟 New best: n_splines={best_local['n_splines']}, λ={best_local['lam']:.4f} (score={best_score:.4f})"
@@ -730,85 +730,27 @@ class ParamSearchCV:
                     no_improve += 1
                     print(f"   💤 No improvement (streak {no_improve}/{patience})")
 
-            # --- Build next λ grid: always explore both sides
-            lam_best = float(best_local["lam"])
-            lam_min, lam_max = float(min(lam_grid)), float(max(lam_grid))
-            left = np.geomspace(
-                max(lam_best * 1e-3, lam_min / 3),
-                max(lam_best / 2, lam_min * 0.5),
-                num=max(3, self.n_lam // 2),
+            lam_grid = self._refresh_lambda_grid(best_local["lam"], lam_grid, lam_floor)
+            n_splines_grid = self._update_spline_grid(
+                best_local["n_splines"], n_splines_grid
             )
-            center = np.geomspace(
-                max(lam_best / 2, 1e-12), lam_best * 2, num=max(3, self.n_lam // 2)
-            )
-            right = np.geomspace(
-                min(lam_best * 2, lam_max * 2),
-                max(lam_max * 4, lam_best * 4),
-                num=max(3, self.n_lam // 2),
-            )
-            lam_next = np.unique(
-                np.clip(np.concatenate([left, center, right]), 1e-12, np.inf)
-            )
-            if lam_next.size > max(self.n_lam, 6):
-                qs = np.linspace(0, 1, num=max(self.n_lam, 6))
-                lam_grid = np.quantile(lam_next, qs)
-                lam_grid = np.clip(lam_grid, lam_floor, np.inf)
-
-            else:
-                lam_grid = lam_next
-            print(f"   🔁 Bi-directional λ refresh: {np.round(lam_grid, 6)}")
-
-            # --- Adaptive n_splines refinement (keep your existing logic)
-            ns_best = int(best_local["n_splines"])
-            if ns_best == max(n_splines_grid):
-                n_splines_grid = sorted(
-                    set([max(5, ns_best - 5), ns_best, ns_best + 5, ns_best + 10])
-                )
-                print(f"   ↗ Expanding n_splines up: {n_splines_grid}")
-            elif ns_best == min(n_splines_grid):
-                n_splines_grid = sorted(
-                    set(
-                        [
-                            max(5, ns_best - 10),
-                            max(5, ns_best - 5),
-                            ns_best,
-                            ns_best + 5,
-                        ]
-                    )
-                )
-                print(f"   ↙ Expanding n_splines down: {n_splines_grid}")
-            else:
-                n_splines_grid = sorted(
-                    set([max(5, ns_best - 5), ns_best, ns_best + 5])
-                )
-                print(f"   🔍 Contracting n_splines around {ns_best}: {n_splines_grid}")
 
             step += 1
-            if no_improve >= patience:
+            if no_improve >= patience or step >= max_steps:
                 print("   🧯 Patience exhausted — stopping adaptive search.")
                 break
-            if step >= max_steps:
-                print("   🧭 Max adaptive iterations reached.")
-                break
 
-        # --- Fallback if we ended with no accepted improvement beyond baseline
-        if best_result is None and last_scores:
-            best_result = dict(last_scores[0])
-            best_score = float(last_scores[0]["score"])
-
-        # --- Final safety: if still None, raise with guidance (avoid silent None subscript)
-        if best_result is None or not np.isfinite(best_result["score"]):
-            raise RuntimeError(
-                "ParamSearchCV.fit failed to find any stable configuration. Check features/weights."
-            )
-
-        # --- Save and train final models
         self.best_ = _TuneResult(
             n_splines=int(best_result["n_splines"]),
             lam=float(best_result["lam"]),
-            score=float(best_score),
+            score=float(best_result["score"]),
+        )
+        duration = time.time() - start
+        print(
+            f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n"
         )
 
+        # --- Refit final models for all expectiles ------------------------
         final_models = {}
         for e in self.expectiles:
             res = self._fit_one_cycle(
@@ -827,12 +769,10 @@ class ParamSearchCV:
                     f"Final refit failed for expectile {e} with the chosen (n_splines, λ)."
                 )
             final_models[e] = res["model"]
-        self.best_.models = final_models
 
-        duration = time.time() - start
-        print(
-            f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n"
-        )
+        self.best_.models = final_models
+        # ------------------------------------------------------------------
+
         return self.best_
 
     def _fit_one_cycle(
@@ -995,11 +935,25 @@ class GAMModeler:
         )
 
         print("\n" + "─" * 30 + " ✅ Generating Prediction Frames " + "─" * 30 + "\n")
-        return {
+
+        # ──────────────────────────── Return (flattened for pipeline compatibility) ────────────────────────────
+        result = {
             "params": params,
             "metrics": metrics,
             "predictions": preds,
         }
+
+        # ⚙️ Flatten the "predictions" dict into top-level keys
+        # so downstream code like _build_core_frames() still sees:
+        # ['units_pred_0.025', 'units_pred_0.5', 'units_pred_0.975', ...]
+        if "predictions" in result:
+            flat = dict(result)  # shallow copy to avoid side effects
+            preds_dict = result["predictions"]
+            for k, v in preds_dict.items():
+                flat[k] = v
+            result = flat
+
+        return result
 
 
 class Optimizer:
@@ -1167,7 +1121,7 @@ class PricingPipeline:
             X[:, idx] = (Z - mu) / sd
 
         # --------------- Fit + Predict ---------------
-        print("\n\n" + 35 * "- " + " 🤖 Modeling & Prediction " + "- " * 35)
+        print("\n\n" + 32 * "- " + " 🤖 Modeling & Prediction " + "- " * 32)
 
         param_search = ParamSearchCV(
             n_splines_grid=(16, 20, 24, 30),

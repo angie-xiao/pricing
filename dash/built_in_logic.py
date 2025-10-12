@@ -32,6 +32,7 @@ from helpers import DataEng
 # ignore warnings
 import warnings
 
+
 warnings.filterwarnings("ignore")
 
 
@@ -602,15 +603,34 @@ class ParamSearchCV:
         no_improve = 0
         n_splines_grid = list(self.n_splines_grid)
 
-        # λ × support scaling — enforce MORE smoothing when data are sparse
-        n_support = max(1, len(X_train))
-        lam_low, lam_high = np.exp(self.loglam_range)
+        # ----- adaptive λ grid and n_splines bounds based on data density -----
+        # derive per-product data support
+        n_obs = len(X_train)
 
-        # small support -> lam_scale > 1 (stronger smoothing)
-        lam_scale = np.clip(500.0 / n_support, 0.8, 2.0)
-        lam_grid = np.geomspace(
-            lam_low * lam_scale, lam_high * lam_scale, num=self.n_lam
+        # estimate "effective support" = how many bins have enough samples
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
+        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
+
+        # spline cap ~ one spline per 2–3 supported bins, at most 10% of obs
+        n_splines_cap = max(5, min(int(eff_bins // 2 + 4), int(0.10 * n_obs)))
+        # shrink grid so we never test absurdly large n_splines
+        n_splines_grid = [ns for ns in n_splines_grid if ns <= n_splines_cap] or [
+            min(self.n_splines_grid)
+        ]
+
+        # λ base increases automatically when data is sparse (fewer bins/obs)
+        lam_base = 0.05 * (40 / max(eff_bins, 8)) * (800 / max(n_obs, 200))
+        lam_low = lam_base / 4
+        lam_high = lam_base * 20
+        lam_grid = np.exp(
+            np.linspace(np.log(lam_low), np.log(lam_high), num=self.n_lam)
         )
+        lam_grid = np.clip(lam_grid, 1e-4, np.inf)
+        # -------------------------------------------------
+
+        # floor to prevent the later “left/center/right” sweep from dipping too low again
+        lam_floor = max(lam_low, 1e-3)
 
         step = 0
         last_scores = None  # keep for fallback
@@ -636,6 +656,25 @@ class ParamSearchCV:
                         )
                         cycle_scores.append(res["score"])
                     mean_score = float(np.mean(cycle_scores))
+
+                    # --- Compute model complexity penalty -----------------------------
+                    # n_obs: number of training samples (available via len(y_train))
+                    # Larger n_splines / smaller λ → higher penalty for complex fits
+                    n_obs = len(y_train)
+                    complexity_penalty = 0.1 * (ns / max(n_obs, 50)) / max(lam, 1e-6)
+                    score_with_penalty = mean_score + complexity_penalty
+                    # ------------------------------------------------------------------
+
+                    scores.append(
+                        {
+                            "n_splines": int(ns),
+                            "lam": float(lam),
+                            "score": score_with_penalty,
+                            "base_score": mean_score,
+                            "penalty": complexity_penalty,
+                        }
+                    )
+
                     # skip unstable candidates (np.inf / NaN)
                     if not np.isfinite(mean_score):
                         continue
@@ -656,6 +695,8 @@ class ParamSearchCV:
                         max(lam_max * 10, lam_min * 10),
                         num=max(self.n_lam, 6),
                     )
+                    lam_grid = np.clip(lam_grid, lam_floor, np.inf)
+
                     continue
                 else:
                     raise RuntimeError(
@@ -711,6 +752,8 @@ class ParamSearchCV:
             if lam_next.size > max(self.n_lam, 6):
                 qs = np.linspace(0, 1, num=max(self.n_lam, 6))
                 lam_grid = np.quantile(lam_next, qs)
+                lam_grid = np.clip(lam_grid, lam_floor, np.inf)
+
             else:
                 lam_grid = lam_next
             print(f"   🔁 Bi-directional λ refresh: {np.round(lam_grid, 6)}")
@@ -805,8 +848,6 @@ class ParamSearchCV:
         expectile=0.5,
     ):
         """Fit a single ExpectileGAM and return validation score + model (robust)."""
-        import numpy as np
-        from pygam import ExpectileGAM
 
         # --- weight safety (train) ---
         if w_train is not None:
@@ -814,11 +855,26 @@ class ParamSearchCV:
             w_train = np.nan_to_num(w_train, nan=1.0, posinf=3.0, neginf=1e-6)
             w_train[w_train <= 0] = 1e-6
 
-        # --- stabilize k & lam ---
-        # assume FEAT_COLS[0] == "price" -> price is X[:,0]
-        uniq_price = int(np.unique(X_train[:, 0]).size) if X_train.size else 0
-        k_eff = int(max(8, min(int(n_splines or 20), max(uniq_price - 1, 8))))
-        lam_eff = float(max(float(lam if lam is not None else 0.1), 1e-4))
+        # --- adaptive spline cap based on effective support (bin occupancy) ---
+        n_obs = len(X_train)
+        price = X_train[:, 0] if X_train.ndim == 2 else X_train
+
+        # choose a reasonable bin count ~ sqrt(n), clamped
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(price, bins=n_bins)
+
+        # bins with "enough" points count as real support
+        min_per_bin = max(2, int(0.01 * n_obs))  # ~1% of data or at least 2
+        eff_bins = int(np.sum(hist >= min_per_bin))
+
+        # cap splines by occupied bins and by data size
+        n_splines_cap = max(4, min(eff_bins - 1, int(0.10 * n_obs)))
+        k_eff = int(min(int(n_splines or 20), n_splines_cap))
+        # ----------------------------------------------------------------------
+
+        lam_eff = float(
+            max(float(lam if lam is not None else 0.1), 1e-3)
+        )  # firmer floor
 
         model = ExpectileGAM(expectile=expectile, n_splines=k_eff, lam=lam_eff)
 
@@ -835,7 +891,22 @@ class ParamSearchCV:
         preds_val = model.predict(X_val)
         preds_val = np.maximum(preds_val, 0.0)
 
+        # --- smoothness sanity check (edf-based) ---
         rmse = float(np.sqrt(np.mean((y_val - preds_val) ** 2)))
+
+        # --- smoothness sanity check (edf-based) ---
+        try:
+            edf = getattr(model.statistics_, "edf", None)
+            if edf is not None and np.isfinite(edf):
+                flex_ratio = edf / max(model.n_splines, 1)
+                if flex_ratio > 0.9:
+                    rmse *= 1.10  # light 10% penalty if GAM fully flexed
+                elif flex_ratio > 0.8:
+                    rmse *= 1.05  # 5% penalty if nearly maxed
+        except Exception:
+            pass
+        # -------------------------------------------
+
         return {"expectile": expectile, "model": model, "score": rmse}
 
     def predict_expectiles(self, X):
@@ -923,7 +994,7 @@ class GAMModeler:
             f"    Prediction keys: {list(preds.keys())}"
         )
 
-        print("\n" + "─ " * 10 + "✅ Generating Prediction Frames" + "─ " * 10 + "\n")
+        print("\n" + "─" * 30 + " ✅ Generating Prediction Frames " + "─" * 30 + "\n")
         return {
             "params": params,
             "metrics": metrics,
@@ -1096,9 +1167,7 @@ class PricingPipeline:
             X[:, idx] = (Z - mu) / sd
 
         # --------------- Fit + Predict ---------------
-        print(
-            "\n─────────────────────────────── 🤖 Modeling & Prediction ───────────────────────────────"
-        )
+        print("\n\n" + 35 * "- " + " 🤖 Modeling & Prediction " + "- " * 35)
 
         param_search = ParamSearchCV(
             n_splines_grid=(16, 20, 24, 30),
@@ -1134,7 +1203,7 @@ class PricingPipeline:
             w_val=w_val,
             X_pred=X,  # keep full-frame predictions for downstream assembly
         )
-        print("\n" + "─ " * 10 + "✅ Generating Prediction Frames" + "─ " * 10 + "\n")
+        print("\n" + "─" * 30 + " ✅ Generating Prediction Frames " + "─" * 30 + "\n")
 
         # --------------- Results Assembly ---------------
         all_gam_results = (
@@ -1143,48 +1212,42 @@ class PricingPipeline:
             .reset_index(drop=True)
         )
 
-        # --- A) Add local support on the prediction grid (per product) ---
-        # pick a base df holding observed rows (the data you fitted on)
+        # --- Local support: observed neighbors near each predicted price ---
         base_df = getattr(self, "pricing_df", None)
-        if base_df is None and hasattr(self, "engineer") and hasattr(self.engineer, "pricing_df"):
+        if (
+            base_df is None
+            and hasattr(self, "engineer")
+            and hasattr(self.engineer, "pricing_df")
+        ):
             base_df = self.engineer.pricing_df
 
+        all_gam_results["support_count"] = 0
 
-        # 1) iterate unique products (no groupby tuple confusion)
         for prod_key in all_gam_results["product"].dropna().unique():
             g_pred = all_gam_results.loc[all_gam_results["product"] == prod_key]
 
-            # 2) observed prices must come from the training data, not the prediction grid
-            if base_df is not None and "price" in base_df.columns:
-                # robust match in case dtypes differ
-                mask = (
-                    base_df.get("product", "").astype(str) == str(prod_key)
-                    if "product" in base_df.columns
-                    else None
-                )
-                if mask is not None and mask.any():
-                    obs_prices = base_df.loc[mask, "price"].to_numpy()
-                else:
-                    # fallback: if your training key isn’t named 'product', try asin/sku etc., or finally fallback to g_pred
+            if base_df is not None and {"product", "price"}.issubset(base_df.columns):
+                obs_prices = base_df.loc[
+                    base_df["product"].astype(str) == str(prod_key), "price"
+                ].to_numpy()
+                if obs_prices.size == 0:
                     obs_prices = g_pred["price"].to_numpy()
             else:
-                obs_prices = g_pred["price"].to_numpy()  # last-resort fallback
+                obs_prices = g_pred["price"].to_numpy()
 
-            # 3) compute local window from observed price spacing
             u = np.unique(np.sort(obs_prices))
-            if u.size >= 2:
-                step = np.nanmedian(np.diff(u))
-            else:
-                step = max(0.25, np.nanstd(obs_prices) / 25.0)
+            step = (
+                np.nanmedian(np.diff(u))
+                if u.size >= 2
+                else max(0.25, np.nanstd(obs_prices) / 25.0)
+            )
             win = 1.25 * step
 
-            # 4) support counts: how many observed prices within ±win of each predicted price
             P_pred = g_pred["price"].to_numpy()
             supp = np.array(
                 [(np.abs(obs_prices - p) <= win).sum() for p in P_pred], dtype=int
             )
 
-            # 5) write support back onto the prediction rows
             all_gam_results.loc[g_pred.index, "support_count"] = supp
 
         all_gam_results["support_count"] = (
@@ -1243,11 +1306,15 @@ class PricingPipeline:
         )
 
         print(
-            "\n─────────────────────────────── 🎯 Pipeline Complete ───────────────────────────────\n"
+            "\n"
+            + 32 * "- "
+            + " 🎯 Pipeline Complete at "
+            + datetime.now().strftime("%H:%M:%S")
+            + 32 * "- "
+            + "\n"
         )
         return topsellers, elasticity_df, all_gam_results
 
-    def _compute_best_tables(self, all_gam_results, topsellers):
         """
         Run Optimizer and ensure required cols are present.
         """

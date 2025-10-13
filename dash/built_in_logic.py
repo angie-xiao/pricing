@@ -1,8 +1,7 @@
 """
-1. Flat or near-zero curves
-2. Explosive spikes
-3. Misaligned uncertainty bands
-4. Categorical signals ignored
+1. need to be more thoughtful about the occurrence of "infrequent" prices
+2. inelasticity is not being scaled enough (case of unscented 16lb)
+3. treat promo vs BAU differently? promo data is more uncommon. so skip aggregation?
 """
 
 # --------- built_in_logic.py  ---------
@@ -369,6 +368,9 @@ class _TuneResult:
         decay_rate=None,
         final_score=None,
         models=None,
+        # new fields (default to None so existing call sites still work)
+        rmse_val=None,
+        interval_score=None,
     ):
         self.n_splines = n_splines
         self.lam = lam
@@ -376,6 +378,20 @@ class _TuneResult:
         self.decay_rate = decay_rate
         self.final_score = final_score
         self.models = models or {}
+        # initialize these so they're always present
+        self.rmse_val = rmse_val
+        self.interval_score = interval_score
+
+    def to_dict(self):
+        """optional, nice for debugging)"""
+        return {
+            "n_splines": self.n_splines,
+            "lam": self.lam,
+            "score": self.score,
+            "final_score": self.final_score,
+            "rmse_val": self.rmse_val,
+            "interval_score": self.interval_score,
+        }
 
 
 class ParamSearchCV:
@@ -388,7 +404,9 @@ class ParamSearchCV:
 
     def __init__(
         self,
-        n_splines_grid=(15, 20, 25),
+        n_splines_grid=sorted(
+            set([14, 16, 18, 21, 24, 26])
+        ),  # widen around 21 without exploding the grid
         loglam_range=(np.log(0.005), np.log(1.0)),
         n_lam=6,
         expectiles=(0.025, 0.5, 0.975),
@@ -414,11 +432,11 @@ class ParamSearchCV:
             ns_grid = (18, 22, 26)
 
         if n_rows < 400:
-            lam_low, lam_high = 0.006, 1.2
+            lam_low, lam_high = 0.02, 5.0
         elif n_rows < 1500:
-            lam_low, lam_high = 0.005, 0.8
+            lam_low, lam_high = 0.02, 10.0
         else:
-            lam_low, lam_high = 0.004, 0.5
+            lam_low, lam_high = 0.02, 20.0
 
         return dict(
             n_splines_grid=ns_grid,
@@ -571,22 +589,42 @@ class ParamSearchCV:
     # =============================
     #   λ & spline setup helpers
     # =============================
+
     def _init_lambda_grid(self, X_train):
+        """
+        Wide, strictly-positive, log-spaced λ grid centered on a data scale.
+        """
         n_obs = len(X_train)
+        price = X_train[:, 0] if X_train.ndim == 2 else X_train
         n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
-        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
+        hist, _ = np.histogram(price, bins=n_bins)
+        eff_bins = int(np.sum(hist > 0))
 
         lam_base = 0.05 * (40 / max(eff_bins, 8)) * (800 / max(n_obs, 200))
-        lam_low, lam_high = lam_base / 4, lam_base * 20
-        lam_grid = np.exp(
-            np.linspace(np.log(lam_low), np.log(lam_high), num=self.n_lam)
+
+        lam_min = float(getattr(self, "lam_min", 1e-4))
+        lam_max = float(getattr(self, "lam_max", 1e3))
+        span_decades = float(getattr(self, "lam_span_decades", 3.0))
+        n_lam = int(max(getattr(self, "n_lam", 9), 9))
+
+        low = max(lam_min, lam_base * (10.0 ** (-span_decades)))
+        high = min(lam_max, lam_base * (10.0 ** (+span_decades)))
+        if not np.isfinite(low) or not np.isfinite(high) or low >= high:
+            low, high = lam_min, lam_max
+
+        lam_grid = np.exp(np.linspace(np.log(low), np.log(high), num=n_lam))
+        lam_grid = lam_grid[np.isfinite(lam_grid)]
+        lam_grid = lam_grid[lam_grid > 0.0]
+        lam_grid = np.clip(lam_grid, lam_min, lam_max)
+
+        lam_floor = float(lam_grid.min())
+        self._log(
+            f"[DBG λ-init] floor={lam_floor:.4g} min={lam_grid.min():.4g} max={lam_grid.max():.4g} n={len(lam_grid)}"
         )
-        lam_grid = np.clip(lam_grid, 1e-4, np.inf)
-        lam_floor = max(lam_low, 1e-4)
         return lam_grid, lam_floor
 
     def _init_spline_grid(self, X_train):
+        """ """
         n_obs = len(X_train)
         n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
         hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
@@ -603,7 +641,11 @@ class ParamSearchCV:
     def _evaluate_candidate(
         self, X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
     ):
-        cycle_scores = []
+        """
+        Scorer used by the search. Returns (final_score, base_rmse, penalty, models)
+        so the outer loop can carry forward the exact models that determined the score.
+        """
+        models = {}
         for e in self.expectiles:
             res = self._fit_one_cycle(
                 X_train,
@@ -616,43 +658,56 @@ class ParamSearchCV:
                 lam=lam,
                 expectile=e,
             )
-            cycle_scores.append(res["score"])
-        mean_score = float(np.mean(cycle_scores))
-        n_obs = len(y_train)
-        complexity_penalty = 0.1 * (ns / max(n_obs, 50)) / max(lam, 1e-6)
-        return mean_score + complexity_penalty, mean_score, complexity_penalty
+            models[e] = res["model"]
+
+        eps = 1e-6
+        # P50 fit quality on a stable scale (log-RMSE)
+        yhat_p50 = np.maximum(models[0.5].predict(X_val), 0.0)
+        rmse_log = float(
+            np.sqrt(np.mean((np.log(y_val + eps) - np.log(yhat_p50 + eps)) ** 2))
+        )
+
+        # Interval width (median in log-space = robust)
+        yhat_lo = np.maximum(models[min(self.expectiles)].predict(X_val), 0.0)
+        yhat_hi = np.maximum(models[max(self.expectiles)].predict(X_val), 0.0)
+        width_med = float(np.median(np.log(yhat_hi + eps) - np.log(yhat_lo + eps)))
+
+        # Simple, congruent final (same structure you’ve been using)
+        width_weight = 0.12
+        final_score = rmse_log + width_weight * width_med
+
+        return final_score, rmse_log, (width_weight * width_med), models
 
     # =============================
     #   adaptive refresh logic
     # =============================
+
     def _refresh_lambda_grid(self, lam_best, lam_grid, lam_floor):
-        lam_min, lam_max = float(min(lam_grid)), float(max(lam_grid))
-        left = np.geomspace(
-            max(lam_best * 1e-3, lam_min / 3),
-            max(lam_best / 2, lam_min * 0.5),
-            num=max(3, self.n_lam // 2),
-        )
-        center = np.geomspace(
-            max(lam_best / 2, 1e-12), lam_best * 2, num=max(3, self.n_lam // 2)
-        )
-        right = np.geomspace(
-            min(lam_best * 2, lam_max * 2),
-            max(lam_max * 4, lam_best * 4),
-            num=max(3, self.n_lam // 2),
-        )
-        lam_next = np.unique(
-            np.clip(np.concatenate([left, center, right]), 1e-12, np.inf)
-        )
-        if lam_next.size > max(self.n_lam, 6):
-            qs = np.linspace(0, 1, num=max(self.n_lam, 6))
-            lam_grid = np.quantile(lam_next, qs)
-            lam_grid = np.clip(lam_grid, lam_floor, np.inf)
+        left = lam_best / np.array([1.5, 1.25, 1.1], dtype=float)
+        center = lam_best * np.array([1.0], dtype=float)
+        right = lam_best * np.array([1.1, 1.25, 1.5], dtype=float)
+
+        lam_next = np.concatenate([left, center, right])
+        lam_next = lam_next[np.isfinite(lam_next)]
+        lam_next = lam_next[lam_next > 0.0]
+        lam_next = np.unique(np.clip(lam_next, lam_floor, np.inf))
+
+        target_n = max(self.n_lam, 9)
+        if lam_next.size > target_n:
+            qs = np.linspace(0.0, 1.0, num=target_n)
+            lam_grid_new = np.exp(np.quantile(np.log(lam_next), qs))
         else:
-            lam_grid = lam_next
-        print(f"   🔁 Bi-directional λ refresh: {np.round(lam_grid, 6)}")
-        return lam_grid
+            lam_grid_new = lam_next
+
+        lam_grid_new = np.clip(lam_grid_new, lam_floor, np.inf)
+        if lam_grid_new.min() <= 1.001 * lam_floor:
+            self._log(
+                f"[DBG λ-refresh] hugging floor: min={lam_grid_new.min():.4g} floor={lam_floor:.4g}"
+            )
+        return lam_grid_new
 
     def _update_spline_grid(self, ns_best, n_splines_grid):
+        """ """
         if ns_best == max(n_splines_grid):
             new_grid = sorted(
                 set([max(5, ns_best - 5), ns_best, ns_best + 5, ns_best + 10])
@@ -673,6 +728,7 @@ class ParamSearchCV:
     #   main orchestration
     # =============================
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
+        """ """
         print(
             "\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────"
         )
@@ -693,8 +749,11 @@ class ParamSearchCV:
             print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
             for ns in n_splines_grid:
                 for lam in lam_grid:
-                    score_with_penalty, mean_score, penalty = self._evaluate_candidate(
-                        X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+                    # inside the grid loop
+                    score_with_penalty, mean_score, penalty, models = (
+                        self._evaluate_candidate(
+                            X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+                        )
                     )
                     scores.append(
                         {
@@ -703,6 +762,7 @@ class ParamSearchCV:
                             "score": score_with_penalty,
                             "base_score": mean_score,
                             "penalty": penalty,
+                            "models": models,  # <— carry models
                         }
                     )
 
@@ -740,17 +800,47 @@ class ParamSearchCV:
                 print("   🧯 Patience exhausted — stopping adaptive search.")
                 break
 
+        # after search convergence
         self.best_ = _TuneResult(
             n_splines=int(best_result["n_splines"]),
             lam=float(best_result["lam"]),
             score=float(best_result["score"]),
         )
+        self.best_.rmse_val = float(best_result.get("base_score", float("nan")))
+        self.best_.interval_score = float(best_result.get("penalty", float("nan")))
+        self.best_.final_score = float(best_result.get("score", float("nan")))
+        self.best_.models = dict(
+            best_result.get("models", {})
+        )  # <— attach exact models
+
+        # --- Refit models for the selected (n_splines, lam) and attach them to best_ ---
+        models = {}
+        for e in self.expectiles:
+            res = self._fit_one_cycle(
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                w_train=w_train,
+                w_val=w_val,
+                n_splines=int(best_result["n_splines"]),
+                lam=float(best_result["lam"]),
+                expectile=float(e),
+            )
+            # If a candidate model failed (None), keep flow but mark unusable
+            if res["model"] is None:
+                self._log(f"[WARN] Refit produced None model for expectile={e}")
+            models[e] = res["model"]
+
+        # Store on the result object for downstream prediction code
+        self.best_.models = models
+
         duration = time.time() - start
         print(
             f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n"
         )
 
-        # --- Refit final models for all expectiles ------------------------
+        # ------------ Refit final models for all expectiles ---------------
         final_models = {}
         for e in self.expectiles:
             res = self._fit_one_cycle(
@@ -771,7 +861,6 @@ class ParamSearchCV:
             final_models[e] = res["model"]
 
         self.best_.models = final_models
-        # ------------------------------------------------------------------
 
         return self.best_
 
@@ -787,7 +876,14 @@ class ParamSearchCV:
         lam=None,
         expectile=0.5,
     ):
-        """Fit a single ExpectileGAM and return validation score + model (robust)."""
+        """Fit one ExpectileGAM and return {"expectile", "model", "score"} for selection."""
+
+        # -------------------- config knobs (single place to flip) --------------------
+        USE_LOG_RMSE = True  # True: Huberized log-RMSE; False: Huberized linear-RMSE
+        USE_EDF_PENALTY = (
+            False  # keep False unless you explicitly want extra complexity push
+        )
+        # -----------------------------------------------------------------------------
 
         # --- weight safety (train) ---
         if w_train is not None:
@@ -795,64 +891,92 @@ class ParamSearchCV:
             w_train = np.nan_to_num(w_train, nan=1.0, posinf=3.0, neginf=1e-6)
             w_train[w_train <= 0] = 1e-6
 
-        # --- adaptive spline cap based on effective support (bin occupancy) ---
-        n_obs = len(X_train)
-        price = X_train[:, 0] if X_train.ndim == 2 else X_train
+        # --- feature scaling (stable λ across price ranges) ---
+        x_tr = X_train[:, 0] if X_train.ndim == 2 else X_train
+        x_val = X_val[:, 0] if X_val.ndim == 2 else X_val
 
-        # choose a reasonable bin count ~ sqrt(n), clamped
+        x_min = float(np.nanmin(x_tr))
+        x_ptp = float(np.nanmax(x_tr) - x_min)
+        scale = x_ptp if x_ptp > 0 else 1.0
+
+        x_tr_s = (x_tr - x_min) / scale
+        x_val_s = (x_val - x_min) / scale
+
+        # use 2D arrays for GAM
+        Xtr_s = x_tr_s.reshape(-1, 1)
+        Xval_s = x_val_s.reshape(-1, 1)
+
+        # --- adaptive spline cap based on support occupancy ---
+        n_obs = len(Xtr_s)
         n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(price, bins=n_bins)
+        hist, _ = np.histogram(x_tr_s, bins=n_bins)
 
-        # bins with "enough" points count as real support
-        min_per_bin = max(2, int(0.01 * n_obs))  # ~1% of data or at least 2
-        eff_bins = int(np.sum(hist >= min_per_bin))
-
-        # cap splines by occupied bins and by data size
-        n_splines_cap = max(4, min(eff_bins - 1, int(0.10 * n_obs)))
+        eff_bins = int(np.sum(hist > 0))  # any occupied bin counts
+        # a touch tighter than //2: fewer high-freq modes in sparse tails
+        n_splines_cap = max(6, min(int(eff_bins // 3 + 5), int(0.10 * n_obs)))
         k_eff = int(min(int(n_splines or 20), n_splines_cap))
-        # ----------------------------------------------------------------------
+        self._log(
+            f"[DBG SplineCap] n_obs={n_obs} n_bins={n_bins} eff_bins={eff_bins} cap={n_splines_cap} ns_cand={n_splines} k_eff={k_eff} lam_eff={lam if lam is not None else np.nan}"
+        )
 
-        lam_eff = float(
-            max(float(lam if lam is not None else 0.1), 1e-3)
-        )  # firmer floor
+        # --- λ: honor what the search passed (no extra floor here) ---
+        lam_eff = float(lam if lam is not None else 1e-6)
 
-        model = ExpectileGAM(expectile=expectile, n_splines=k_eff, lam=lam_eff)
+        # debug: make flow explicit
+        self._log(
+            f"[DBG SplineCap] n_obs={n_obs} n_bins={n_bins} eff_bins={eff_bins} "
+            f"cap={n_splines_cap} ns_cand={n_splines} k_eff={k_eff} lam_eff={lam_eff:.6g} e={expectile}"
+        )
 
-        # --- robust fit (skip unstable candidates) ---
+        # --- fit ---
+        model = ExpectileGAM(expectile=float(expectile), n_splines=k_eff, lam=lam_eff)
         try:
             model.fit(X_train, y_train, weights=w_train)
         except Exception as e:
-            # reject candidate cleanly on SVD/ill-conditioning
+            # cleanly reject unstable candidates
             if isinstance(e, np.linalg.LinAlgError) or "SVD did not converge" in str(e):
                 return {"expectile": expectile, "model": None, "score": np.inf}
             raise
 
-        # --- predict (clip at 0 per business rule) & score ---
-        preds_val = model.predict(X_val)
-        preds_val = np.maximum(preds_val, 0.0)
+        # --- predict on validation (business rule: nonnegative) ---
+        preds_val = np.maximum(model.predict(X_val), 0.0)
 
-        # --- smoothness sanity check (edf-based) ---
-        rmse = float(np.sqrt(np.mean((y_val - preds_val) ** 2)))
+        # --- Huberized RMSE with fold-driven scale (automatic) ---
+        eps = 1e-6
+        if USE_LOG_RMSE:
+            r = np.log(y_val + eps) - np.log(preds_val + eps)
+        else:
+            r = y_val - preds_val
 
-        # --- smoothness sanity check (edf-based) ---
-        try:
-            edf = getattr(model.statistics_, "edf", None)
-            if edf is not None and np.isfinite(edf):
-                flex_ratio = edf / max(model.n_splines, 1)
-                if flex_ratio > 0.9:
-                    rmse *= 1.10  # light 10% penalty if GAM fully flexed
-                elif flex_ratio > 0.8:
-                    rmse *= 1.05  # 5% penalty if nearly maxed
-        except Exception:
-            pass
-        # -------------------------------------------
+        # robust scale via MAD (no hand tuning)
+        mad = np.median(np.abs(r - np.median(r))) + eps
+        sigma_hat = 1.4826 * mad
+        c = 1.345 * sigma_hat
+
+        abs_r = np.abs(r)
+        w = np.where(abs_r <= c, 1.0, c / (abs_r + eps))
+        rmse = float(np.sqrt(np.mean((w * r) ** 2)))
+
+        # --- optional EDf-based overflex penalty (off by default) ---
+        if USE_EDF_PENALTY:
+            try:
+                edf = getattr(model.statistics_, "edf", None)
+                if edf is not None and np.isfinite(edf):
+                    flex_ratio = float(edf) / max(model.n_splines, 1)
+                    # mild, smooth bump beyond ~0.9 of max effective flex
+                    over = max(0.0, flex_ratio - 0.9)
+                    rmse *= float(min(1.0 + 0.12 * (over**1.5), 1.25))
+            except Exception:
+                pass
+
+        # debug (useful once; comment out later)
+        self._log(
+            f"[DBG RMSE] metric={'log' if USE_LOG_RMSE else 'lin'} "
+            f"sigma={sigma_hat:.4g} c={c:.4g} rmse={rmse:.4g}"
+            f"{' (edf penalty on)' if USE_EDF_PENALTY else ''}"
+        )
 
         return {"expectile": expectile, "model": model, "score": rmse}
-
-    def predict_expectiles(self, X):
-        if self.best_ is None:
-            raise RuntimeError("ParamSearchCV has not been fit yet.")
-        return {k: m.predict(X) for k, m in self.best_.models.items()}
 
 
 class GAMModeler:
@@ -1121,7 +1245,7 @@ class PricingPipeline:
             X[:, idx] = (Z - mu) / sd
 
         # --------------- Fit + Predict ---------------
-        print("\n\n" + 32 * "- " + " 🤖 Modeling & Prediction " + "- " * 32)
+        print("\n\n" + 33 * "- " + " 🤖 Modeling & Prediction " + "- " * 33)
 
         param_search = ParamSearchCV(
             n_splines_grid=(16, 20, 24, 30),

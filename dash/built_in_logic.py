@@ -1,4 +1,8 @@
 """
+oct 13
+-
+-------
+
 1. need to be more thoughtful about the occurrence of "infrequent" prices
 2. inelasticity is not being scaled enough (case of unscented 16lb)
 3. treat promo vs BAU differently? promo data is more uncommon. so skip aggregation?
@@ -7,6 +11,7 @@
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
+from typing import Iterable, Dict, Optional
 import os
 import pandas as pd
 import numpy as np
@@ -404,11 +409,9 @@ class ParamSearchCV:
 
     def __init__(
         self,
-        n_splines_grid=sorted(
-            set([14, 16, 18, 21, 24, 26])
-        ),  # widen around 21 without exploding the grid
+        n_splines_grid=sorted(set([14, 16, 18, 21, 24, 26])),
         loglam_range=(np.log(0.005), np.log(1.0)),
-        n_lam=6,
+        n_lam=(5, 7, 9, 11, 13, 15, 17, 19, 21),  # int (fixed) OR iterable
         expectiles=(0.025, 0.5, 0.975),
         alpha=0.10,
         random_state=42,
@@ -416,11 +419,18 @@ class ParamSearchCV:
     ):
         self.n_splines_grid = n_splines_grid
         self.loglam_range = loglam_range
-        self.n_lam = n_lam
         self.expectiles = expectiles
         self.alpha = alpha
         self.random_state = random_state
         self.verbose = verbose
+
+        # normalize n_lam: int -> fixed; iterable -> candidates (tuned like other hypers)
+        if isinstance(n_lam, (list, tuple)):
+            self.n_lam = None
+            self.n_lam_candidates = tuple(int(x) for x in n_lam)
+        else:
+            self.n_lam = int(n_lam)
+            self.n_lam_candidates = None
 
     def _default_grids(self, n_rows: int = 1000, n_unique_prices: int = 10):
         """Return sensible default grids based on dataset scale."""
@@ -547,6 +557,92 @@ class ParamSearchCV:
         )
         return best_decay, best_score
 
+    def _nlam_candidate_score(self, metrics: dict) -> float:
+        # Prefer your composite if present; otherwise fall back.
+        if not isinstance(metrics, dict):
+            return np.inf
+        for k in ("final_score", "rmse_val", "interval_score"):
+            if k in metrics and np.isfinite(metrics[k]):
+                return float(metrics[k])
+        return np.inf
+
+    def fit_with_nlam_candidates(
+        self,
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        w_train=None,
+        w_val=None,
+        n_lam_candidates=(5, 7, 9, 11, 13),
+    ):
+        """
+        Try several n_lam values; pick the best based on your existing fit() metrics.
+        Does NOT change your original fit() implementation.
+        After this returns:
+            - self.best_ and self.best_metrics_ refer to the winning run
+            - self.best_n_lam holds the winning n_lam
+        Returns a dict mirroring your fit() return (best object + metrics).
+        """
+        best_obj = None
+        best_metrics = None
+        best_score = np.inf
+        best_nlam = None
+
+        # Snapshot current n_lam so we can restore it
+        original_nlam = getattr(self, "n_lam", None)
+
+        for nlam in n_lam_candidates:
+            # make a shallow clone of this searcher with the same params but a different n_lam
+            ps = ParamSearchCV(
+                n_splines_grid=self.n_splines_grid,
+                loglam_range=self.loglam_range,
+                n_lam=int(nlam),
+                expectiles=self.expectiles,
+                alpha=self.alpha,
+                random_state=self.random_state,
+                verbose=self.verbose,
+            )
+            res = ps.fit(
+                X_train=X_train,
+                y_train=y_train,
+                X_val=X_val,
+                y_val=y_val,
+                w_train=w_train,
+                w_val=w_val,
+            )
+
+            cur_best = getattr(ps, "best_", None) or getattr(res, "best_", None)
+            cur_mets = getattr(ps, "best_metrics_", None) or getattr(
+                res, "best_metrics_", None
+            )
+            cur_score = self._nlam_candidate_score(cur_mets)
+
+            # if self.verbose:
+            #     print(
+            #         f"🔎 n_lam={nlam} → score={cur_score:.6f}, "
+            #         f"ns={getattr(cur_best,'n_splines',None)}, λ={getattr(cur_best,'lam',None)}"
+            #     )
+
+            if cur_score < best_score:
+                best_score = cur_score
+                best_obj = cur_best
+                best_metrics = cur_mets
+                best_nlam = int(nlam)
+
+        # Publish the winner on THIS instance for downstream code to read
+        self.best_ = best_obj
+        self.best_metrics_ = best_metrics
+        self.best_n_lam = best_nlam
+        if original_nlam is not None:
+            self.n_lam = original_nlam  # restore
+
+        return {
+            "best_": best_obj,
+            "best_metrics_": best_metrics,
+            "best_n_lam": best_nlam,
+        }
+
     def interval_score(
         self, y_true, y_low, y_high, y_pred=None, alpha=0.05, width_penalty=0.1
     ):
@@ -589,51 +685,127 @@ class ParamSearchCV:
     # =============================
     #   λ & spline setup helpers
     # =============================
-
     def _init_lambda_grid(self, X_train):
         """
         Wide, strictly-positive, log-spaced λ grid centered on a data scale.
+        n_lam, lam_span_decades, and lam_min auto-tune from data unless explicitly set on self.
         """
         n_obs = len(X_train)
-        price = X_train[:, 0] if X_train.ndim == 2 else X_train
-        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(price, bins=n_bins)
-        eff_bins = int(np.sum(hist > 0))
+        x = X_train[:, 0] if X_train.ndim == 2 else X_train
 
+        # Rough data support
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(x, bins=n_bins)
+        eff_bins = int(np.sum(hist > 0))
+        support_ratio = eff_bins / max(n_bins, 1)  # 0..1
+
+        # Center scale (same spirit as your original)
         lam_base = 0.05 * (40 / max(eff_bins, 8)) * (800 / max(n_obs, 200))
 
-        lam_min = float(getattr(self, "lam_min", 1e-4))
-        lam_max = float(getattr(self, "lam_max", 1e3))
-        span_decades = float(getattr(self, "lam_span_decades", 3.0))
-        n_lam = int(max(getattr(self, "n_lam", 9), 9))
+        # -------------------- AUTO SETTINGS (overridden if attrs exist) --------------------
+        # lam_min: higher floor when support is sparse, lower floor when rich
+        lam_min_auto = float(
+            10.0 ** np.interp(support_ratio, [0.0, 1.0], [-3.0, -4.0])
+        )  # ~1e-3 .. 1e-4
+        lam_min = float(getattr(self, "lam_min", lam_min_auto))
 
+        # span_decades: explore wider when support is sparse, narrower when rich
+        span_decades_auto = float(np.interp(support_ratio, [0.0, 1.0], [3.5, 2.5]))
+        span_decades = float(getattr(self, "lam_span_decades", span_decades_auto))
+
+        # n_lam: density per decade grows with sample size, then total = density * span
+        points_per_decade = float(
+            np.interp(min(max(n_obs, 1), 2000), [50, 200, 1000, 2000], [5, 6, 8, 9])
+        )
+        n_lam_auto = int(max(9, int(np.ceil(points_per_decade * span_decades))))
+        n_lam = int(max(getattr(self, "n_lam", n_lam_auto), 9))
+
+        # Hard ceiling stays generous
+        lam_max = float(getattr(self, "lam_max", 1e3))
+        # -----------------------------------------------------------------------------
+
+        # Compute low/high around lam_base
         low = max(lam_min, lam_base * (10.0 ** (-span_decades)))
         high = min(lam_max, lam_base * (10.0 ** (+span_decades)))
+
+        # Fallback if lam_base degenerates
         if not np.isfinite(low) or not np.isfinite(high) or low >= high:
             low, high = lam_min, lam_max
 
+        # Final, strictly-positive, log-spaced grid
         lam_grid = np.exp(np.linspace(np.log(low), np.log(high), num=n_lam))
         lam_grid = lam_grid[np.isfinite(lam_grid)]
         lam_grid = lam_grid[lam_grid > 0.0]
         lam_grid = np.clip(lam_grid, lam_min, lam_max)
 
-        lam_floor = float(lam_grid.min())
+        lam_floor = float(
+            lam_grid.min()
+        )  # single source of truth; _fit_one_cycle must not re-floor
+
         self._log(
-            f"[DBG λ-init] floor={lam_floor:.4g} min={lam_grid.min():.4g} max={lam_grid.max():.4g} n={len(lam_grid)}"
+            "[DBG λ-init] "
+            f"n_obs={n_obs} eff_bins={eff_bins} support={support_ratio:.3f} base={lam_base:.4g} | "
+            f"lam_min={lam_min:.3g} span={span_decades:.2f} n_lam={n_lam} | "
+            f"grid_min={lam_grid.min():.4g} grid_max={lam_grid.max():.4g}"
         )
         return lam_grid, lam_floor
 
     def _init_spline_grid(self, X_train):
-        """ """
+        # derive support
         n_obs = len(X_train)
+        x = X_train[:, 0] if X_train.ndim == 2 else X_train
         n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(X_train[:, 0], bins=n_bins)
-        eff_bins = int(np.sum(hist >= max(2, int(0.01 * n_obs))))
-        n_splines_cap = max(5, min(int(eff_bins // 2 + 4), int(0.10 * n_obs)))
-        grid = [ns for ns in self.n_splines_grid if ns <= n_splines_cap] or [
-            min(self.n_splines_grid)
-        ]
+        hist, _ = np.histogram(x, bins=n_bins)
+        eff_bins = int(np.sum(hist > 0))
+
+        # cap: ~40% of occupied bins + small cushion, and 12% of sample size
+        cap = max(6, min(int(0.40 * eff_bins) + 5, int(0.12 * n_obs)))
+
+        # center near a reasonable default but never exceed cap
+        base = min(21, cap)
+
+        # tight, symmetric grid around base within [6, cap]
+        grid = sorted(
+            set(
+                [
+                    max(6, base - 6),
+                    max(6, base - 3),
+                    base,
+                    min(cap, base + 3),
+                    min(cap, base + 6),
+                ]
+            )
+        )
         return grid
+
+    def _maybe_scale_val(self, X, ref_model):
+        """
+        Build the validation design *in the shape the model expects*.
+        If the model was fit on 1 feature (default), return a (n,1) array with scaled col0.
+        Otherwise, return a copy of X with only col0 scaled.
+        """
+        Xv = np.asarray(X)
+        n_feats = int(getattr(ref_model, "n_features_", 1))
+
+        # extract column 0
+        col0 = Xv[:, 0] if Xv.ndim == 2 else Xv
+        xmin = getattr(ref_model, "_x_min", None)
+        xsc = getattr(ref_model, "_x_scale", None)
+        if (
+            getattr(ref_model, "_scaled_first_col", False)
+            and xmin is not None
+            and xsc not in (None, 0, 0.0)
+        ):
+            z = (col0.astype(float) - float(xmin)) / float(xsc)
+        else:
+            z = col0.astype(float)
+
+        if n_feats == 1:
+            return z.reshape(-1, 1)  # model expects a single feature
+        else:
+            Xcopy = np.array(Xv, copy=True)
+            Xcopy[:, 0] = z
+            return Xcopy
 
     # =============================
     #   candidate evaluation
@@ -642,7 +814,7 @@ class ParamSearchCV:
         self, X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
     ):
         """
-        Scorer used by the search. Returns (final_score, base_rmse, penalty, models)
+        Scorer used by the search. Returns (final_score, base_rmse, penalty, models, k_eff)
         so the outer loop can carry forward the exact models that determined the score.
         """
         models = {}
@@ -660,28 +832,46 @@ class ParamSearchCV:
             )
             models[e] = res["model"]
 
+        # need all three bounds to score
+        needed = {min(self.expectiles), 0.5, max(self.expectiles)}
+        if any(models.get(e) is None for e in needed):
+            return float("inf"), float("inf"), float("inf"), models, int(ns)
+
+        # scale X_val the same way the ref model (prefer p50) was trained
+        ref = models.get(0.5) or next(m for m in models.values() if m is not None)
+        Xv = self._maybe_scale_val(X_val, ref)
+
+        yhat_p50 = np.maximum(models[0.5].predict(Xv), 0.0)
+        yhat_lo = np.maximum(models[min(self.expectiles)].predict(Xv), 0.0)
+        yhat_hi = np.maximum(models[max(self.expectiles)].predict(Xv), 0.0)
+
         eps = 1e-6
-        # P50 fit quality on a stable scale (log-RMSE)
-        yhat_p50 = np.maximum(models[0.5].predict(X_val), 0.0)
         rmse_log = float(
             np.sqrt(np.mean((np.log(y_val + eps) - np.log(yhat_p50 + eps)) ** 2))
         )
-
-        # Interval width (median in log-space = robust)
-        yhat_lo = np.maximum(models[min(self.expectiles)].predict(X_val), 0.0)
-        yhat_hi = np.maximum(models[max(self.expectiles)].predict(X_val), 0.0)
         width_med = float(np.median(np.log(yhat_hi + eps) - np.log(yhat_lo + eps)))
 
-        # Simple, congruent final (same structure you’ve been using)
         width_weight = 0.12
         final_score = rmse_log + width_weight * width_med
 
-        return final_score, rmse_log, (width_weight * width_med), models
+        # k_eff (robust to list/tuple/ndarray)
+        try:
+            ns_attr = getattr(ref, "n_splines", ns)
+            if isinstance(ns_attr, (list, tuple, np.ndarray)):
+                k_eff = int(sum(int(x) for x in ns_attr))
+            else:
+                k_eff = int(ns_attr)
+        except Exception as e:
+            self._log(
+                f"[WARN] k_eff extract failed ({type(e).__name__}: {e}); using ns={ns}"
+            )
+            k_eff = int(ns)
+
+        return final_score, rmse_log, (width_weight * width_med), models, k_eff
 
     # =============================
     #   adaptive refresh logic
     # =============================
-
     def _refresh_lambda_grid(self, lam_best, lam_grid, lam_floor):
         left = lam_best / np.array([1.5, 1.25, 1.1], dtype=float)
         center = lam_best * np.array([1.0], dtype=float)
@@ -706,69 +896,198 @@ class ParamSearchCV:
             )
         return lam_grid_new
 
-    def _update_spline_grid(self, ns_best, n_splines_grid):
-        """ """
-        if ns_best == max(n_splines_grid):
-            new_grid = sorted(
-                set([max(5, ns_best - 5), ns_best, ns_best + 5, ns_best + 10])
+    def _update_spline_grid(
+        self, best_ns, n_splines_grid, observed_round=None, rel_tol=None
+    ):
+        """
+        Data-driven update for the n_splines grid.
+        - Collapse duplicates caused by caps (many ns -> same k_eff).
+        - Find elbow: smallest k_eff within (1+rel_tol) of best score.
+        - Propose next grid centered on the elbow; expand if we are at a boundary.
+        Falls back to a simple local contraction if observed_round is None.
+        """
+        # Backward-compat fallback
+        if observed_round is None or not observed_round:
+            # Contract around the best candidate as before
+            uniq = sorted(set(n_splines_grid + [best_ns]))
+            idx = max(0, uniq.index(best_ns))
+            window = sorted(set(uniq[max(0, idx - 1) : idx + 2]))
+            return window if window else uniq
+
+        # 1) Build k_eff -> best score map (collapse duplicates)
+        # Some ns values are capped to the same k_eff; keep the best score for each k_eff
+        best_by_keff = {}
+        for rec in observed_round:
+            ke = int(rec.get("k_eff", rec["n_splines"]))
+            sc = float(rec["score"])
+            cur = best_by_keff.get(ke)
+            if cur is None or sc < cur:
+                best_by_keff[ke] = sc
+
+        if not best_by_keff:
+            return n_splines_grid
+
+        # 2) Sort by k_eff and find best + elbow
+        pairs = sorted(best_by_keff.items())  # [(k_eff, score), ...] ascending k_eff
+        k_list = [k for k, _ in pairs]
+        s_list = [s for _, s in pairs]
+        s_best = min(s_list)
+        rel_tol = float(
+            self.rel_tol
+            if hasattr(self, "rel_tol")
+            else (rel_tol if rel_tol is not None else 1e-3)
+        )
+        tol = rel_tol * max(1.0, abs(s_best))
+
+        # Elbow = smallest k_eff whose score within tol of s_best
+        elbow_keff = next(k for k, s in pairs if (s - s_best) <= tol)
+
+        # 3) Propose next grid around elbow, with gentle exploration
+        # include a few neighbors in k_eff space (±2, ±4), mapped to ns suggestions
+        neighbors = sorted(
+            set(
+                [
+                    max(6, elbow_keff - 4),
+                    max(6, elbow_keff - 2),
+                    elbow_keff,
+                    elbow_keff + 2,
+                    elbow_keff + 4,
+                ]
             )
-            msg = f"↗ Expanding n_splines up: {new_grid}"
-        elif ns_best == min(n_splines_grid):
-            new_grid = sorted(
-                set([max(5, ns_best - 10), max(5, ns_best - 5), ns_best, ns_best + 5])
+        )
+
+        # If the elbow is at boundary of observed k_eff, expand outward for exploration
+        if elbow_keff == k_list[0]:
+            neighbors = sorted(
+                set([max(6, elbow_keff - 6)] + neighbors + [elbow_keff + 6])
             )
-            msg = f"↙ Expanding n_splines down: {new_grid}"
-        else:
-            new_grid = sorted(set([max(5, ns_best - 5), ns_best, ns_best + 5]))
-            msg = f"🔍 Contracting n_splines around {ns_best}: {new_grid}"
-        print(f"   {msg}")
-        return new_grid
+        if elbow_keff == k_list[-1]:
+            neighbors = sorted(
+                set([max(6, elbow_keff - 6)] + neighbors + [elbow_keff + 6])
+            )
+
+        # 4) Convert proposed k_eff targets into ns candidates.
+        # Since k_eff = min(ns, cap), using ns == proposed k_eff is sufficient.
+        ns_next = sorted(set(neighbors))
+
+        # Keep grid small and ordered
+        return ns_next[:7]  # cap size to keep search fast
+
+    def _make_lam_grid_like(self, current_grid, nlam):
+        """Preserve current log-range; change only the resolution (nlam)."""
+        loglo, loghi = np.log(current_grid[0]), np.log(current_grid[-1])
+        return np.exp(np.linspace(loglo, loghi, int(nlam)))
 
     # =============================
     #   main orchestration
     # =============================
     def fit(self, X_train, y_train, X_val, y_val, w_train=None, w_val=None):
         """ """
-        print(
-            "\n─────────────────────────────── ⚙️  Adaptive Hyperparameter Search ───────────────────────────────"
-        )
+        # print the banner ONCE per process
+        if not getattr(self.__class__, "_banner_printed", False):
+            print(
+                "\n"
+                + " " * 51
+                + "─" * 15
+                + " ⚙️  Adaptive Hyperparameter Search "
+                + "-" * 15
+                + "\n"
+            )
+            self.__class__._banner_printed = True
+
         start = time.time()
 
-        patience = getattr(self, "patience", 2)
-        max_steps = getattr(self, "max_steps", 8)
-        rel_tol = getattr(self, "rel_tol", 1e-3)
+        patience = getattr(self, "patience", 25)  
+        max_steps = getattr(self, "max_steps", 30)
+
+        rel_tol = getattr(self, "rel_tol", 5e-4)
 
         n_splines_grid = self._init_spline_grid(X_train)
         lam_grid, lam_floor = self._init_lambda_grid(X_train)
 
+        # global cap
+        price_tr = X_train[:, 0] if X_train.ndim == 2 else X_train
+        n_obs = len(price_tr)
+        n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
+        hist, _ = np.histogram(price_tr, bins=n_bins)
+        eff_bins = int(np.sum(hist > 0))
+        ns_cap = max(6, min(int(0.40 * eff_bins) + 5, int(0.12 * n_obs)))
+        n_splines_grid = sorted({min(int(ns), ns_cap) for ns in n_splines_grid})
+
+        self._log(
+            f"[DBG ns-cap] n_obs={n_obs} eff_bins={eff_bins} ns_cap={ns_cap} init_grid={n_splines_grid}"
+        )
+
+        # handle n_lam: single int or iterable of ints (candidates)
+        if hasattr(self, "n_lam_candidates") and self.n_lam_candidates:
+            nlam_list = tuple(int(x) for x in self.n_lam_candidates)
+        else:
+            # if __init__ was updated to overload n_lam, this stays robust;
+            # otherwise self.n_lam is already an int
+            nlam_list = (int(getattr(self, "n_lam", 6)),)
+
+        print(f"   🔧 Tuning n_lam candidates: {tuple(int(x) for x in nlam_list)}")
+
+        # tuning
         best_score, best_result = float("inf"), None
         no_improve, step = 0, 0
 
         while True:
-            scores = []
-            print(f"🔍 Round {step+1}: λ grid = {[round(x,4) for x in lam_grid]}")
-            for ns in n_splines_grid:
-                for lam in lam_grid:
-                    # inside the grid loop
-                    score_with_penalty, mean_score, penalty, models = (
-                        self._evaluate_candidate(
-                            X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+            print(f"🔍 Round {step+1}:") 
+
+            round_scores = []
+            round_best_nlam = None
+
+            # try one or more n_lam resolutions this round
+            for _nlam in nlam_list:
+                lam_grid_this = self._make_lam_grid_like(lam_grid, _nlam)
+
+                print(f"   🧭 Tuning λ with n_lam={int(_nlam)} | λ candidates (n={len(lam_grid_this)}): "
+                    f"{[round(float(v), 6) for v in lam_grid_this]}")
+                
+                scores = []
+                for ns in n_splines_grid:
+                    for lam in lam_grid_this:
+                        score_with_penalty, mean_score, penalty, models, k_eff = (
+                            self._evaluate_candidate(
+                                X_train, y_train, X_val, y_val, w_train, w_val, ns, lam
+                            )
                         )
-                    )
-                    scores.append(
-                        {
-                            "n_splines": ns,
-                            "lam": lam,
-                            "score": score_with_penalty,
-                            "base_score": mean_score,
-                            "penalty": penalty,
-                            "models": models,  # <— carry models
-                        }
-                    )
+                        scores.append(
+                            {
+                                "n_splines": ns,
+                                "k_eff": int(k_eff),
+                                "lam": lam,
+                                "score": score_with_penalty,
+                                "base_score": mean_score,
+                                "penalty": penalty,
+                                "models": models,
+                                "n_lam": int(_nlam),
+                            }
+                        )
 
-            scores.sort(key=lambda x: x["score"])
-            best_local = scores[0]
+                scores.sort(key=lambda x: x["score"])
+                best_local = scores[0]
+                round_scores.extend(scores)
 
+                # keep the best across n_lam candidates for this round
+                if (not round_best_nlam) or (
+                    best_local["score"]
+                    < min(
+                        s["score"]
+                        for s in round_scores
+                        if s["n_lam"] == round_best_nlam
+                    )
+                ):
+                    round_best_nlam = int(best_local["n_lam"])
+                    # stash the best_local chosen so far (we'll re-evaluate below anyway)
+                    chosen_for_round = dict(best_local)
+
+            # finalize the round's winner
+            round_scores.sort(key=lambda x: x["score"])
+            best_local = round_scores[0]  # overall best this round
+
+            # report improvement
             if best_result is None:
                 best_result = dict(best_local)
                 best_score = best_local["score"]
@@ -790,78 +1109,51 @@ class ParamSearchCV:
                     no_improve += 1
                     print(f"   💤 No improvement (streak {no_improve}/{patience})")
 
-            lam_grid = self._refresh_lambda_grid(best_local["lam"], lam_grid, lam_floor)
-            n_splines_grid = self._update_spline_grid(
-                best_local["n_splines"], n_splines_grid
+            # small breadcrumb for which n_lam won this round
+            if "n_lam" in best_local:
+                print(f"   (chosen n_lam this round = {int(best_local['n_lam'])})")
+
+            # refresh λ grid around the current best λ using the resolution that won this round
+            # 1) rebuild lam_grid to the winning resolution, preserving current bounds
+            lam_grid = self._make_lam_grid_like(
+                lam_grid, int(best_local.get("n_lam", nlam_list[0]))
             )
+            # 2) then let your existing refresher recentre/narrow as before
+            lam_grid = self._refresh_lambda_grid(best_local["lam"], lam_grid, lam_floor)
+
+            # update spline grid as before
+            n_splines_grid = self._update_spline_grid(
+                best_local["n_splines"],
+                n_splines_grid,
+                observed_round=round_scores,
+            )
+            n_splines_grid = sorted({min(int(ns), ns_cap) for ns in n_splines_grid})
 
             step += 1
             if no_improve >= patience or step >= max_steps:
                 print("   🧯 Patience exhausted — stopping adaptive search.")
                 break
 
-        # after search convergence
+        # best_result is the dict from the top of `round_scores` after sorting by "score"
         self.best_ = _TuneResult(
             n_splines=int(best_result["n_splines"]),
             lam=float(best_result["lam"]),
             score=float(best_result["score"]),
+            final_score=float(best_result.get("score", float("nan"))),
+            rmse_val=float(best_result.get("base_score", float("nan"))),
+            interval_score=float(best_result.get("penalty", float("nan"))),
+            models=dict(
+                best_result.get("models", {})
+            ),  # carry the winning models (no refit)
         )
-        self.best_.rmse_val = float(best_result.get("base_score", float("nan")))
-        self.best_.interval_score = float(best_result.get("penalty", float("nan")))
-        self.best_.final_score = float(best_result.get("score", float("nan")))
-        self.best_.models = dict(
-            best_result.get("models", {})
-        )  # <— attach exact models
 
-        # --- Refit models for the selected (n_splines, lam) and attach them to best_ ---
-        models = {}
-        for e in self.expectiles:
-            res = self._fit_one_cycle(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                w_train=w_train,
-                w_val=w_val,
-                n_splines=int(best_result["n_splines"]),
-                lam=float(best_result["lam"]),
-                expectile=float(e),
-            )
-            # If a candidate model failed (None), keep flow but mark unusable
-            if res["model"] is None:
-                self._log(f"[WARN] Refit produced None model for expectile={e}")
-            models[e] = res["model"]
-
-        # Store on the result object for downstream prediction code
-        self.best_.models = models
-
+        # Optional: log effective splines if present
+        best_keff = int(best_result.get("k_eff", self.best_.n_splines))
         duration = time.time() - start
         print(
-            f"🌟 Best config: n_splines={self.best_.n_splines}, λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n"
+            f"🌟 Best config: n_splines={self.best_.n_splines} (k_eff={best_keff}), "
+            f"λ={self.best_.lam:.4f} (score={self.best_.score:.4f}) after {duration:.1f}s\n"
         )
-
-        # ------------ Refit final models for all expectiles ---------------
-        final_models = {}
-        for e in self.expectiles:
-            res = self._fit_one_cycle(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                w_train=w_train,
-                w_val=w_val,
-                n_splines=self.best_.n_splines,
-                lam=self.best_.lam,
-                expectile=e,
-            )
-            if res["model"] is None or not np.isfinite(res["score"]):
-                raise RuntimeError(
-                    f"Final refit failed for expectile {e} with the chosen (n_splines, λ)."
-                )
-            final_models[e] = res["model"]
-
-        self.best_.models = final_models
-
         return self.best_
 
     def _fit_one_cycle(
@@ -876,14 +1168,15 @@ class ParamSearchCV:
         lam=None,
         expectile=0.5,
     ):
-        """Fit one ExpectileGAM and return {"expectile", "model", "score"} for selection."""
+        """
+        Fit one ExpectileGAM and return {"expectile", "model", "score"} for selection.
+        """
 
         # -------------------- config knobs (single place to flip) --------------------
         USE_LOG_RMSE = True  # True: Huberized log-RMSE; False: Huberized linear-RMSE
         USE_EDF_PENALTY = (
             False  # keep False unless you explicitly want extra complexity push
         )
-        # -----------------------------------------------------------------------------
 
         # --- weight safety (train) ---
         if w_train is not None:
@@ -891,7 +1184,7 @@ class ParamSearchCV:
             w_train = np.nan_to_num(w_train, nan=1.0, posinf=3.0, neginf=1e-6)
             w_train[w_train <= 0] = 1e-6
 
-        # --- feature scaling (stable λ across price ranges) ---
+        # --- feature scaling on the single feature used by GAM (col 0) ---
         x_tr = X_train[:, 0] if X_train.ndim == 2 else X_train
         x_val = X_val[:, 0] if X_val.ndim == 2 else X_val
 
@@ -902,44 +1195,37 @@ class ParamSearchCV:
         x_tr_s = (x_tr - x_min) / scale
         x_val_s = (x_val - x_min) / scale
 
-        # use 2D arrays for GAM
+        # pygam default model is 1 feature → make 2D with a single column
         Xtr_s = x_tr_s.reshape(-1, 1)
         Xval_s = x_val_s.reshape(-1, 1)
 
-        # --- adaptive spline cap based on support occupancy ---
+        # --- support occupancy / cap computed on the same scaled feature ---
         n_obs = len(Xtr_s)
         n_bins = int(np.clip(np.sqrt(max(n_obs, 1)), 10, 50))
-        hist, _ = np.histogram(x_tr_s, bins=n_bins)
+        hist, _ = np.histogram(Xtr_s[:, 0], bins=n_bins)
+        eff_bins = int(np.sum(hist > 0))
 
-        eff_bins = int(np.sum(hist > 0))  # any occupied bin counts
-        # a touch tighter than //2: fewer high-freq modes in sparse tails
         n_splines_cap = max(6, min(int(eff_bins // 3 + 5), int(0.10 * n_obs)))
         k_eff = int(min(int(n_splines or 20), n_splines_cap))
-        self._log(
-            f"[DBG SplineCap] n_obs={n_obs} n_bins={n_bins} eff_bins={eff_bins} cap={n_splines_cap} ns_cand={n_splines} k_eff={k_eff} lam_eff={lam if lam is not None else np.nan}"
-        )
 
-        # --- λ: honor what the search passed (no extra floor here) ---
         lam_eff = float(lam if lam is not None else 1e-6)
 
-        # debug: make flow explicit
-        self._log(
-            f"[DBG SplineCap] n_obs={n_obs} n_bins={n_bins} eff_bins={eff_bins} "
-            f"cap={n_splines_cap} ns_cand={n_splines} k_eff={k_eff} lam_eff={lam_eff:.6g} e={expectile}"
-        )
-
-        # --- fit ---
+        # --- fit & predict on the SAME 1-D representation ---
         model = ExpectileGAM(expectile=float(expectile), n_splines=k_eff, lam=lam_eff)
         try:
-            model.fit(X_train, y_train, weights=w_train)
+            model.fit(Xtr_s, y_train, weights=w_train)
         except Exception as e:
-            # cleanly reject unstable candidates
             if isinstance(e, np.linalg.LinAlgError) or "SVD did not converge" in str(e):
                 return {"expectile": expectile, "model": None, "score": np.inf}
             raise
 
-        # --- predict on validation (business rule: nonnegative) ---
-        preds_val = np.maximum(model.predict(X_val), 0.0)
+        # stash scaling so evaluator can reproduce the exact input representation
+        model._scaled_first_col = True
+        model._x_min = x_min
+        model._x_scale = scale
+        # pygam sets n_features_ during fit; it will be 1 here
+
+        preds_val = np.maximum(model.predict(Xval_s), 0.0)
 
         # --- Huberized RMSE with fold-driven scale (automatic) ---
         eps = 1e-6
@@ -969,14 +1255,7 @@ class ParamSearchCV:
             except Exception:
                 pass
 
-        # debug (useful once; comment out later)
-        self._log(
-            f"[DBG RMSE] metric={'log' if USE_LOG_RMSE else 'lin'} "
-            f"sigma={sigma_hat:.4g} c={c:.4g} rmse={rmse:.4g}"
-            f"{' (edf penalty on)' if USE_EDF_PENALTY else ''}"
-        )
-
-        return {"expectile": expectile, "model": model, "score": rmse}
+        return {"expectile": expectile, "model": model, "score": rmse, "k_eff": k_eff}
 
 
 class GAMModeler:
@@ -987,8 +1266,24 @@ class GAMModeler:
     - transforms X_pred via param_search.transform() and predicts
     """
 
-    def __init__(self, param_search: ParamSearchCV):
-        self.param_search = param_search
+    EXPECTILES = (0.025, 0.5, 0.975)
+
+    def __init__(
+        self,
+        feature_cols: Iterable[str] = ("price",),
+        base_gam_kwargs: Optional[dict] = None,
+        per_expectile_kwargs: Optional[Dict[float, dict]] = None,
+    ):
+        """
+        Args:
+            feature_cols: columns used for X.
+            base_gam_kwargs: default kwargs for ExpectileGAM (lam, n_splines, etc.).
+            per_expectile_kwargs: dict mapping expectile -> kwargs to override base.
+        """
+        self.feature_cols = list(feature_cols)
+        self.base_gam_kwargs = base_gam_kwargs or {}
+        self.per_expectile_kwargs = per_expectile_kwargs or {}
+        self.models: Dict[float, ExpectileGAM] = {}
 
     def _log(self, msg: str):
         """Timestamped console log for debugging."""
@@ -1003,81 +1298,145 @@ class GAMModeler:
             df[c] = df[c].astype("string")
         return df
 
-    def fit_predict_expectiles(
-        self, X_train, y_train, X_val, y_val, w_train=None, w_val=None, X_pred=None
-    ):
+    def _ensure_2d(self, X: np.ndarray) -> np.ndarray:
+        if X.ndim == 1:
+            return X.reshape(-1, 1)
+        return X
+
+    def _make_X(self, df_like: pd.DataFrame) -> np.ndarray:
         """
-        Fit expectile GAMs with validation and produce predictions.
-
-        Return
-            a structured dict:
-                {"params": ..., "metrics": ..., "predictions": {...}}
+        Build X from df_like using self.feature_cols, enforcing 2D shape.
         """
-        if X_pred is None:
-            X_pred = X_val
+        X = df_like[self.feature_cols].to_numpy()
+        return self._ensure_2d(X)
 
-        # ──────────────────────────── Fit model ────────────────────────────
-        best = self.param_search.fit(
-            X_train, y_train, X_val, y_val, w_train=w_train, w_val=w_val
-        )
+    def _assert_feature_match(self, model: ExpectileGAM, X: np.ndarray):
+        """
+        Guard that predict-time features match the model's fitted dimensionality.
+        """
+        m_expected = getattr(model, "statistics_", {}).get("m", None)
+        if m_expected is not None and X.shape[1] != m_expected:
+            raise ValueError(
+                f"Feature mismatch: predict has {X.shape[1]} features, "
+                f"but model expects {m_expected}."
+            )
 
-        preds = {}
-        for e, model in best.models.items():
-            try:
-                preds[f"units_pred_{e}"] = model.predict(X_pred)
-            except Exception as err:
-                self._log(f"[WARN] Prediction failed for expectile={e}: {err}")
-                preds[f"units_pred_{e}"] = np.full(len(X_pred), np.nan)
+    def _sanitize_prediction_rows(
+        self, df: pd.DataFrame, pred_cols: Iterable[str]
+    ) -> pd.DataFrame:
+        """
+        Drop rows with NaN price or NaN in any prediction columns (if present).
+        """
+        keep = pd.Series(True, index=df.index)
+        if "price" in df.columns:
+            keep &= df["price"].notna()
+        pred_cols = [c for c in pred_cols if c in df.columns]
+        if pred_cols:
+            keep &= df[pred_cols].notna().all(axis=1)
+        return df.loc[keep].copy()
 
-        # add revenue predictions if price column available
-        if isinstance(X_pred, pd.DataFrame) and "price" in X_pred.columns:
-            for e in best.models.keys():
-                preds[f"revenue_pred_{e}"] = (
-                    preds[f"units_pred_{e}"] * X_pred["price"].to_numpy()
-                )
+    def fit(
+        self,
+        train_df: pd.DataFrame,
+        y_train: pd.Series,
+        *,
+        expectiles: Iterable[float] = EXPECTILES,
+        verbose: bool = False,
+    ) -> "GAMModeler":
+        """
+        Fit ExpectileGAM models for each expectile in `expectiles`.
+        Attaches feature metadata for safe predict later.
+        """
+        X_train = self._make_X(train_df)
 
-        # ──────────────────────────── Collect metadata ────────────────────────────
-        metrics = {
-            "interval_score": getattr(best, "interval_score", None),
-            "rmse_val": getattr(best, "rmse_val", None),
-            "n_splines": getattr(best, "n_splines", None),
-            "lam": getattr(best, "lam", None),
-            "decay_rate": getattr(best, "decay_rate", None),
-            "final_score": getattr(best, "final_score", None),
-        }
+        self.models = {}
+        for q in expectiles:
+            kw = dict(self.base_gam_kwargs)
+            kw.update(self.per_expectile_kwargs.get(q, {}))
+            kw["expectile"] = q
 
-        params = {
-            "expectiles": self.param_search.expectiles,
-            "n_splines": best.n_splines,
-            "lam": best.lam,
-        }
+            if verbose:
+                print(f"[GAMModeler] Fitting ExpectileGAM(q={q}) with kwargs={kw}")
 
-        self._log(
-            f"[DBG GAMModeler] Using ParamSearchCV.best_ = {best}\n"
-            f"    Validation metrics: {metrics}\n"
-            f"    Prediction keys: {list(preds.keys())}"
-        )
+            model = ExpectileGAM(**kw).fit(X_train, y_train)
+            # remember feature metadata for safety at predict-time
+            model.feature_cols_ = list(self.feature_cols)
+            self.models[q] = model
 
-        print("\n" + "─" * 30 + " ✅ Generating Prediction Frames " + "─" * 30 + "\n")
+        return self
 
-        # ──────────────────────────── Return (flattened for pipeline compatibility) ────────────────────────────
-        result = {
-            "params": params,
-            "metrics": metrics,
-            "predictions": preds,
-        }
+    def predict_expectiles(
+        self,
+        df_like: pd.DataFrame,
+        *,
+        expectiles: Iterable[float] = EXPECTILES,
+    ) -> Dict[float, np.ndarray]:
+        """
+        Predict expectile values for rows in df_like.
+        Returns a dict: expectile -> np.ndarray
+        """
+        if not self.models:
+            raise RuntimeError("GAMModeler has no fitted models. Call fit() first.")
 
-        # ⚙️ Flatten the "predictions" dict into top-level keys
-        # so downstream code like _build_core_frames() still sees:
-        # ['units_pred_0.025', 'units_pred_0.5', 'units_pred_0.975', ...]
-        if "predictions" in result:
-            flat = dict(result)  # shallow copy to avoid side effects
-            preds_dict = result["predictions"]
-            for k, v in preds_dict.items():
-                flat[k] = v
-            result = flat
+        X_pred = self._make_X(df_like)
 
-        return result
+        out: Dict[float, np.ndarray] = {}
+        for q in expectiles:
+            model = self.models.get(q, None)
+            if model is None:
+                raise KeyError(f"No model fitted for expectile {q}.")
+            self._assert_feature_match(model, X_pred)
+            out[q] = model.predict(X_pred)
+        return out
+
+    def add_predictions_to_df(
+        self,
+        df_like: pd.DataFrame,
+        *,
+        write_units=True,
+        write_revenue=True,
+        price_col: str = "price",
+        expectiles: Iterable[float] = EXPECTILES,
+        inplace: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Adds units_pred_{q} columns (and revenue_pred_{q} if price exists) to a copy of df_like
+        by default (set inplace=True to modify in place).
+        """
+        df = df_like if inplace else df_like.copy()
+
+        preds = self.predict_expectiles(df, expectiles=expectiles)
+
+        # Units predictions
+        if write_units:
+            for q, yhat in preds.items():
+                df[f"units_pred_{q}"] = yhat
+
+        # Revenue predictions if we have prices
+        if write_revenue and (price_col in df.columns):
+            for q in expectiles:
+                units_col = f"units_pred_{q}"
+                if units_col in df.columns:
+                    df[f"revenue_pred_{q}"] = (
+                        df[price_col].astype(float) * df[units_col]
+                    )
+
+        return df
+
+    def sanitize_results_for_downstream(self, df_like: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convenience: clean a post-prediction frame before ranking/selection.
+        Removes rows with NaN price/preds if present.
+        """
+        pred_cols = [
+            "units_pred_0.025",
+            "units_pred_0.5",
+            "units_pred_0.975",
+            "revenue_pred_0.025",
+            "revenue_pred_0.5",
+            "revenue_pred_0.975",
+        ]
+        return self._sanitize_prediction_rows(df_like, pred_cols)
 
 
 class Optimizer:
@@ -1098,25 +1457,48 @@ class Optimizer:
                 "No prediction columns (units or revenue) found in all_gam_results."
             )
 
-        # compute weighted_pred
+        # compute weighted_pred (same logic; just make it numeric/finitized)
         if avg_col is not None:
-            max_ratio = df["ratio"].max() if "ratio" in df.columns else 1.0
-            confidence_weight = (
-                1 - (df["ratio"] / max_ratio) if "ratio" in df.columns else 0.5
-            )
+            if "ratio" in df.columns:
+                max_ratio = (
+                    float(df["ratio"].max()) if pd.notna(df["ratio"].max()) else 0.0
+                )
+                if max_ratio > 0:
+                    confidence_weight = 1.0 - (df["ratio"] / max_ratio)
+                else:
+                    confidence_weight = 0.5
+            else:
+                confidence_weight = 0.5
+            # clip & fill for safety
+            if not np.isscalar(confidence_weight):
+                confidence_weight = confidence_weight.clip(0.0, 1.0).fillna(0.5)
             df["weighted_pred"] = df[base_col] * confidence_weight + df[avg_col] * (
-                1 - confidence_weight
+                1.0 - confidence_weight
             )
         else:
             df["weighted_pred"] = df[base_col]
 
+        # ---- minimal sanitization: drop non-finite metrics per selection ----
+        base_metric = pd.to_numeric(df[base_col], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
+        df_base = df.loc[base_metric.notna()]
+
+        weighted_metric = pd.to_numeric(df["weighted_pred"], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
+        df_weighted = df.loc[weighted_metric.notna()]
+
         return {
-            "best_avg": DataEng.pick_best_by_group(df, "product", base_col),
-            "best_weighted": DataEng.pick_best_by_group(df, "product", "weighted_pred"),
+            "best_avg": DataEng.pick_best_by_group(df_base, "product", base_col),
+            "best_weighted": DataEng.pick_best_by_group(
+                df_weighted, "product", "weighted_pred"
+            ),
         }
 
 
 class PricingPipeline:
+
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
         self.pricing_df = pricing_df
@@ -1168,7 +1550,6 @@ class PricingPipeline:
     def _build_core_frames(self):
         """
         pipeline glue
-
         return
             dfs
         """
@@ -1208,7 +1589,7 @@ class PricingPipeline:
         # Drop rows that can’t be used
         ts = ts.dropna(subset=need_cols).reset_index(drop=True)
 
-        # Build matrices
+        # Build matrices (kept for debug/compat)
         X = ts[FEAT_COLS].to_numpy(dtype=float)
         y = ts[TARGET_COL].to_numpy(dtype=float)
         w = ts[WEIGHT_COL].to_numpy(dtype=float)
@@ -1244,26 +1625,24 @@ class PricingPipeline:
             sd[sd == 0] = 1.0
             X[:, idx] = (Z - mu) / sd
 
-        # --------------- Fit + Predict ---------------
-        print("\n\n" + 33 * "- " + " 🤖 Modeling & Prediction " + "- " * 33)
+        # ──────────────────────────────
+        # 🤖 Tuning with ParamSearchCV
+        # ──────────────────────────────
+        print("\n\n" + 35 * "- " + " 🤖 Modeling, Tuning & Prediction " + "- " * 35)
 
-        param_search = ParamSearchCV(
-            n_splines_grid=(16, 20, 24, 30),
-            loglam_range=(np.log(0.002), np.log(2.0)),
-            n_lam=7,
-            expectiles=(0.025, 0.5, 0.975),
-            alpha=0.10,
-            random_state=42,
-            verbose=False,
-        )
-        modeler = GAMModeler(param_search)
+        if "price" not in ts.columns:
+            raise ValueError(
+                "Expected 'price' column to exist for univariate GAM tuning."
+            )
 
-        # Split X, y, and w TOGETHER to keep perfect alignment
+        X_price = ts[["price"]].to_numpy(dtype=float)
+        y_all = y.copy()
+        w_all = w.copy()
+
         X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
-            X, y, w, test_size=0.20, random_state=42
+            X_price, y_all, w_all, test_size=0.20, random_state=42
         )
 
-        # Weight safety
         w_tr = np.clip(
             np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
@@ -1271,17 +1650,65 @@ class PricingPipeline:
             np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
 
-        # ---- Call modeler with the required arguments ----
-        res = modeler.fit_predict_expectiles(
+        param_search = ParamSearchCV(
+            n_splines_grid=sorted({9, 11, 13, 16, 20, 24, 30, 38}),
+            loglam_range=(np.log(1e-6), np.log(5.0)),
+            n_lam=(5, 7, 9, 11, 13, 15, 17, 19, 21),
+            expectiles=(0.025, 0.5, 0.975),
+            alpha=0.10,
+            random_state=42,
+            verbose=True,
+        )
+
+        # try several n_lam values inside ParamSearchCV
+        param_search.fit_with_nlam_candidates(
             X_train=X_tr,
             y_train=y_tr,
             X_val=X_val,
             y_val=y_val,
             w_train=w_tr,
             w_val=w_val,
-            X_pred=X,  # keep full-frame predictions for downstream assembly
+            n_lam_candidates=(5, 7, 9, 11, 13),
         )
-        print("\n" + "─" * 30 + " ✅ Generating Prediction Frames " + "─" * 30 + "\n")
+
+        # read results from the instance
+        best = getattr(param_search, "best_", None)
+        best_lam = float(
+            getattr(best, "lam", np.exp(np.mean(param_search.loglam_range)))
+        )
+        best_ns = int(
+            getattr(
+                best,
+                "n_splines",
+                sorted(param_search.n_splines_grid)[
+                    len(param_search.n_splines_grid) // 2
+                ],
+            )
+        )
+        metrics = getattr(param_search, "best_metrics_", None)
+
+        if metrics is not None:
+            print(f"    Validation metrics: {metrics}")
+
+        # Use the EXACT tuned params downstream (no drift)
+        modeler = GAMModeler(
+            feature_cols=["price"],
+            base_gam_kwargs={"lam": best_lam, "n_splines": best_ns},
+        )
+
+        # Fit on ALL data (using the aligned DataFrame for feature selection)
+        modeler.fit(
+            train_df=ts[modeler.feature_cols], y_train=ts[TARGET_COL], verbose=True
+        )
+
+        print(
+            "\n"
+            + " " * 51
+            + "─" * 15
+            + " ✅ Generating Prediction Frames "
+            + "-" * 15
+            + "\n"
+        )
 
         # --------------- Results Assembly ---------------
         all_gam_results = (
@@ -1293,17 +1720,15 @@ class PricingPipeline:
         # --- Local support: observed neighbors near each predicted price ---
         base_df = getattr(self, "pricing_df", None)
         if (
-            base_df is None
+            (base_df is None)
             and hasattr(self, "engineer")
             and hasattr(self.engineer, "pricing_df")
         ):
             base_df = self.engineer.pricing_df
 
         all_gam_results["support_count"] = 0
-
         for prod_key in all_gam_results["product"].dropna().unique():
             g_pred = all_gam_results.loc[all_gam_results["product"] == prod_key]
-
             if base_df is not None and {"product", "price"}.issubset(base_df.columns):
                 obs_prices = base_df.loc[
                     base_df["product"].astype(str) == str(prod_key), "price"
@@ -1320,12 +1745,10 @@ class PricingPipeline:
                 else max(0.25, np.nanstd(obs_prices) / 25.0)
             )
             win = 1.25 * step
-
             P_pred = g_pred["price"].to_numpy()
             supp = np.array(
                 [(np.abs(obs_prices - p) <= win).sum() for p in P_pred], dtype=int
             )
-
             all_gam_results.loc[g_pred.index, "support_count"] = supp
 
         all_gam_results["support_count"] = (
@@ -1333,26 +1756,28 @@ class PricingPipeline:
         )
 
         # ------------------------------------------------------------------------------------------
+        # Add unit + revenue predictions using the tuned modeler
+        all_gam_results = modeler.add_predictions_to_df(
+            all_gam_results,
+            write_units=True,
+            write_revenue=True,
+            price_col="price",
+            inplace=False,
+        )
 
-        # Get predictions flexibly
-        res_preds = res.get("predictions", res.get("pred", {}))
-        if not res_preds:
-            raise ValueError(
-                f"[GAMModeler] No predictions found. Available keys: {list(res.keys())}"
-            )
-
-        print(f"✨ Predictions added: {list(res_preds.keys())}")
-
-        # Add unit + revenue predictions
-        for k, arr in res_preds.items():
-            if k.startswith("units_pred_"):
-                all_gam_results[k] = np.asarray(arr, dtype=float)
-                all_gam_results[k] = np.maximum(arr, 0.0)  # <-- hard floor at 0
-
-                rev_key = k.replace("units_", "revenue_")
-                all_gam_results[rev_key] = (
-                    all_gam_results["price"].to_numpy() * all_gam_results[k]
+        # Clamp negative unit predictions to 0 for safety (recompute revenue accordingly)
+        for q in (0.025, 0.5, 0.975):
+            ucol = f"units_pred_{q}"
+            rcol = f"revenue_pred_{q}"
+            if ucol in all_gam_results.columns:
+                all_gam_results[ucol] = np.maximum(
+                    all_gam_results[ucol].to_numpy(), 0.0
                 )
+                if rcol in all_gam_results.columns:
+                    all_gam_results[rcol] = (
+                        all_gam_results["price"].to_numpy()
+                        * all_gam_results[ucol].to_numpy()
+                    )
 
         # Sanity check
         pred_cols = [
@@ -1362,8 +1787,7 @@ class PricingPipeline:
         ]
         if not pred_cols:
             raise ValueError(
-                f"[_build_core_frames] Prediction assembly failed. Found keys={list(res_preds.keys())}, "
-                f"DataFrame cols={list(all_gam_results.columns)}"
+                f"[_build_core_frames] Prediction assembly failed. DataFrame cols={list(all_gam_results.columns)}"
             )
 
         # deal discount passthrough + actual revenue
@@ -1383,38 +1807,20 @@ class PricingPipeline:
             * np.asarray(topsellers["shipped_units"], dtype=float)
         )
 
+        # Optional: sanitize rows for downstream (drops NaN price/preds)
+        all_gam_results = modeler.sanitize_results_for_downstream(all_gam_results)
+
         print(
             "\n"
             + 32 * "- "
             + " 🎯 Pipeline Complete at "
             + datetime.now().strftime("%H:%M:%S")
+            + " "
             + 32 * "- "
             + "\n"
         )
+
         return topsellers, elasticity_df, all_gam_results
-
-        """
-        Run Optimizer and ensure required cols are present.
-        """
-        bests = Optimizer.run(all_gam_results)
-        best_avg = bests["best_avg"].copy()
-
-        if "asin" not in best_avg.columns:
-            pk_map = topsellers[["product", "asin"]].drop_duplicates()
-            best_avg = best_avg.merge(pk_map, on="product", how="left")
-
-        if "revenue_actual" not in best_avg.columns:
-            if {"price", "shipped_units"}.issubset(best_avg.columns):
-                best_avg["revenue_actual"] = (
-                    best_avg["price"] * best_avg["shipped_units"]
-                )
-            else:
-                ra = all_gam_results[
-                    ["product", "price", "revenue_actual"]
-                ].drop_duplicates()
-                best_avg = best_avg.merge(ra, on=["product", "price"], how="left")
-
-        return best_avg
 
     def _build_best50(self, all_gam_results):
         """Pick best P50 revenue row per product, but only if support is sufficient."""

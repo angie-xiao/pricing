@@ -1,6 +1,6 @@
 """
-oct 13
--
+oct 14
+- coarse + zoom search preliminarily working but needs more fine tuning
 -------
 
 1. need to be more thoughtful about the occurrence of "infrequent" prices
@@ -11,13 +11,14 @@ oct 13
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
-from typing import Iterable, Dict, Optional
+from typing import Callable, Optional, List, Dict, Tuple, Iterable
 import itertools
 import math
 import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import logging
 
 # viz
 # import seaborn as sns
@@ -363,362 +364,157 @@ class Weighting:
     #     return rarity.astype(float, copy=False)
 
 
-class _TuneResult:
-    def __init__(self, lam=None, n_splines=None, score=float("inf")):
-        self.lam = lam
-        self.n_splines = n_splines
-        self.score = score
-
-
 class ParamSearchCV:
     """
-    Adaptive (n_splines, λ) tuner with:
-      - λ floor expansion (prevents 'hugging the floor'),
-      - periodic n_splines re-probe when floor-hugging persists,
-      - golden-section refinement on log10(λ).
-    Expects a scorer or falls back to MAE on validation.
+    Coarse→zoom search over λ for each n_splines candidate using a single objective:
+      objective(ns: int, lam: float) -> float   # lower is better
     """
 
     def __init__(
         self,
-        n_splines_grid=(11, 14, 17),
-        n_lam=9,
-        lam_span_decades=2.6,  # ~ 10**2.6 ≈ 400× span
-        lam_floor_init=1.218e-4,  # observed floor
-        ns_cap=None,  # will default below based on data hints
-        patience=30,
-        tol_rel=1e-3,  # relative tolerance on score improvements
-        expectile_center=0.5,  # tune at the median expectile
-        scorer=None,  # callable(model, X_val, y_val, w_val) -> lower is better
-        random_state=None,
-        verbose=True,
+        *,
+        n_splines_grid: Iterable[int] = (11, 14, 17),
+        lam_min: float = 1e-6,
+        lam_max: float = 1.0,
+        rounds: int = 3,
+        n_grid: int = 9,
+        zoom_factor: float = 5.0,
+        adapt_next_window: bool = True,
+        objective: Callable[[int, float], float],
+        logger_print: Optional[Callable[[str], None]] = None,
     ):
         self.n_splines_grid = tuple(int(x) for x in n_splines_grid)
-        self.n_lam = int(n_lam)
-        self.lam_span_decades = float(lam_span_decades)
-        self.lam_floor_init = float(lam_floor_init)
-        self.ns_cap = None if ns_cap is None else int(ns_cap)
-        self.patience = int(patience)
-        self.tol_rel = float(tol_rel)
-        self.expectile_center = float(expectile_center)
-        self.scorer = scorer
-        self.random_state = random_state
-        self.verbose = verbose
+        self.lam_min = float(lam_min)
+        self.lam_max = float(lam_max)
+        if self.lam_max <= self.lam_min:
+            raise ValueError("lam_max must be > lam_min")
+        self.rounds = int(rounds)
+        self.n_grid = int(n_grid)
+        self.zoom_factor = float(zoom_factor)
+        self.adapt_next_window = bool(adapt_next_window)
+        self.objective = objective  # <-- the only function we need
+        self._log = logger_print if logger_print is not None else (lambda s: None)
 
-        self.best_ = None
-        self.history_ = []
-        self._cache = {}
+        self.best_ns_: Optional[int] = None
+        self.best_lam_: Optional[float] = None
+        self.best_val_loss_: Optional[float] = None
+        self.search_history_: List[Dict] = []
 
-        # backup
-        self.n_splines_grid = tuple(int(x) for x in n_splines_grid)
-        self.ns_grid = self.n_splines_grid  # ← alias so both names work
 
-    # ---------- utilities ----------
-    def _log(self, *a):
-        if self.verbose:
-            print(*a)
+    def fit(self) -> "ParamSearchCV":
+        lam_lo, lam_hi = float(self.lam_min), float(self.lam_max)
+        history_all: List[Dict] = []
+        best_ns = best_lam = None
+        best_loss = None
 
-    def _score_tuple(self, ns, lam, X_tr, y_tr, w_tr, X_va, y_va, w_va):
-        """
-        Fit one ExpectileGAM for (ns, lam) and return the validation score.
-        Any numerical failure (e.g., non-PD matrix) yields +inf so the combo is ignored.
-        """
-        # clamp inputs to safe ranges
-        ns = int(
-            max(
-                6,
-                min(
-                    int(ns),
-                    self.ns_cap if self.ns_cap is not None else int(ns),
-                    X_tr.shape[0] - 2,
-                ),
+        for ns in self.n_splines_grid:
+            self._log(f"[CZ] ns={ns} | λ-window=({self._fmt(lam_lo)}, {self._fmt(lam_hi)}) | rounds={self.rounds} n_grid={self.n_grid}")
+
+            def _eval_with_log(lam: float) -> float:
+                lam = float(lam)
+                loss = float(self.objective(int(ns), lam))
+                self._log(f"[CZ]   eval ns={ns} λ={self._fmt(lam)} → loss={self._fmt(loss)}")
+                return loss
+
+            b_lam, b_loss, hist = self._search_lambda_zoom(
+                evaluate=_eval_with_log,
+                lam_min=lam_lo, lam_max=lam_hi,
+                rounds=self.rounds, n_grid=self.n_grid, zoom_factor=self.zoom_factor,
             )
-        )
-        lam = float(max(lam, 1e-8))
 
-        key = (ns, lam)
-        if key in self._cache:
-            return self._cache[key]
+            for row in hist:
+                row["ns"] = int(ns)
+            history_all.extend(hist)
 
-        from pygam import ExpectileGAM
+            if best_loss is None or b_loss < best_loss:
+                best_ns, best_lam, best_loss = int(ns), float(b_lam), float(b_loss)
 
+            if self.adapt_next_window:
+                lam_lo, lam_hi = self._zoom_bounds_around(
+                    best_lam,
+                    factor=max(3.0, self.zoom_factor * 1.6),
+                    lo_floor=self.lam_min / 10.0,
+                    hi_ceiling=self.lam_max * 10.0,
+                )
+
+        self.best_ns_, self.best_lam_, self.best_val_loss_ = best_ns, best_lam, best_loss
+        self.search_history_ = history_all
+        self._log(f"[CZ] best ns={self.best_ns_} | best λ={self._fmt(self.best_lam_)} | val_loss={self._fmt(self.best_val_loss_)}")
+        return self
+
+    # ---------- internals ----------
+    @staticmethod
+    def _fmt(x, nd=4):
         try:
-            model = ExpectileGAM(expectile=self.expectile_center, lam=lam, n_splines=ns)
-            model.fit(X_tr, y_tr, weights=w_tr)
-
-            if self.scorer is not None:
-                s = float(self.scorer(model, X_va, y_va, w_va))
-            else:
-                pred = model.predict(X_va)
-                s = float(np.mean(np.abs(pred - y_va)))  # MAE
-
+            if x is None:
+                return "NA"
+            if isinstance(x, (int, float)):
+                if math.isnan(x) or math.isinf(x):
+                    return str(x)
+                return f"{x:.{nd}g}"
+            return str(x)
         except Exception:
-            # any fitting failure → treat as very bad so tuner avoids it
-            s = float("inf")
+            return str(x)
 
-        self._cache[key] = s
-        return s
+    @staticmethod
+    def _logspace(lo: float, hi: float, n: int) -> np.ndarray:
+        lo = max(lo, 1e-12)
+        hi = max(hi, lo * (1 + 1e-12))
+        return np.logspace(math.log10(lo), math.log10(hi), int(max(2, n)))
 
-    def _logspace10(self, lam_min, lam_max, n):
-        a, b = math.log10(lam_min), math.log10(lam_max)
-        # include endpoints
-        return np.power(10.0, np.linspace(a, b, int(n))).tolist()
+    @staticmethod
+    def _zoom_bounds_around(
+        best: float,
+        *,
+        factor: float = 5.0,
+        lo_floor: float = 1e-8,
+        hi_ceiling: float = 1e8,
+    ) -> Tuple[float, float]:
+        best = float(max(best, lo_floor))
+        lo = max(best / float(factor), lo_floor)
+        hi = min(best * float(factor), hi_ceiling)
+        if not (lo < hi):
+            eps = 1e-6
+            lo = max(best * (1 - eps), lo_floor)
+            hi = min(best * (1 + eps), hi_ceiling)
+        return lo, hi
 
-    def _symmetric_log_grid(self, center, width_decades, n):
-        mid = math.log10(center)
-        a = mid - width_decades / 2.0
-        b = mid + width_decades / 2.0
-        return np.power(10.0, np.linspace(a, b, int(n))).tolist()
-
-    def _probe_ns_around(self, best_ns, cap):
-        base = int(best_ns)
-        cand = {base}
-        for d in (2, 4, 6):
-            if base + d <= cap:
-                cand.add(base + d)
-            if base - d >= 6:
-                cand.add(base - d)
-        return sorted(cand)
-
-    def _golden_section_log10(self, f, a_log10, b_log10, n_eval=8):
-        phi = (1 + 5**0.5) / 2
-        invphi = 1 / phi
-        c = b_log10 - invphi * (b_log10 - a_log10)
-        d = a_log10 + invphi * (b_log10 - a_log10)
-        fc, fd = f(c), f(d)
-        for _ in range(max(2, int(n_eval)) - 2):
-            if fc < fd:
-                b_log10, d, fd = d, c, fc
-                c = b_log10 - invphi * (b_log10 - a_log10)
-                fc = f(c)
-            else:
-                a_log10, c, fc = c, d, fd
-                d = a_log10 + invphi * (b_log10 - a_log10)
-                fd = f(d)
-        return (a_log10 + b_log10) / 2.0
-
-    def fit_with_nlam_candidates(
+    def _search_lambda_zoom(
         self,
         *,
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        w_train=None,
-        w_val=None,
-        n_lam_candidates=(5, 7, 9, 11, 13),
-        eff_bins=None,
-    ):
-        """
-        Try several n_lam values on THIS instance and keep the best result in self.best_.
-        Returns self.
-        """
-        best_snapshot = None
-        best_score = float("inf")
-        orig_n_lam = self.n_lam
+        evaluate: Callable[[float], float],
+        lam_min: float,
+        lam_max: float,
+        rounds: int,
+        n_grid: int,
+        zoom_factor: float,
+    ) -> Tuple[float, float, List[Dict]]:
+        history: List[Dict] = []
+        lo, hi = float(lam_min), float(lam_max)
+        best_lam: Optional[float] = None
+        best_loss: Optional[float] = None
 
-        for nl in n_lam_candidates:
-            self.n_lam = int(nl)
-            # reset per-run state
-            try:
-                self.history_.clear()
-            except Exception:
-                self.history_ = []
-            try:
-                self._cache.clear()
-            except Exception:
-                self._cache = {}
+        for r in range(1, int(rounds) + 1):
+            grid = self._logspace(lo, hi, int(n_grid))
+            losses = []
+            for lam in grid:
+                lam_f = float(lam)
+                loss = float(evaluate(lam_f))
+                losses.append(loss)
+                history.append({"round": int(r), "lam": lam_f, "loss": loss})
 
-            # run the tuner with current n_lam
-            self.fit(
-                X_tr=X_train,
-                y_tr=y_train,
-                X_va=X_val,
-                y_va=y_val,
-                w_tr=w_train,
-                w_va=w_val,
-                eff_bins=eff_bins,
-            )
-
-            cand = getattr(self, "best_", None)
-            score = float(getattr(cand, "score", float("inf")))
-            if score < best_score:
-                best_score = score
-                best_snapshot = {
-                    "best_": cand,
-                    "history_": list(getattr(self, "history_", [])),
-                    "_cache": dict(getattr(self, "_cache", {})),
-                    "n_lam": self.n_lam,
-                }
-
-        # restore the best run (or original n_lam if none improved)
-        if best_snapshot is not None:
-            self.best_ = best_snapshot["best_"]
-            self.history_ = best_snapshot["history_"]
-            self._cache = best_snapshot["_cache"]
-            self.n_lam = best_snapshot["n_lam"]
-        else:
-            self.n_lam = orig_n_lam
-
-        return self
-
-    # ---------- main entry ----------
-    def fit(self, X_tr, y_tr, X_va, y_va, w_tr=None, w_va=None, eff_bins=None):
-        """
-        Returns self with self.best_ set to a _TuneResult.
-        """
-        # default ns_cap if not provided
-        if self.ns_cap is None:
-            if eff_bins is not None:
-                self.ns_cap = int(min(max(25, int(eff_bins)), 40))
-            else:
-                self.ns_cap = 25
-
-        # ensure n_splines_grid reaches toward the cap
-        base_grid = sorted(
-            set(
-                list(self.n_splines_grid)
-                + [min(self.ns_cap, max(self.n_splines_grid) + 4), self.ns_cap]
-            )
-        )
-        n_lam = max(5, int(self.n_lam))
-
-        lam_floor = max(self.lam_floor_init, 1e-12)
-        span_dec = float(self.lam_span_decades)
-
-        # clamp span to a sane range and make sure it's finite/positive
-        if not np.isfinite(span_dec) or span_dec <= 0:
-            span_dec = 2.6
-        span_dec = min(span_dec, 12.0)  # cap to avoid overflow
-
-        # safe ceiling computation
-        try:
-            factor = 10.0**span_dec
-        except OverflowError:
-            factor = 1e12  # fallback cap
-
-        lam_ceiling = lam_floor * factor
-        if not np.isfinite(lam_ceiling) or lam_ceiling <= lam_floor:
-            lam_ceiling = lam_floor * 1e6  # last-resort guard
-
-        best = _TuneResult()  # (lam=None, ns=None, score=inf)
-        no_improve = 0
-        floor_hugging_streak = 0
-        base_score_for_tol = None
-
-        self._log("  🔧 Tuning n_lam candidates:", (n_lam,))
-
-        for round_idx in range(1, self.patience + 1):
-            lam_candidates = self._logspace10(lam_floor, lam_ceiling, n_lam)
-
-            ns_list = base_grid if best.n_splines is None else [best.n_splines]
-            improved = False
+            idx = int(np.argmin(losses))
+            cand, cand_loss = float(grid[idx]), float(losses[idx])
+            if best_loss is None or cand_loss < best_loss:
+                best_lam, best_loss = cand, cand_loss
 
             self._log(
-                f"🔍 Round {round_idx}:   🧭 Tuning λ with n_lam={n_lam} | floor={lam_floor:.6g} ceil={lam_ceiling:.6g}"
+                f"[CZ] r{r}: window=({self._fmt(lo)}, {self._fmt(hi)}) → "
+                f"best λ={self._fmt(best_lam)} | loss={self._fmt(best_loss)}"
             )
+            lo, hi = self._zoom_bounds_around(best_lam, factor=float(zoom_factor))
 
-            for ns in ns_list:
-                for lam in lam_candidates:
-                    s = self._score_tuple(ns, lam, X_tr, y_tr, w_tr, X_va, y_va, w_va)
-                    self.history_.append((round_idx, ns, lam, s))
-                    if s < best.score:
-                        best = _TuneResult(lam=lam, n_splines=ns, score=s)
-                        improved = True
-                        if base_score_for_tol is None:
-                            base_score_for_tol = s
-                        self._log(
-                            f"  🌟 New best: n_splines={ns}, λ={lam:.4g} (score={s:.4f})"
-                        )
-
-            if improved:
-                no_improve = 0
-                floor_hugging_streak = 0
-            else:
-                no_improve += 1
-
-            # detect hugging the floor (lowest candidate repeatedly used with no gains)
-            hugging = min(lam_candidates) <= lam_floor * 1.0001
-            if hugging and not improved:
-                floor_hugging_streak += 1
-            else:
-                floor_hugging_streak = 0
-
-            # Strategy 1: expand floor & span when hugging persists
-            if floor_hugging_streak >= 2:
-
-                # old_floor = lam_floor
-                lam_floor = max(lam_floor * 0.2, 1e-12)
-
-                # expand but clamp span to avoid overflow
-                span_dec = min(span_dec * 1.2, 12.0)
-
-                try:
-                    factor = 10.0**span_dec
-                except OverflowError:
-                    factor = 1e12
-
-                lam_ceiling = lam_floor * factor
-                if not np.isfinite(lam_ceiling) or lam_ceiling <= lam_floor:
-                    lam_ceiling = lam_floor * 1e6
-
-                # Strategy 2: re-probe n_splines around best
-                probe_improved = False
-                if best.n_splines is None:
-                    center_ns = base_grid[len(base_grid) // 2]
-                else:
-                    center_ns = best.n_splines
-
-                for ns2 in self._probe_ns_around(center_ns, self.ns_cap):
-                    s2 = self._score_tuple(
-                        ns2, best.lam, X_tr, y_tr, w_tr, X_va, y_va, w_va
-                    )
-                    if s2 < best.score * (1 - self.tol_rel):
-                        self._log(
-                            f"  🔧 ns re-probe improved: {best.n_splines}→{ns2} @ λ={best.lam:.4g} | {best.score:.4f}→{s2:.4f}"
-                        )
-                        best = _TuneResult(lam=best.lam, n_splines=ns2, score=s2)
-                        probe_improved = True
-
-                if probe_improved:
-                    no_improve = 0
-                    # next round will sweep λ around this improved ns
-                    continue
-
-            # plateau → finish with golden-section on log-λ
-            if no_improve >= self.patience // 2:
-                self._log(
-                    "  🧯 Plateau detected — finishing with golden-section on log10(λ)."
-                )
-                a = math.log10(max(best.lam / 10.0, 1e-9))
-                b = math.log10(best.lam * 3.0)
-
-                def f(loglam):
-                    lam = 10**loglam
-                    return self._score_tuple(
-                        best.n_splines, lam, X_tr, y_tr, w_tr, X_va, y_va, w_va
-                    )
-
-                best_loglam = self._golden_section_log10(f, a, b, n_eval=8)
-                lam_refined = 10**best_loglam
-                s_refined = self._score_tuple(
-                    best.n_splines, lam_refined, X_tr, y_tr, w_tr, X_va, y_va, w_va
-                )
-                if s_refined < best.score:
-                    best = _TuneResult(
-                        lam=lam_refined, n_splines=best.n_splines, score=s_refined
-                    )
-                break
-
-            if no_improve >= self.patience:
-                self._log("  🧯 Patience exhausted — stopping adaptive search.")
-                break
-
-        self.best_ = best
-        self._log(
-            f"🌟 Best config: n_splines={best.n_splines} (k_eff={best.n_splines}), λ={best.lam:.4g} (score={best.score:.4f})"
-        )
-        return self
+        return float(best_lam), float(best_loss), history
 
 
 class GAMModeler:
@@ -1023,28 +819,31 @@ class Optimizer:
 class PricingPipeline:
 
     def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        # expose a simple print-like callable
+        # self._log = logger.info
+        self._log = print
+
         self.engineer = DataEngineer(pricing_df, product_df, top_n)
         self.pricing_df = pricing_df
         self.product_df = product_df
 
-        # param search
+        # just store the kwargs; DO NOT .fit() here (context not set yet)
         if param_search_kwargs is None:
-            temp = ParamSearchCV()
             param_search_kwargs = {
-                "n_splines_grid": temp.n_splines_grid,
-                "n_lam": temp.n_lam,
-                "lam_span_decades": temp.lam_span_decades,
-                "lam_floor_init": temp.lam_floor_init,
-                "ns_cap": temp.ns_cap,
-                "patience": temp.patience,
-                "tol_rel": temp.tol_rel,
-                "expectile_center": temp.expectile_center,
-                "scorer": temp.scorer,
-                "random_state": temp.random_state,
-                "verbose": temp.verbose,
+                "n_splines_grid": (11, 14, 17, 21, 25, 32),
+                "lam_min": 1e-6,
+                "lam_max": 1.0,
+                "rounds": 3,
+                "n_grid": 9,
+                "zoom_factor": 5.0,
+                "adapt_next_window": True,
+                "objective": self.objective,  # bound method uses context set later
+                "logger_print": self._log,
             }
 
-        self.param_search = ParamSearchCV(**param_search_kwargs)
+        self.param_search_kwargs = param_search_kwargs  # stash for later use
 
     @classmethod
     def from_csv_folder(
@@ -1079,9 +878,10 @@ class PricingPipeline:
 
     def _build_core_frames(self):
         """
-        pipeline glue
-        return
-            dfs
+        pipeline glue. sets context, tune, refits.
+
+        return:
+            topsellers, elasticity_df, all_gam_results
         """
         print(
             "\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────"
@@ -1112,26 +912,24 @@ class PricingPipeline:
         need_cols = FEAT_COLS + [TARGET_COL, WEIGHT_COL]
         ts = topsellers[need_cols].copy()
 
-        # Ensure numerics (encoded cols should already be numeric; this is safety)
+        # Ensure numerics
         for c in FEAT_COLS + [TARGET_COL, WEIGHT_COL]:
             ts[c] = pd.to_numeric(ts[c], errors="coerce")
 
-        # Drop rows that can’t be used
+        # Drop unusable rows
         ts = ts.dropna(subset=need_cols).reset_index(drop=True)
 
-        # Build matrices (kept for debug/compat)
+        # Matrices
         X = ts[FEAT_COLS].to_numpy(dtype=float)
         y = ts[TARGET_COL].to_numpy(dtype=float)
         w = ts[WEIGHT_COL].to_numpy(dtype=float)
 
-        # Safety for downstream learners (no NaN/Inf/≤0 in weights)
+        # Weight sanitation
         w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
         w[w <= 0] = 1e-6
-
-        # Lightweight weight summary (debug)
-        w_med = float(np.nanmedian(w))
-        w_p95 = float(np.nanpercentile(w, 95))
-        print(f"⚖️  Weights ready | median={w_med:.3f} | p95={w_p95:.3f} | n={len(w):,}")
+        print(
+            f"⚖️  Weights ready | median={float(np.nanmedian(w)):.3f} | p95={float(np.nanpercentile(w,95)):.3f} | n={len(w):,}"
+        )
 
         # --------------- Elasticity diagnostic (best-effort) ---------------
         try:
@@ -1141,7 +939,7 @@ class PricingPipeline:
                 columns=["product", "ratio", "elasticity_score"]
             )
 
-        # ---- NUMERIC STABILIZATION (prevents ill-conditioned SVD) ----
+        # ---- NUMERIC STABILIZATION ----
         _cont = [
             c
             for c in ["price", "deal_discount_percent", "year", "month", "week"]
@@ -1173,6 +971,7 @@ class PricingPipeline:
             X_price, y_all, w_all, test_size=0.20, random_state=42
         )
 
+        # clip weights (train/val)
         w_tr = np.clip(
             np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
@@ -1180,96 +979,32 @@ class PricingPipeline:
             np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
 
-        # --- try a small grid of candidate settings; pick best on validation ---
-        candidates = {
-            # vary spline flexibility a bit around your current grid
-            "n_splines_grid": [
-                sorted({9, 11, 13, 16, 20, 24, 30, 38}),  # your current
-                [9, 11, 13, 15, 17, 21, 25, 32],  # slightly denser mid-range
-                [11, 14, 17, 21, 25, 32, 38],  # push upper side a touch
-            ],
-            # vary λ floor; keep same upper bound
-            "loglam_range": [
-                (np.log(1e-6), np.log(5.0)),
-                (np.log(1e-5), np.log(5.0)),
-                (np.log(1e-4), np.log(5.0)),
-            ],
-            # let the inner routine sweep a couple of n_lam tuples
-            "n_lam_candidates": [
-                (5, 7, 9, 11, 13),
-                (7, 9, 11, 13, 15),
-            ],
-        }
+        # ✅ set context for bound objective
+        self._set_tune_context(X_tr, X_val, y_tr, y_val, w_tr, w_val)
 
-        best_ps = None
-        best_score = float("inf")
+        # instantiate and run searcher using stored kwargs
+        ps = ParamSearchCV(
+            **{
+                **self.param_search_kwargs,
+                "objective": self.objective,  # ensure bound method is passed
+                "logger_print": self._log,
+            }
+        ).fit()
 
-        keys = list(candidates.keys())
-        for combo in itertools.product(*[candidates[k] for k in keys]):
+        # results
+        best_ns = ps.best_ns_
+        best_lam = ps.best_lam_
 
-            lam_min = 1e-6
-            lam_max = 5.0
-
-            ps = ParamSearchCV(
-                n_splines_grid=sorted({9, 11, 13, 16, 20, 24, 30, 38}),
-                n_lam=9,  # int here; you'll sweep others below
-                lam_floor_init=lam_min,  # from old loglam_range lower bound
-                lam_span_decades=np.log10(
-                    lam_max / lam_min
-                ),  # from old loglam_range span
-                random_state=42,
-                verbose=True,
-            )
-            ps.fit_with_nlam_candidates(
-                X_train=X_tr,
-                y_train=y_tr,
-                X_val=X_val,
-                y_val=y_val,
-                w_train=w_tr,
-                w_val=w_val,
-                n_lam_candidates=(5, 7, 9, 11, 13),
-            )
-
-            # prefer best_.score if your ParamSearchCV exposes it; otherwise skip if absent
-            score = float(getattr(getattr(ps, "best_", None), "score", np.inf))
-            if score < best_score:
-                best_ps, best_score = ps, score
-
-        # keep the winner for downstream as before
-        param_search = best_ps
-
-        # --- unchanged from here on ---
-        best = getattr(param_search, "best_", None)
-
-        best_lam = float(
-            getattr(
-                best,
-                "lam",
-                param_search.lam_floor_init
-                * (
-                    10.0 ** (param_search.lam_span_decades / 2.0)
-                ),  # geometric mid of the span
-            )
-        )
-
-        best_ns = int(
-            getattr(
-                best,
-                "n_splines",
-                sorted(param_search.ns_grid)[len(param_search.ns_grid) // 2],
-            )
-        )
-
-        metrics = getattr(param_search, "best_metrics_", None)
-        if metrics is not None:
-            print(f"    Validation metrics: {metrics}")
-
+        # final refit on FULL dataset with tuned params
         modeler = GAMModeler(
             feature_cols=["price"],
             base_gam_kwargs={"lam": best_lam, "n_splines": best_ns},
         )
         modeler.fit(
-            train_df=ts[modeler.feature_cols], y_train=ts[TARGET_COL], verbose=True
+            train_df=ts[modeler.feature_cols],
+            y_train=ts[TARGET_COL],
+            weights=w_all,  # keep consistent with tuning
+            verbose=True,
         )
 
         print(
@@ -1288,10 +1023,10 @@ class PricingPipeline:
             .reset_index(drop=True)
         )
 
-        # --- Local support: observed neighbors near each predicted price ---
+        # observed-support counts near each predicted price
         base_df = getattr(self, "pricing_df", None)
         if (
-            (base_df is None)
+            base_df is None
             and hasattr(self, "engineer")
             and hasattr(self.engineer, "pricing_df")
         ):
@@ -1326,8 +1061,7 @@ class PricingPipeline:
             all_gam_results["support_count"].fillna(0).astype(int)
         )
 
-        # ------------------------------------------------------------------------------------------
-        # Add unit + revenue predictions using the tuned modeler
+        # Predictions & revenue using tuned model
         all_gam_results = modeler.add_predictions_to_df(
             all_gam_results,
             write_units=True,
@@ -1336,7 +1070,7 @@ class PricingPipeline:
             inplace=False,
         )
 
-        # Clamp negative unit predictions to 0 for safety (recompute revenue accordingly)
+        # Clamp negative unit preds
         for q in (0.025, 0.5, 0.975):
             ucol = f"units_pred_{q}"
             rcol = f"revenue_pred_{q}"
@@ -1350,7 +1084,6 @@ class PricingPipeline:
                         * all_gam_results[ucol].to_numpy()
                     )
 
-        # Sanity check
         pred_cols = [
             c
             for c in all_gam_results.columns
@@ -1361,7 +1094,7 @@ class PricingPipeline:
                 f"[_build_core_frames] Prediction assembly failed. DataFrame cols={list(all_gam_results.columns)}"
             )
 
-        # deal discount passthrough + actual revenue
+        # passthrough + actuals
         all_gam_results["deal_discount_percent"] = (
             topsellers["deal_discount_percent"]
             .fillna(0)
@@ -1378,7 +1111,6 @@ class PricingPipeline:
             * np.asarray(topsellers["shipped_units"], dtype=float)
         )
 
-        # Optional: sanitize rows for downstream (drops NaN price/preds)
         all_gam_results = modeler.sanitize_results_for_downstream(all_gam_results)
 
         print(
@@ -1390,7 +1122,6 @@ class PricingPipeline:
             + 32 * "- "
             + "\n"
         )
-
         return topsellers, elasticity_df, all_gam_results
 
     def _build_best50(self, all_gam_results):
@@ -1636,6 +1367,122 @@ class PricingPipeline:
             ),  # Add model fit KPIs
         }
 
+    # ——— store split/weights for the bound objective ———
+    def _set_tune_context(self, X_tr, X_val, y_tr, y_val, w_tr=None, w_val=None):
+        self._tune_ctx = {
+            "X_tr": X_tr,
+            "X_val": X_val,
+            "y_tr": y_tr,
+            "y_val": y_val,
+            "w_tr": w_tr,
+            "w_val": w_val,
+        }
+
+    # ——— simple weighted MSE we’ll reuse ———
+    def _weighted_mse(self, y_true, y_pred, w=None) -> float:
+        y_true = np.asarray(y_true, float)
+        y_pred = np.asarray(y_pred, float)
+        if w is None:
+            return float(np.mean((y_true - y_pred) ** 2))
+        w = np.asarray(w, float)
+        w = np.clip(np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
+        return float(np.sum(w * (y_true - y_pred) ** 2) / np.sum(w))
+
+    # ——— bound objective(ns, lam) ———
+    def objective(self, ns: int, lam: float) -> float:
+        """
+        Validation loss for (ns, lam), aligned to REVENUE:
+        loss = weighted MSE( price_val * units_pred , price_val * units_true ) / scale^2
+        where scale = max(1, median(|revenue_true|)) for stability.
+        """ 
+        ctx = getattr(self, "_tune_ctx", None)
+        if ctx is None:
+            raise RuntimeError("Tuning context not set. Call _set_tune_context(...) before searching.")
+
+        X_tr, X_val = ctx["X_tr"], ctx["X_val"]
+        y_tr, y_val = ctx["y_tr"], ctx["y_val"]
+        w_tr, w_val = ctx.get("w_tr"), ctx.get("w_val")
+
+        df_tr  = pd.DataFrame(X_tr,  columns=["price"])
+        df_val = pd.DataFrame(X_val, columns=["price"])
+
+        model = GAMModeler(
+            feature_cols=["price"],
+            base_gam_kwargs={"lam": float(lam), "n_splines": int(ns)},
+        )
+        # TIP: if your GAMModeler supports focusing on median only, pass the flags here.
+        # (If not, _predict_units() fallback below will still choose the median-like output.)
+        model.fit(train_df=df_tr, y_train=y_tr, weights=w_tr, verbose=False)
+
+        # predict UNITS on the validation set (robust helper chooses median path)
+        units_hat = self._predict_units(model, df_val)  # shape (n,)
+        price_val = np.asarray(df_val["price"], float)
+        rev_hat   = price_val * np.asarray(units_hat, float)
+        rev_true  = price_val * np.asarray(y_val, float)
+
+        # weights & robust scale
+        if w_val is None:
+            w = np.ones_like(rev_true, dtype=float)
+        else:
+            w = np.asarray(w_val, float)
+            w = np.clip(np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
+
+        scale = float(np.median(np.abs(rev_true))) if rev_true.size else 1.0
+        if not np.isfinite(scale) or scale < 1.0:
+            scale = 1.0
+
+        se = (rev_true - rev_hat) ** 2
+        return float(np.sum(w * se) / np.sum(w)) / (scale ** 2)
+    
+    def _predict_units(self, model, df_val) -> np.ndarray:
+        """
+        Return a 1D float array of unit predictions for df_val.
+        Tries, in order:
+        - model.predict(df_val)
+        - model.predict_units(df_val)
+        - model.model.predict(df_val.values)
+        - fallback via add_predictions_to_df(...), reading a units_pred_* column
+        """
+        import numpy as np
+        import pandas as pd
+
+        # 1) direct predict on modeler
+        if hasattr(model, "predict"):
+            yhat = model.predict(df_val)
+            return np.asarray(yhat, dtype=float).ravel()
+
+        # 2) dedicated units predictor
+        if hasattr(model, "predict_units"):
+            yhat = model.predict_units(df_val)
+            return np.asarray(yhat, dtype=float).ravel()
+
+        # 3) predict on inner model (common in wrappers)
+        base = getattr(model, "model", None)
+        if base is not None and hasattr(base, "predict"):
+            # many estimators expect ndarray, not DataFrame
+            yhat = base.predict(getattr(df_val, "values", df_val))
+            return np.asarray(yhat, dtype=float).ravel()
+
+        # 4) robust fallback through add_predictions_to_df
+        if hasattr(model, "add_predictions_to_df"):
+            tmp = df_val.copy()
+            # ensure the required price column exists; your df_val already has "price"
+            out = model.add_predictions_to_df(
+                tmp, write_units=True, write_revenue=False, price_col="price", inplace=False
+            )
+            # pick a sensible central tendency column
+            for col in ("units_pred_0.5", "units_pred", "units_pred_mean"):
+                if col in out.columns:
+                    return np.asarray(out[col], dtype=float).ravel()
+            # last resort: first units_pred_* column
+            unit_cols = [c for c in out.columns if c.startswith("units_pred_")]
+            if unit_cols:
+                return np.asarray(out[unit_cols[0]], dtype=float).ravel()
+
+        raise AttributeError(
+            "GAMModeler does not expose a prediction path. "
+            "Expected one of: predict, predict_units, model.predict, or add_predictions_to_df."
+        )
 
 class viz:
     """
@@ -1942,16 +1789,16 @@ class viz:
         return fig
 
 
-if __name__ == "__main__":
-    pricing_df, product_df = pd.read_csv("data/pricing.csv"), pd.read_csv(
-        "data/products.csv"
-    )
+# if __name__ == "__main__":
+#     pricing_df, product_df = pd.read_csv("data/pricing.csv"), pd.read_csv(
+#         "data/products.csv"
+#     )
 
-    PricingPipeline(
-        pricing_df,
-        product_df,
-        top_n=10,
-    ).assemble_dashboard_frames()
+#     PricingPipeline(
+#         pricing_df,
+#         product_df,
+#         top_n=10,
+#     ).assemble_dashboard_frames()
 
 
 # all_gam_results = GAMModeler(

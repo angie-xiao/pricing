@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import os
 import pickle
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -17,7 +15,6 @@ import pandas as pd
 from dash import html
 import dash_bootstrap_components as dbc
 from dash.dash_table import FormatTemplate
-
 
 # =====================================================================
 #                        Constants / Styling
@@ -142,15 +139,15 @@ class Cache:
 
         if force_rebuild or not os.path.exists(cache_fp):
             from built_in_logic import PricingPipeline
+  
+
             frames = PricingPipeline.from_csv_folder(
                 base_dir,
-                data_folder,
-                pricing_file,
-                product_file,
-                top_n,
-                param_search_kwargs  # Pass the parameters
+                data_folder="data",
+                pricing_file="pricing.csv",
+                product_file="products.csv",
+                top_n=10,
             )
-            
             # Only save to cache if not forcing rebuild
             if not force_rebuild:
                 with open(cache_fp, "wb") as f:
@@ -166,8 +163,6 @@ class Cache:
 # =====================================================================
 #                         Data engineering 
 # =====================================================================
-
-
 class DataEng:
     @staticmethod
     def clean_cols(df: pd.DataFrame) -> pd.DataFrame:

@@ -12,13 +12,11 @@ oct 14
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Tuple, Iterable
-import itertools
 import math
 import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import logging
 
 # viz
 # import seaborn as sns
@@ -27,10 +25,13 @@ import plotly.graph_objects as go
 from dash_bootstrap_templates import load_figure_template
 
 # ML
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import root_mean_squared_error
-from sklearn.model_selection import train_test_split
-from pygam import ExpectileGAM, s, f
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.neighbors import KernelDensity, NearestNeighbors
+from sklearn.isotonic import IsotonicRegression
+from pygam import ExpectileGAM
+from pygam import PoissonGAM, s
+
 
 # local import
 from helpers import DataEng
@@ -340,38 +341,60 @@ class Weighting:
 
 
 class ParamSearchCV:
-    """
-    Fixed-grid search over (n_splines, λ) with a single scalar objective:
-        objective(ns: int, lam: float) -> float   # lower is better
-    Change the defaults below to adjust behavior globally.
-    """
-
     def __init__(
         self,
-        *,
-        n_splines_grid: Iterable[int] = (16, 24, 32),  # single place to edit
-        lam_min: float = 1e-3,  # single place to edit
-        lam_max: float = 50.0,  # single place to edit
-        n_grid: int = 9,  # single place to edit
-        objective: "Callable[[int, float], float]",
-        logger_print: "Optional[Callable[[str], None]]" = None,
+        n_splines_grid=None,
+        n_lam: int = 12,
+        lam_floor_init: float = 1e-4,
+        lam_span_decades: float = 5.0,  # lam_max = lam_floor_init * 10**lam_span_decades
+        random_state: int | None = 42,
+        verbose: bool = True,
+        objective=None,  # <-- closure: objective(ns, lam) -> float
+        logger_print=None,
+        **kwargs,
     ):
-        self.n_splines_grid = tuple(int(x) for x in n_splines_grid)
-        self.lam_min = float(lam_min)
-        self.lam_max = float(lam_max)
-        if not (self.lam_max > self.lam_min > 0):
-            raise ValueError("lam_max must be > lam_min > 0")
-        self.n_grid = int(n_grid)
-        if self.n_grid < 2:
-            raise ValueError("n_grid must be >= 2")
-        self.objective = objective  # the only function needed
-        self._log = logger_print if logger_print is not None else (lambda s: None)
 
-        # public results
-        self.best_ns_: "Optional[int]" = None
-        self.best_lam_: "Optional[float]" = None
-        self.best_val_loss_: "Optional[float]" = None
-        self.search_history_: "list[dict]" = []
+        noop = lambda *a, **k: None
+        self._log = logger_print or (print if verbose else noop)
+        self.objective = objective
+
+        # sane defaults; caller can override via arg
+        self.n_splines_grid = (
+            list(n_splines_grid)
+            if n_splines_grid is not None
+            else [8, 10, 12, 14, 17, 20, 24, 28, 32]
+        )
+        lam_min = float(lam_floor_init)
+        lam_max = lam_min * (10.0 ** float(lam_span_decades))
+        self.lam_grid = np.geomspace(lam_min, lam_max, int(n_lam))
+
+        self.random_state = random_state
+        self.verbose = verbose
+
+    def fit(self):
+        if self.objective is None:
+            raise RuntimeError("ParamSearchCV requires an objective(ns, lam).")
+
+        ns_grid, lam_grid = self.n_splines_grid, self.lam_grid
+        self._log(f"[DBG] ns-grid={ns_grid}")
+        self._log(
+            f"[DBG] λ-grid=[{lam_grid[0]:.2e} … {lam_grid[-1]:.2e}] (n={len(lam_grid)})"
+        )
+
+        best_loss, best_ns, best_lam = float("inf"), None, None
+        for ns in ns_grid:
+            for lam in lam_grid:
+                loss = float(self.objective(ns, lam))  # closure trains & scores
+                self._log(f"[CZ]   eval ns={ns} λ={lam:.6g} → loss={loss:.6f}")
+                if loss < best_loss:
+                    best_loss, best_ns, best_lam = loss, ns, lam
+
+        self.best_score_, self.best_ns_, self.best_lam_ = best_loss, best_ns, best_lam
+        self.best_params_ = {"n_splines": best_ns, "lam": best_lam}
+        self._log(
+            f"[TUNING] best ns={best_ns} | best λ={best_lam:.6g} | loss={best_loss:.6f}"
+        )
+        return self
 
     def _log(self, msg: str):
         """Timestamped console log for debugging."""
@@ -432,33 +455,6 @@ class ParamSearchCV:
 
         return float(best_lam), float(best_loss), history
 
-    def fit(self):
-
-        lam_grid = np.geomspace(self.lam_min, self.lam_max, num=self.n_grid)
-        best = {"n_splines": None, "lam": None, "loss": float("inf")}
-        self.search_history_.clear()
-
-        for ns in self.n_splines_grid:
-            self._log(
-                f"[CZ] ns={ns} | λ-grid=({lam_grid[0]:g} … {lam_grid[-1]:g}) | n_grid={self.n_grid}"
-            )
-            for lam in lam_grid:
-                loss = float(self.objective(int(ns), float(lam)))
-                self.search_history_.append(
-                    {"ns": int(ns), "lam": float(lam), "loss": loss}
-                )
-                self._log(f"[CZ]   eval ns={ns} λ={lam:g} → loss={loss:.3f}")
-                if loss < best["loss"]:
-                    best = {"n_splines": int(ns), "lam": float(lam), "loss": loss}
-
-        self.best_ns_ = best["n_splines"]
-        self.best_lam_ = best["lam"]
-        self.best_val_loss_ = best["loss"]
-        self._log(
-            f"[CZ] best ns={self.best_ns_} | best λ={self.best_lam_:g} | val_loss={self.best_val_loss_:.3f}"
-        )
-        return best
-
     # ---------- internals ----------
     @staticmethod
     def _fmt(x, nd=4):
@@ -482,78 +478,221 @@ class ParamSearchCV:
 
 class GAMModeler:
     """
-    Minimal GAM wrapper for univariate price → units with expectile bands.
-    Keep it tiny: fit(), predict_units(), add_predictions_to_df(), sanitize_results_for_downstream().
+    Fits three expectile GAMs (q=0.025, 0.50, 0.975) on price -> units.
+    - Non-negativity via softplus at prediction time (matches tuning loss).
+    - Optional monotonic constraint (units non-increasing in price).
     """
 
     def __init__(
-        self, feature_cols, base_gam_kwargs=None, expectiles=(0.025, 0.5, 0.975)
+        self,
+        feature_cols,
+        base_gam_kwargs=None,
+        logger_print=None,
+        # NEW: light-touch controls (no hand-tuned alphas)
+        monotone_default: str | None = "down",  # "down", "up", or None
+        median_filter_window: int | None = None,  # odd int; None disables
     ):
-        from pygam import (
-            ExpectileGAM,
-        )  # local import to avoid global dependency at import time
-
         self.feature_cols = list(feature_cols)
-        self.expectiles = tuple(expectiles)
-        self.base_gam_kwargs = {} if base_gam_kwargs is None else dict(base_gam_kwargs)
-        self.models = {}  # q -> fitted ExpectileGAM
-        self._ExpectileGAM = ExpectileGAM
+        self.base_gam_kwargs = dict(base_gam_kwargs or {})
+        self._logger = logger_print or (lambda s: None)
+
+        self.models_ = {}  # q -> fitted GAM
+        self.fitted_ = False
+
+        # NEW
+        self.monotone_default = monotone_default
+        self.median_filter_window = median_filter_window
+
+    @staticmethod
+    def _softplus(x: np.ndarray) -> np.ndarray:
+        return np.where(x > 20, x, np.log1p(np.exp(x)))
+
+    def _build_gam(self, expectile: float):
+        # Use a constrained spline if requested (reduces spikes in sparse zones).
+        from pygam import ExpectileGAM, s
+
+        kwargs = dict(self.base_gam_kwargs)
+        terms = s(0, constraints=("monotonic_dec" if self.enforce_monotonic else None))
+        return ExpectileGAM(expectile=expectile, terms=terms, **kwargs)
+
+    def _project_monotone(
+        self, x: np.ndarray, y: np.ndarray, enforce: bool
+    ) -> np.ndarray:
+        """
+        Project y onto a monotone-nonincreasing function of x using isotonic regression.
+        If `enforce` is False or data are too short, returns y unchanged.
+        """
+        if not enforce:
+            return y
+
+        x = np.asarray(x, dtype=float).ravel()
+        y = np.asarray(y, dtype=float).ravel()
+
+        # not enough points or degenerate x → skip
+        if x.size < 3 or np.allclose(x.min(), x.max(), equal_nan=True):
+            return y
+
+        # sort by x, fit isotonic (decreasing) on the sorted grid, then invert the permutation
+        order = np.argsort(x)
+        x_sorted = x[order]
+        y_sorted = y[order]
+
+        ir = IsotonicRegression(increasing=False, out_of_bounds="clip")
+        y_fit_sorted = ir.fit_transform(x_sorted, y_sorted)  # <-- key change
+
+        # map back to original order
+        inv = np.empty_like(order)
+        inv[order] = np.arange(order.size)
+        y_fit = y_fit_sorted[inv]
+
+        return y_fit
+
+    def _maybe_median_filter(self, y: np.ndarray, window: int | None) -> np.ndarray:
+        """
+        Centered rolling median; if window is None or <3, passthrough.
+        """
+        if window is None or window < 3 or window % 2 == 0 or y.size < window:
+            return y
+        # pandas rolling median (centered), then fill NaNs with original values
+        s = pd.Series(y, copy=False)
+        m = s.rolling(window=window, center=True, min_periods=1).median().to_numpy()
+        return np.where(np.isnan(m), y, m)
 
     def fit(
-        self, train_df: pd.DataFrame, y_train: np.ndarray, weights=None, verbose=False
-    ):
-        X = train_df[self.feature_cols].to_numpy(dtype=float)
-        y = np.asarray(y_train, float)
-        w = None if weights is None else np.asarray(weights, float)
+        self,
+        train_df: pd.DataFrame,
+        y_train: np.ndarray,
+        weights: np.ndarray | None = None,
+        verbose: bool = False,
+    ) -> "GAMModeler":
+        X = (
+            pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
+            .to_numpy(dtype=float)
+            .reshape(-1, 1)
+        )
+        y = np.asarray(y_train, dtype=float)
+        w = None if weights is None else np.asarray(weights, dtype=float)
 
-        self.models.clear()
-        for q in self.expectiles:
-            kw = dict(self.base_gam_kwargs)
-            kw["expectile"] = float(q)
-            gam = self._ExpectileGAM(**kw)
+        # Decide which quantiles to fit (defaults to 0.025/0.5/0.975)
+        qs = getattr(self, "quantiles_", (0.025, 0.5, 0.975))
+        self.models_ = {}
+
+        for q in qs:
+            gam = ExpectileGAM(
+                expectile=float(q), **self.base_gam_kwargs, max_iter=5000
+            )
             gam.fit(X, y, weights=w)
-            self.models[q] = gam
+            self.models_[float(q)] = gam
             if verbose:
-                print(f"[GAMModeler] Fitted ExpectileGAM(q={q}) with kwargs={kw}")
+                self._logger(
+                    f"[GAMModeler] Fitted ExpectileGAM(q={q}) "
+                    f"with kwargs={{'lam': {gam.lam}, 'n_splines': {gam.n_splines}, 'expectile': {q}, 'max_iter': 5000}}"
+                )
+
+        self.fitted_ = True
         return self
 
-    def predict_units(
-        self, df: pd.DataFrame, expectiles=None
-    ) -> dict[float, np.ndarray]:
-        if not self.models:
-            raise RuntimeError("GAMModeler not fitted")
-        qs = self.expectiles if expectiles is None else tuple(expectiles)
-        X = df[self.feature_cols].to_numpy(dtype=float)
-        out = {}
-        for q in qs:
-            m = self.models.get(q)
-            if m is None:
-                raise KeyError(f"Expectile {q} not fitted")
-            out[q] = m.predict(X).astype(float)
-        return out
+    def _predict_units(
+        self,
+        prices: np.ndarray,
+        *,
+        q: float,
+        monotone: str | None = None,  # <- NEW
+        median_filter_window: int | None = None,  # <- NEW
+        group_idx: np.ndarray | None = None,  # optional labels (e.g., product)
+    ) -> np.ndarray:
+        """
+        Predict units at quantile q for given prices, then optionally:
+          - enforce monotonicity per group via isotonic regression
+          - apply a light median filter per group
+        """
+        if not self.fitted_ or q not in self.models_:
+            raise RuntimeError(f"GAM for q={q} is not fitted")
+
+        model = self.models_[q]
+        # raw prediction (expectile GAM approximates conditional expectile of units)
+        units = model.predict(prices.reshape(-1, 1)).astype(float)
+        # clamp at 0 to avoid tiny negatives
+        units = np.maximum(units, 0.0)
+
+        # If no grouping, treat whole vector as one group
+        if group_idx is None:
+            if monotone in ("down", "up"):
+                units = self._project_monotone(prices, units, monotone)
+            units = self._maybe_median_filter(units, median_filter_window)
+            return units
+
+        # Group-aware projection & smoothing (e.g., per product)
+        units_out = units.copy()
+        # Ensure numpy array of labels
+        g = np.asarray(group_idx)
+        # Iterate each group label once
+        for label in np.unique(g):
+            mask = g == label
+            if not np.any(mask):
+                continue
+            u = units[mask]
+            p = prices[mask]
+
+            if monotone in ("down", "up"):
+                u = self._project_monotone(p, u, monotone)
+
+            u = self._maybe_median_filter(u, median_filter_window)
+            units_out[mask] = u
+
+        return units_out
 
     def add_predictions_to_df(
         self,
         df: pd.DataFrame,
+        *,
         write_units=True,
         write_revenue=True,
         price_col="price",
         inplace=False,
     ):
-        base = df if inplace else df.copy()
-        units = self.predict_units(base)
-        price = base[price_col].to_numpy(dtype=float)
+        if not inplace:
+            df = df.copy()
 
-        for q, uhat in units.items():
+        P = pd.to_numeric(df[price_col], errors="coerce").to_numpy(dtype=float)
+        group_idx = df["product"].to_numpy() if "product" in df.columns else None
+
+        # Prefer whatever was actually fitted; if not present, fall back to the usual trio
+        fitted_qs = (
+            tuple(sorted(self.models_.keys()))
+            if getattr(self, "models_", None)
+            else (0.025, 0.5, 0.975)
+        )
+
+        for q in (0.025, 0.5, 0.975):
+            if q not in self.models_:
+                # log + skip if that quantile wasn't fitted
+                self._logger(
+                    f"[GAMModeler] Skip q={q} — not fitted; fitted_qs={fitted_qs}"
+                )
+                continue
+
+            units = self._predict_units(
+                P,
+                q=q,
+                monotone=self.monotone_default,
+                median_filter_window=self.median_filter_window,
+                group_idx=group_idx,
+            )
+
             if write_units:
-                base[f"units_pred_{q}"] = uhat
+                df[f"units_pred_{q}"] = units
             if write_revenue:
-                base[f"revenue_pred_{q}"] = price * uhat
-        return base
+                df[f"revenue_pred_{q}"] = P * units
+
+        return df
 
     @staticmethod
     def sanitize_results_for_downstream(df: pd.DataFrame) -> pd.DataFrame:
-        # Keep this as a no-op or add small dtype/ordering fixes if your downstream expects them
+        # Any light-touch cleaning can live here
+        cols = [c for c in df.columns if c.startswith("units_pred_")]
+        for c in cols:
+            df[c] = np.maximum(df[c].to_numpy(), 0.0)
         return df
 
 
@@ -633,6 +772,7 @@ class PipelineCore:
         ElasticityAnalyzer,
         GAMModeler,
         ParamSearchCV,
+        support_weighting: str = "kde",  # <— NEW
     ):
         self.engineer = engineer
         self.FEAT_COLS = list(feat_cols)
@@ -640,15 +780,144 @@ class PipelineCore:
         self.WEIGHT_COL = weight_col
         self._log = logger_print if logger_print is not None else (lambda s: None)
 
-        # collaborators (injected for easy testing/replacement)
+        # collaborators
         self.Weighting = Weighting
         self.ElasticityAnalyzer = ElasticityAnalyzer
         self.GAMModeler = GAMModeler
         self.ParamSearchCV = ParamSearchCV
 
+        # NEW
+        self.support_weighting = support_weighting.lower()
+
+    # convenient setter if you prefer to construct engineer in PricingPipeline
+    def set_engineer(self, engineer) -> None:
+        self.engineer = engineer
+
+    def _loss(self, y_true, y_pred, sample_weight=None) -> float:
+
+        err = y_true - y_pred
+        if sample_weight is not None:
+            return float(np.average(err * err, weights=sample_weight))  # weighted MSE
+        return float(np.mean(err * err))
+
+    # dealing with sparsity
+    def _bin_and_aggregate(
+        self,
+        ts: pd.DataFrame,
+        *,
+        price_col: str = "price",
+        target_col: str = None,
+        weight_col: str = None,
+    ) -> pd.DataFrame:
+        """
+        Aggregate rows into price bins to remove single-price spikes.
+        Bin width is auto via Freedman-Diaconis; falls back to ~0.25 if too small/degenerate.
+        Aggregation: weighted mean price & target, sum of weights.
+        """
+
+        if target_col is None:
+            target_col = self.TARGET_COL
+        if weight_col is None:
+            weight_col = self.WEIGHT_COL
+
+        p = ts[price_col].to_numpy(float)
+        y = ts[target_col].to_numpy(float)
+        w = ts[weight_col].to_numpy(float)
+
+        if p.size < 5:
+            return ts.copy()
+
+        # Freedman–Diaconis bin width
+        iqr = np.subtract(*np.percentile(p, [75, 25]))
+        n = p.size
+        h = 2.0 * iqr / (n ** (1.0 / 3.0)) if iqr > 0 else 0.0
+        if not np.isfinite(h) or h <= 0:
+            h = 0.25  # fallback
+
+        # build bins
+        pmin, pmax = np.min(p), np.max(p)
+        nbins = max(int(np.ceil((pmax - pmin) / h)), 1)
+        edges = np.linspace(pmin, pmax, nbins + 1)
+
+        # assign bins
+        b = np.clip(np.digitize(p, edges, right=False) - 1, 0, nbins - 1)
+
+        # aggregate
+        df = ts.copy()
+        df["_bin"] = b
+        g = df.groupby("_bin", as_index=False)
+
+        def wmean(a, w_):
+            w_ = np.clip(np.asarray(w_, float), 1e-12, None)
+            return float(np.sum(a * w_) / np.sum(w_))
+
+        agg = g.apply(
+            lambda sub: pd.Series(
+                {
+                    price_col: wmean(
+                        sub[price_col].to_numpy(float), sub[weight_col].to_numpy(float)
+                    ),
+                    target_col: wmean(
+                        sub[target_col].to_numpy(float), sub[weight_col].to_numpy(float)
+                    ),
+                    weight_col: float(np.sum(sub[weight_col].to_numpy(float))),
+                }
+            )
+        ).reset_index(drop=True)
+
+        return agg[[price_col, target_col, weight_col]]
+
+    def _support_prior(
+        self, prices: np.ndarray, bandwidth: float | None = None
+    ) -> np.ndarray:
+        """
+        Smooth density prior over price using a Gaussian kernel (1D KDE).
+        Returns weights in [0.2, 1.0].
+        """
+        p = np.asarray(prices, float).ravel()
+        if p.size < 5:
+            return np.ones_like(p)
+
+        std = float(np.nanstd(p)) or 1.0
+        bw = (
+            bandwidth
+            if (bandwidth and bandwidth > 0)
+            else 1.06 * std * p.size ** (-1 / 5)
+        )
+
+        # KDE against itself
+        z = (p[:, None] - p[None, :]) / (bw if bw > 1e-12 else 1.0)
+        dens = np.exp(-0.5 * z**2).mean(axis=1) / np.sqrt(2 * np.pi)
+        dens = np.nan_to_num(dens, nan=np.nanmedian(dens) or 1.0)
+
+        dmin = float(np.nanmin(dens))
+        dmax = float(np.nanmax(dens))
+        rng = dmax - dmin
+        if not np.isfinite(rng) or rng < 1e-12:
+            return np.ones_like(p)
+
+        dens = (dens - dmin) / rng  # in [0,1]
+        return 0.2 + 0.8 * dens  # in [0.2,1.0]
+
+    def _loss(self, y_true, y_pred, sample_weight=None) -> float:
+        err = y_true - y_pred
+        if sample_weight is not None:
+            return float(np.average(err * err, weights=sample_weight))  # weighted MSE
+        return float(np.mean(err * err))
+
     # ---------------------------- Prep & weights ----------------------------
 
     def prepare_topsellers(self) -> pd.DataFrame:
+        if self.engineer is None:
+            raise RuntimeError(
+                "PipelineCore.engineer is not set. Call set_engineer(engineer)."
+            )
+        # Guard: if someone accidentally passed a DataFrame here again, just return it
+        if isinstance(self.engineer, pd.DataFrame):
+            return self.engineer.copy()
+        # Normal path
+        if not hasattr(self.engineer, "prepare"):
+            raise AttributeError("engineer object must have a .prepare() method")
         return self.engineer.prepare()
 
     @staticmethod
@@ -663,7 +932,6 @@ class PipelineCore:
         return W.build(topsellers)
 
     # ---------------------------- Features / numeric ----------------------------
-
     def assemble_numeric(self, topsellers: pd.DataFrame):
         need_cols = self.FEAT_COLS + [self.TARGET_COL, self.WEIGHT_COL]
         ts = topsellers[need_cols].copy()
@@ -704,82 +972,237 @@ class PipelineCore:
     # ---------------------------- Split & objective ----------------------------
 
     def train_val_split(self, ts: pd.DataFrame, y_all: np.ndarray, w_all: np.ndarray):
-        X_price = ts[["price"]].to_numpy(dtype=float)
-        X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
-            X_price, y_all.copy(), w_all.copy(), test_size=0.20, random_state=42
+        # ORIGINAL validation arrays from raw points
+        X_price_val = ts[["price"]].to_numpy(dtype=float)
+        y_val = y_all.copy()
+        w_val = w_all.copy()
+
+        # --- NEW: aggregate for training only ---
+        train_agg = self._bin_and_aggregate(
+            ts[["price", self.TARGET_COL, self.WEIGHT_COL]].copy(),
+            price_col="price",
+            target_col=self.TARGET_COL,
+            weight_col=self.WEIGHT_COL,
         )
+        X_price_tr = train_agg[["price"]].to_numpy(dtype=float)
+        y_tr = train_agg[self.TARGET_COL].to_numpy(dtype=float)
+        w_tr = train_agg[self.WEIGHT_COL].to_numpy(dtype=float)
+
+        # sanitation
         w_tr = np.clip(
             np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
         w_val = np.clip(
             np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
+
         return {
-            "X_tr": X_tr,
-            "X_val": X_val,
+            "X_tr": X_price_tr,
+            "X_val": X_price_val,
             "y_tr": y_tr,
             "y_val": y_val,
             "w_tr": w_tr,
             "w_val": w_val,
-            "price_val": X_val[:, 0],
+            "price_val": X_price_val[:, 0],
             "w_all": w_all,
             "y_all": y_all,
         }
 
-    def make_objective(self, split: dict):
+    def kde_support_weights(
+        self, price_val: np.ndarray, obs_prices: np.ndarray
+    ) -> np.ndarray:
+        """
+        Estimates a smooth density at each query price via Kernel Density Estimation on the training prices 
+        and uses that density (or a monotone transform) as a support weight.
 
-        X_tr, X_val = split["X_tr"], split["X_val"]
-        y_tr, y_val = split["y_tr"], split["y_val"]
-        w_tr, w_val = split["w_tr"], split["w_val"]
-        price_val = split["price_val"]
+        CV'd KDE density at each validation price → weight in [0.25, 1.0].
+        Safe if obs_prices is tiny / degenerate.
+        """
+        x = np.asarray(obs_prices, float)
+        x = x[np.isfinite(x)]
+        if x.size < 2:
+            return np.ones_like(price_val, float)
 
-        # sparsity-aware validation weighting
-        q = np.linspace(0, 1, 21)
-        edges = np.quantile(price_val, q)
-        idx_bin = np.clip(
-            np.searchsorted(edges, price_val, side="right") - 1, 0, len(edges) - 2
-        )
-        counts = np.bincount(idx_bin, minlength=len(edges) - 1)
-        mask = counts[idx_bin] >= 10
-        w_val_eff = np.where(mask, w_val, 0.0)
-        w_val_eff = np.clip(np.nan_to_num(w_val_eff, nan=1.0), 0.1, 5.0)
+        std = np.std(x)
+        lo = max(1e-3, 0.05 * std)
+        hi = max(lo * 1.01, 2.0 * std)
+        params = {"bandwidth": np.logspace(np.log10(lo), np.log10(hi), 15)}
+        gs = GridSearchCV(KernelDensity(kernel="gaussian"), params, cv=5, n_jobs=1)
+        gs.fit(x.reshape(-1, 1))
+        kde = gs.best_estimator_
 
-        def objective(ns: int, lam: float) -> float:
-            gam = ExpectileGAM(
-                expectile=0.5, n_splines=int(ns), lam=float(lam), max_iter=5000
-            )
+        log_d = kde.score_samples(price_val.reshape(-1, 1))
+        d = np.exp(log_d)
+        d = (d - d.min()) / (d.ptp() or 1.0)
+        return 0.25 + 0.75 * d  # map to [0.25, 1.0]
+
+    def knn_support_weights(
+        self, price_val: np.ndarray, obs_prices: np.ndarray, k: int = 15
+    ) -> np.ndarray:
+        """
+        Scores how well each query price is supported by nearby observed prices 
+        in the training set using k-nearest neighbors.
+
+        kNN radius (inverse local density) → weight in [0.25, 1.0].
+        Use if you prefer a param-free option over KDE.
+        """
+        x = np.asarray(obs_prices, float)
+        x = x[np.isfinite(x)]
+        if x.size < max(3, k + 1):
+            return np.ones_like(price_val, float)
+
+        k = min(k, x.size - 1)
+        nn = NearestNeighbors(n_neighbors=k)
+        nn.fit(x.reshape(-1, 1))
+        dists, _ = nn.kneighbors(price_val.reshape(-1, 1), n_neighbors=k)
+        rad = dists[:, -1]  # kth neighbor radius
+        dens = 1.0 / np.maximum(rad, np.finfo(float).eps)
+        dens = (dens - dens.min()) / (dens.ptp() or 1.0)
+        return 0.25 + 0.75 * dens
+
+    def isotonic_nonneg(
+        self, prices: np.ndarray, units_hat: np.ndarray, increasing: bool | None
+    ) -> np.ndarray:
+        """
+        Post-processes a predicted units vs. price curve to enforce monotonic non-increasing shape (and non-negativity). In short: it makes demand go down or flat as price increases, never up, and clips below 0.
+        
+        Optional, zero-parameter shape enforcement over a curve.
+        Set increasing=True/False or pass None to skip.
+        """
+        if increasing is None or units_hat.size < 3:
+            return np.maximum(units_hat, 0.0)
+        iso = IsotonicRegression(increasing=increasing, y_min=0.0)
+        return iso.fit_transform(prices, np.maximum(units_hat, 0.0))
+
+    def make_objective(
+        self, split: dict, loss_fn=None, price_col: int = 0, use_isotonic: bool = False
+    ):
+
+        X_tr, y_tr = split["X_tr"], split["y_tr"]
+        X_val, y_val = split["X_val"], split["y_val"]
+        w_tr, w_val = split.get("w_tr"), split.get("w_val")
+
+        loss = loss_fn or self._loss
+        log = getattr(self, "_log", lambda *a, **k: None)
+
+        # optional post-fit monotone adjust (NOT used unless toggled)
+        def maybe_isotonic(units_pred, price_vec):
+            if not use_isotonic:
+                return units_pred
+            # If you later want this, plug your existing isotonic_nonneg here
+            # units_pred = isotonic_nonneg(price_vec, units_pred)  # monotone non-increasing
+            return units_pred
+
+        def obj(ns: int, lam: float) -> float:
+            # Fold A: train→val
+            gam = PoissonGAM(s(0, n_splines=ns)).set_params(lam=lam)
             gam.fit(X_tr, y_tr, weights=w_tr)
+            u_val = gam.predict(X_val)
+            # u_val = maybe_isotonic(u_val, X_val[:, price_col])
+            rev_hat_val = X_val[:, price_col] * np.clip(u_val, 0, None)
+            rev_true_val = X_val[:, price_col] * np.clip(y_val, 0, None)
+            loss_a = loss(rev_true_val, rev_hat_val, sample_weight=w_val)
 
-            units_val = gam.predict(X_val).astype(float)
-            rev_true = price_val * y_val
-            rev_hat = price_val * units_val
+            # Fold B: val→train
+            gam_b = PoissonGAM(s(0, n_splines=ns)).set_params(lam=lam)
+            gam_b.fit(X_val, y_val, weights=w_val)
+            u_tr = gam_b.predict(X_tr)
+            # u_tr = maybe_isotonic(u_tr, X_tr[:, price_col])
+            rev_hat_tr = X_tr[:, price_col] * np.clip(u_tr, 0, None)
+            rev_true_tr = X_tr[:, price_col] * np.clip(y_tr, 0, None)
+            loss_b = loss(rev_true_tr, rev_hat_tr, sample_weight=w_tr)
 
-            se = (rev_true - rev_hat) ** 2
-            num = float(np.sum(w_val_eff * se))
-            den = float(np.sum(w_val_eff)) if np.sum(w_val_eff) > 0 else len(se)
-            base = np.median(np.abs(rev_true)) or 1.0
-            scale = base if np.isfinite(base) and base > 1.0 else 1.0
-            return (num / max(den, 1.0)) / (scale**2)
+            return 0.5 * (loss_a + loss_b)
 
-        return objective
+        return obj
 
     # ---------------------------- Tuning & fit ----------------------------
 
-    def tune(self, objective) -> dict:
-        ps = self.ParamSearchCV(objective=objective, logger_print=self._log).fit()
-        return ps  # dict: {"n_splines": int, "lam": float, "loss": float}
-
-    def fit_full(
+    def tune(
         self,
-        ts: pd.DataFrame,
-        y_all: np.ndarray,
-        w_all: np.ndarray,
-        ns_star: int,
-        lam_star: float,
-    ):
+        split: dict,
+        *,
+        price_col: int = 0,
+        weighting: str | None = "knn",  # one of {"knn","kde",None}
+        k: int = 15,  # for KNN
+        kde_bandwidth: str | float = "scott",  # for KDE
+        use_isotonic: bool = False,  # we keep it OFF unless you flip it
+        n_splines_grid=None,  # override if you want, else ParamSearchCV defaults
+        n_lam: int = 12,
+        lam_floor_init: float = 1e-4,
+        lam_span_decades: float = 5.0,
+    ) -> dict:
+        """
+        Objective-only tuner. Expects `split` with X_tr, y_tr, X_val, y_val.
+        Optionally augments split with support weights (w_tr, w_val) if missing.
+        """
+        import numpy as np
+
+        # 1) Add support weights if requested and missing
+        X_tr, X_val = split["X_tr"], split["X_val"]
+        if weighting in {"knn", "kde"}:
+            # Only fill if not already present
+            if split.get("w_tr") is None or split.get("w_val") is None:
+                if weighting == "knn":
+                    try:
+                        w_tr = knn_support_weights(
+                            X_tr[:, price_col], X_tr[:, price_col], k=k
+                        )
+                        w_val = knn_support_weights(
+                            X_val[:, price_col], X_tr[:, price_col], k=k
+                        )
+                    except NameError as e:
+                        raise NameError(
+                            "knn_support_weights(...) is not defined/imported"
+                        ) from e
+                else:  # weighting == "kde"
+                    try:
+                        w_tr = kde_support_weights(
+                            X_tr[:, price_col], bandwidth=kde_bandwidth
+                        )
+                        w_val = kde_support_weights(
+                            X_val[:, price_col],
+                            fit_on=X_tr[:, price_col],
+                            bandwidth=kde_bandwidth,
+                        )
+                    except NameError as e:
+                        raise NameError(
+                            "kde_support_weights(...) is not defined/imported"
+                        ) from e
+
+                split = dict(split)  # avoid mutating caller’s dict
+                split["w_tr"], split["w_val"] = w_tr, w_val
+
+                # tiny debug helps
+                log = getattr(self, "_log", lambda *a, **k: None)
+                log(
+                    f"[DBG] weights: w_tr μ={float(np.mean(w_tr)):.4f} σ={float(np.std(w_tr)):.4f} | "
+                    f"w_val μ={float(np.mean(w_val)):.4f} σ={float(np.std(w_val)):.4f}"
+                )
+
+        # 2) Build the objective closure (fresh GAM per (ns, λ); no isotonic unless you flip it)
+        objective = self.make_objective(
+            split, price_col=price_col, use_isotonic=use_isotonic
+        )
+
+        # 3) Run the dumb tuner (objective-only); grids can be overridden via args
+        ps = self.ParamSearchCV(
+            n_splines_grid=n_splines_grid,
+            n_lam=n_lam,
+            lam_floor_init=lam_floor_init,
+            lam_span_decades=lam_span_decades,
+            objective=objective,
+            logger_print=getattr(self, "_log", None),
+        ).fit()
+
+        return {"n_splines": ps.best_ns_, "lam": ps.best_lam_, "loss": ps.best_score_}
+
+    def fit_full(self, ts, y_all, w_all, ns_star: int, lam_star: float):
         modeler = self.GAMModeler(
             feature_cols=["price"],
             base_gam_kwargs={"lam": float(lam_star), "n_splines": int(ns_star)},
+            monotone_default="down",  # enforce non-increasing units vs price
+            median_filter_window=None,  # keep off by default
         )
         modeler.fit(
             train_df=ts[modeler.feature_cols],
@@ -803,8 +1226,8 @@ class PipelineCore:
         self, topsellers: pd.DataFrame, all_gam_results: pd.DataFrame
     ) -> pd.DataFrame:
         base_df = getattr(self.engineer, "pricing_df", None)
-
         all_gam_results["support_count"] = 0
+
         for prod_key in all_gam_results["product"].dropna().unique():
             g_pred = all_gam_results.loc[all_gam_results["product"] == prod_key]
             if base_df is not None and {"product", "price"}.issubset(base_df.columns):
@@ -836,26 +1259,12 @@ class PipelineCore:
 
     def add_predictions(self, modeler, df: pd.DataFrame) -> pd.DataFrame:
         return modeler.add_predictions_to_df(
-            df, write_units=True, write_revenue=True, price_col="price", inplace=False
+            df,
+            write_units=True,
+            write_revenue=True,
+            price_col="price",
+            inplace=False,
         )
-
-    @staticmethod
-    def postprocess_predictions(df: pd.DataFrame) -> pd.DataFrame:
-        for q_ in (0.025, 0.5, 0.975):
-            ucol = f"units_pred_{q_}"
-            rcol = f"revenue_pred_{q_}"
-            if ucol in df.columns:
-                df[ucol] = np.maximum(df[ucol].to_numpy(), 0.0)
-                if rcol in df.columns:
-                    df[rcol] = df["price"].to_numpy() * df[ucol].to_numpy()
-        pred_cols = [
-            c for c in df.columns if c.startswith(("units_pred_", "revenue_pred_"))
-        ]
-        if not pred_cols:
-            raise ValueError(
-                f"[PipelineCore.postprocess_predictions] Prediction assembly failed. DataFrame cols={list(df.columns)}"
-            )
-        return df
 
     def passthrough_actuals(
         self, topsellers: pd.DataFrame, df: pd.DataFrame
@@ -911,23 +1320,17 @@ class PricingPipeline:
 
         # wire the extracted core with collaborators/constants
         self.core = PipelineCore(
-            engineer=self.engineer,  # internal, not a hyperparam anymore
-            feat_cols=FEAT_COLS,
-            target_col=TARGET_COL,
-            weight_col=WEIGHT_COL,
+            engineer=self.engineer,
+            feat_cols=FEAT_COLS,  # e.g. ["price"] or your configured list
+            target_col=TARGET_COL,  # e.g. "shipped_units"
+            weight_col=WEIGHT_COL,  # your constant already used elsewhere
             logger_print=self._log,
             Weighting=Weighting,
             ElasticityAnalyzer=ElasticityAnalyzer,
             GAMModeler=GAMModeler,
             ParamSearchCV=ParamSearchCV,
         )
-
-        # gentle deprecation note if old code still passes a dict
-        if param_search_kwargs:
-            self._log(
-                "[PricingPipeline] note: 'param_search_kwargs' is ignored. "
-                "Tuning is controlled via ParamSearchCV.__init__ defaults."
-            )
+        # self.core.set_engineer(self.engineer)  # <-- one line and done
 
     @classmethod
     def from_csv_folder(
@@ -961,9 +1364,19 @@ class PricingPipeline:
         return product
 
     def _build_core_frames(self):
+        """
+        Orchestrates:
+        1) data prep → weights → numeric frames
+        2) univariate price-GAM tuning (one-call ParamSearchCV)
+        3) full refit & prediction assembly
+        Returns:
+        topsellers, elasticity_df, all_gam_results
+        """
         print(
             "\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────"
         )
+
+        # 1) Prep
         topsellers = self.core.prepare_topsellers()
         if topsellers.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -983,25 +1396,42 @@ class PricingPipeline:
         )
 
         elasticity_df = self.core.elasticity_best_effort(topsellers)
-        X = self.core.standardize_continuous_inplace(X)
 
+        # standardize continuous features in place (no need to keep Z/mu/sd around here)
+        self.core.standardize_continuous_inplace(X)
+
+        # 2) Tuning
         print("\n\n" + 35 * "- " + " 🤖 Modeling, Tuning & Prediction " + "- " * 35)
         if "price" not in ts.columns:
             raise ValueError(
                 "Expected 'price' column to exist for univariate GAM tuning."
             )
 
+        # Your existing split builder (contains X_tr/X_val/y_tr/y_val and may include w_tr/w_val)
         split = self.core.train_val_split(ts, y, w)
-        objective = self.core.make_objective(split)
-        best = self.core.tune(objective)
+
+        # Build objective with the split; support-weights are added inside tune() if missing
+        # (no isotonic smoothing)
+        best = self.core.tune(
+            split=split,
+            price_col=0,  # adjust if your price isn't the 0th column in X
+            weighting="knn",  # or "kde" or None
+            k=15,  # KNN k
+            use_isotonic=False,  # per your request, keep OFF
+            # grids can be overridden if you want; else ParamSearchCV defaults are used:
+            # n_splines_grid=[8,10,12,14,17,20,24,28,32],
+            # n_lam=12, lam_floor_init=1e-4, lam_span_decades=5.0
+        )  # -> {"n_splines": int, "lam": float, "loss": float}
 
         ns_star, lam_star = int(best["n_splines"]), float(best["lam"])
+        self._log(f"[TUNING] best ns={ns_star} | best λ={lam_star:g}")
+
+        # 3) Full fit & predictions (GAMModeler has smooth-positive outputs via softplus)
         modeler = self.core.fit_full(ts, y, w, ns_star, lam_star)
 
         all_gam_results = self.core.assemble_results(topsellers, modeler)
         all_gam_results = self.core.add_support_counts(topsellers, all_gam_results)
         all_gam_results = self.core.add_predictions(modeler, all_gam_results)
-        all_gam_results = self.core.postprocess_predictions(all_gam_results)
         all_gam_results = self.core.passthrough_actuals(topsellers, all_gam_results)
         all_gam_results = modeler.sanitize_results_for_downstream(all_gam_results)
 

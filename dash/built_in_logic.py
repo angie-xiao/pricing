@@ -345,13 +345,14 @@ class ParamSearchCV:
         objective(ns: int, lam: float) -> float   # lower is better
     Change the defaults below to adjust behavior globally.
     """
+
     def __init__(
         self,
         *,
         n_splines_grid: Iterable[int] = (16, 24, 32),  # single place to edit
-        lam_min: float = 1e-3,                         # single place to edit
-        lam_max: float = 50.0,                         # single place to edit
-        n_grid: int = 9,                               # single place to edit
+        lam_min: float = 1e-3,  # single place to edit
+        lam_max: float = 50.0,  # single place to edit
+        n_grid: int = 9,  # single place to edit
         objective: "Callable[[int, float], float]",
         logger_print: "Optional[Callable[[str], None]]" = None,
     ):
@@ -363,7 +364,7 @@ class ParamSearchCV:
         self.n_grid = int(n_grid)
         if self.n_grid < 2:
             raise ValueError("n_grid must be >= 2")
-        self.objective = objective     # the only function needed
+        self.objective = objective  # the only function needed
         self._log = logger_print if logger_print is not None else (lambda s: None)
 
         # public results
@@ -438,10 +439,14 @@ class ParamSearchCV:
         self.search_history_.clear()
 
         for ns in self.n_splines_grid:
-            self._log(f"[CZ] ns={ns} | λ-grid=({lam_grid[0]:g} … {lam_grid[-1]:g}) | n_grid={self.n_grid}")
+            self._log(
+                f"[CZ] ns={ns} | λ-grid=({lam_grid[0]:g} … {lam_grid[-1]:g}) | n_grid={self.n_grid}"
+            )
             for lam in lam_grid:
                 loss = float(self.objective(int(ns), float(lam)))
-                self.search_history_.append({"ns": int(ns), "lam": float(lam), "loss": loss})
+                self.search_history_.append(
+                    {"ns": int(ns), "lam": float(lam), "loss": loss}
+                )
                 self._log(f"[CZ]   eval ns={ns} λ={lam:g} → loss={loss:.3f}")
                 if loss < best["loss"]:
                     best = {"n_splines": int(ns), "lam": float(lam), "loss": loss}
@@ -449,7 +454,9 @@ class ParamSearchCV:
         self.best_ns_ = best["n_splines"]
         self.best_lam_ = best["lam"]
         self.best_val_loss_ = best["loss"]
-        self._log(f"[CZ] best ns={self.best_ns_} | best λ={self.best_lam_:g} | val_loss={self.best_val_loss_:.3f}")
+        self._log(
+            f"[CZ] best ns={self.best_ns_} | best λ={self.best_lam_:g} | val_loss={self.best_val_loss_:.3f}"
+        )
         return best
 
     # ---------- internals ----------
@@ -479,15 +486,22 @@ class GAMModeler:
     Keep it tiny: fit(), predict_units(), add_predictions_to_df(), sanitize_results_for_downstream().
     """
 
-    def __init__(self, feature_cols, base_gam_kwargs=None, expectiles=(0.025, 0.5, 0.975)):
-        from pygam import ExpectileGAM  # local import to avoid global dependency at import time
+    def __init__(
+        self, feature_cols, base_gam_kwargs=None, expectiles=(0.025, 0.5, 0.975)
+    ):
+        from pygam import (
+            ExpectileGAM,
+        )  # local import to avoid global dependency at import time
+
         self.feature_cols = list(feature_cols)
         self.expectiles = tuple(expectiles)
         self.base_gam_kwargs = {} if base_gam_kwargs is None else dict(base_gam_kwargs)
         self.models = {}  # q -> fitted ExpectileGAM
         self._ExpectileGAM = ExpectileGAM
 
-    def fit(self, train_df: pd.DataFrame, y_train: np.ndarray, weights=None, verbose=False):
+    def fit(
+        self, train_df: pd.DataFrame, y_train: np.ndarray, weights=None, verbose=False
+    ):
         X = train_df[self.feature_cols].to_numpy(dtype=float)
         y = np.asarray(y_train, float)
         w = None if weights is None else np.asarray(weights, float)
@@ -503,7 +517,9 @@ class GAMModeler:
                 print(f"[GAMModeler] Fitted ExpectileGAM(q={q}) with kwargs={kw}")
         return self
 
-    def predict_units(self, df: pd.DataFrame, expectiles=None) -> dict[float, np.ndarray]:
+    def predict_units(
+        self, df: pd.DataFrame, expectiles=None
+    ) -> dict[float, np.ndarray]:
         if not self.models:
             raise RuntimeError("GAMModeler not fitted")
         qs = self.expectiles if expectiles is None else tuple(expectiles)
@@ -516,7 +532,14 @@ class GAMModeler:
             out[q] = m.predict(X).astype(float)
         return out
 
-    def add_predictions_to_df(self, df: pd.DataFrame, write_units=True, write_revenue=True, price_col="price", inplace=False):
+    def add_predictions_to_df(
+        self,
+        df: pd.DataFrame,
+        write_units=True,
+        write_revenue=True,
+        price_col="price",
+        inplace=False,
+    ):
         base = df if inplace else df.copy()
         units = self.predict_units(base)
         price = base[price_col].to_numpy(dtype=float)
@@ -532,7 +555,6 @@ class GAMModeler:
     def sanitize_results_for_downstream(df: pd.DataFrame) -> pd.DataFrame:
         # Keep this as a no-op or add small dtype/ordering fixes if your downstream expects them
         return df
-
 
 
 class Optimizer:
@@ -593,18 +615,319 @@ class Optimizer:
         }
 
 
+class PipelineCore:
+    """
+    Stateless-ish helpers extracted from PricingPipeline._build_core_frames.
+    Holds references to collaborators and constants; all steps are small and testable.
+    """
+
+    def __init__(
+        self,
+        *,
+        engineer,
+        feat_cols,
+        target_col,
+        weight_col,
+        logger_print,
+        Weighting,
+        ElasticityAnalyzer,
+        GAMModeler,
+        ParamSearchCV,
+    ):
+        self.engineer = engineer
+        self.FEAT_COLS = list(feat_cols)
+        self.TARGET_COL = target_col
+        self.WEIGHT_COL = weight_col
+        self._log = logger_print if logger_print is not None else (lambda s: None)
+
+        # collaborators (injected for easy testing/replacement)
+        self.Weighting = Weighting
+        self.ElasticityAnalyzer = ElasticityAnalyzer
+        self.GAMModeler = GAMModeler
+        self.ParamSearchCV = ParamSearchCV
+
+    # ---------------------------- Prep & weights ----------------------------
+
+    def prepare_topsellers(self) -> pd.DataFrame:
+        return self.engineer.prepare()
+
+    @staticmethod
+    def ensure_columns(topsellers: pd.DataFrame) -> None:
+        if "asp" not in topsellers.columns and "price" in topsellers.columns:
+            topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
+        if "__intercept__" not in topsellers.columns:
+            topsellers["__intercept__"] = 1.0
+
+    def compute_weights(self, topsellers: pd.DataFrame) -> np.ndarray:
+        W = self.Weighting()
+        return W.build(topsellers)
+
+    # ---------------------------- Features / numeric ----------------------------
+
+    def assemble_numeric(self, topsellers: pd.DataFrame):
+        need_cols = self.FEAT_COLS + [self.TARGET_COL, self.WEIGHT_COL]
+        ts = topsellers[need_cols].copy()
+
+        for c in self.FEAT_COLS + [self.TARGET_COL, self.WEIGHT_COL]:
+            ts[c] = pd.to_numeric(ts[c], errors="coerce")
+
+        ts = ts.dropna(subset=need_cols).reset_index(drop=True)
+
+        X = ts[self.FEAT_COLS].to_numpy(dtype=float)
+        y = ts[self.TARGET_COL].to_numpy(dtype=float)
+        w = ts[self.WEIGHT_COL].to_numpy(dtype=float)
+        w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
+        w[w <= 0] = 1e-6
+        return ts, X, y, w
+
+    def elasticity_best_effort(self, topsellers: pd.DataFrame) -> pd.DataFrame:
+        try:
+            return self.ElasticityAnalyzer.compute(topsellers)
+        except Exception:
+            return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
+
+    def standardize_continuous_inplace(self, X: np.ndarray) -> np.ndarray:
+        _cont = [
+            c
+            for c in ["price", "deal_discount_percent", "year", "month", "week"]
+            if c in self.FEAT_COLS
+        ]
+        idx = [self.FEAT_COLS.index(c) for c in _cont]
+        if idx:
+            Z = X[:, idx]
+            mu = np.nanmean(Z, axis=0)
+            sd = np.nanstd(Z, axis=0)
+            sd[sd == 0] = 1.0
+            X[:, idx] = (Z - mu) / sd
+        return X
+
+    # ---------------------------- Split & objective ----------------------------
+
+    def train_val_split(self, ts: pd.DataFrame, y_all: np.ndarray, w_all: np.ndarray):
+        X_price = ts[["price"]].to_numpy(dtype=float)
+        X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
+            X_price, y_all.copy(), w_all.copy(), test_size=0.20, random_state=42
+        )
+        w_tr = np.clip(
+            np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
+        )
+        w_val = np.clip(
+            np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
+        )
+        return {
+            "X_tr": X_tr,
+            "X_val": X_val,
+            "y_tr": y_tr,
+            "y_val": y_val,
+            "w_tr": w_tr,
+            "w_val": w_val,
+            "price_val": X_val[:, 0],
+            "w_all": w_all,
+            "y_all": y_all,
+        }
+
+    def make_objective(self, split: dict):
+
+        X_tr, X_val = split["X_tr"], split["X_val"]
+        y_tr, y_val = split["y_tr"], split["y_val"]
+        w_tr, w_val = split["w_tr"], split["w_val"]
+        price_val = split["price_val"]
+
+        # sparsity-aware validation weighting
+        q = np.linspace(0, 1, 21)
+        edges = np.quantile(price_val, q)
+        idx_bin = np.clip(
+            np.searchsorted(edges, price_val, side="right") - 1, 0, len(edges) - 2
+        )
+        counts = np.bincount(idx_bin, minlength=len(edges) - 1)
+        mask = counts[idx_bin] >= 10
+        w_val_eff = np.where(mask, w_val, 0.0)
+        w_val_eff = np.clip(np.nan_to_num(w_val_eff, nan=1.0), 0.1, 5.0)
+
+        def objective(ns: int, lam: float) -> float:
+            gam = ExpectileGAM(
+                expectile=0.5, n_splines=int(ns), lam=float(lam), max_iter=5000
+            )
+            gam.fit(X_tr, y_tr, weights=w_tr)
+
+            units_val = gam.predict(X_val).astype(float)
+            rev_true = price_val * y_val
+            rev_hat = price_val * units_val
+
+            se = (rev_true - rev_hat) ** 2
+            num = float(np.sum(w_val_eff * se))
+            den = float(np.sum(w_val_eff)) if np.sum(w_val_eff) > 0 else len(se)
+            base = np.median(np.abs(rev_true)) or 1.0
+            scale = base if np.isfinite(base) and base > 1.0 else 1.0
+            return (num / max(den, 1.0)) / (scale**2)
+
+        return objective
+
+    # ---------------------------- Tuning & fit ----------------------------
+
+    def tune(self, objective) -> dict:
+        ps = self.ParamSearchCV(objective=objective, logger_print=self._log).fit()
+        return ps  # dict: {"n_splines": int, "lam": float, "loss": float}
+
+    def fit_full(
+        self,
+        ts: pd.DataFrame,
+        y_all: np.ndarray,
+        w_all: np.ndarray,
+        ns_star: int,
+        lam_star: float,
+    ):
+        modeler = self.GAMModeler(
+            feature_cols=["price"],
+            base_gam_kwargs={"lam": float(lam_star), "n_splines": int(ns_star)},
+        )
+        modeler.fit(
+            train_df=ts[modeler.feature_cols],
+            y_train=y_all,
+            weights=w_all,
+            verbose=True,
+        )
+        return modeler
+
+    # ---------------------------- Results assembly ----------------------------
+
+    @staticmethod
+    def assemble_results(topsellers: pd.DataFrame, modeler) -> pd.DataFrame:
+        return (
+            topsellers[["product", "price", "asin", "asp"]]
+            .copy()
+            .reset_index(drop=True)
+        )
+
+    def add_support_counts(
+        self, topsellers: pd.DataFrame, all_gam_results: pd.DataFrame
+    ) -> pd.DataFrame:
+        base_df = getattr(self.engineer, "pricing_df", None)
+
+        all_gam_results["support_count"] = 0
+        for prod_key in all_gam_results["product"].dropna().unique():
+            g_pred = all_gam_results.loc[all_gam_results["product"] == prod_key]
+            if base_df is not None and {"product", "price"}.issubset(base_df.columns):
+                obs_prices = base_df.loc[
+                    base_df["product"].astype(str) == str(prod_key), "price"
+                ].to_numpy()
+                if obs_prices.size == 0:
+                    obs_prices = g_pred["price"].to_numpy()
+            else:
+                obs_prices = g_pred["price"].to_numpy()
+
+            u = np.unique(np.sort(obs_prices))
+            step = (
+                np.nanmedian(np.diff(u))
+                if u.size >= 2
+                else max(0.25, np.nanstd(obs_prices) / 25.0)
+            )
+            win = 1.25 * step
+            P_pred = g_pred["price"].to_numpy()
+            supp = np.array(
+                [(np.abs(obs_prices - p) <= win).sum() for p in P_pred], dtype=int
+            )
+            all_gam_results.loc[g_pred.index, "support_count"] = supp
+
+        all_gam_results["support_count"] = (
+            all_gam_results["support_count"].fillna(0).astype(int)
+        )
+        return all_gam_results
+
+    def add_predictions(self, modeler, df: pd.DataFrame) -> pd.DataFrame:
+        return modeler.add_predictions_to_df(
+            df, write_units=True, write_revenue=True, price_col="price", inplace=False
+        )
+
+    @staticmethod
+    def postprocess_predictions(df: pd.DataFrame) -> pd.DataFrame:
+        for q_ in (0.025, 0.5, 0.975):
+            ucol = f"units_pred_{q_}"
+            rcol = f"revenue_pred_{q_}"
+            if ucol in df.columns:
+                df[ucol] = np.maximum(df[ucol].to_numpy(), 0.0)
+                if rcol in df.columns:
+                    df[rcol] = df["price"].to_numpy() * df[ucol].to_numpy()
+        pred_cols = [
+            c for c in df.columns if c.startswith(("units_pred_", "revenue_pred_"))
+        ]
+        if not pred_cols:
+            raise ValueError(
+                f"[PipelineCore.postprocess_predictions] Prediction assembly failed. DataFrame cols={list(df.columns)}"
+            )
+        return df
+
+    def passthrough_actuals(
+        self, topsellers: pd.DataFrame, df: pd.DataFrame
+    ) -> pd.DataFrame:
+        df["deal_discount_percent"] = (
+            topsellers["deal_discount_percent"]
+            .fillna(0)
+            .clip(lower=0)
+            .reset_index(drop=True)
+        )
+        df["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(
+            topsellers["shipped_units"], dtype=float
+        )
+        df["daily_rev"] = df["revenue_actual"]
+        df["actual_revenue_scaled"] = (
+            topsellers["price"].to_numpy()
+            * (1 - df["deal_discount_percent"].to_numpy() / 100.0)
+            * np.asarray(topsellers["shipped_units"], dtype=float)
+        )
+        return df
+
+
 class PricingPipeline:
+    def __init__(
+        self,
+        pricing_df: pd.DataFrame,
+        product_df: pd.DataFrame,
+        top_n: int = 10,
+        param_search_kwargs=None,  # kept for backward-compat; ignored
+        logger_print=None,  # optional explicit logger
+        *,
+        # DI hooks (defaults to your concrete types)
+        Weighting=Weighting,
+        ElasticityAnalyzer=ElasticityAnalyzer,
+        GAMModeler=GAMModeler,
+        ParamSearchCV=ParamSearchCV,
+    ):
+        """
+        Classic constructor: no 'engineer' arg. We build it internally.
+        - pricing_df, product_df: raw inputs
+        - top_n: passed into DataEngineer
+        - param_search_kwargs: accepted (legacy) but ignored; tuning is controlled in ParamSearchCV.__init__ defaults
+        """
+        # logger
+        self._log = logger_print if logger_print is not None else print
 
-    def __init__(self, pricing_df, product_df, top_n=10, param_search_kwargs=None):
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-        # expose a simple print-like callable
-        # self._log = logger.info
-        self._log = print
-
-        self.engineer = DataEngineer(pricing_df, product_df, top_n)
+        # store raw inputs (handy for downstream/reporting)
         self.pricing_df = pricing_df
         self.product_df = product_df
+
+        # build the engineer internally (as before)
+        self.engineer = DataEngineer(pricing_df, product_df, top_n)
+
+        # wire the extracted core with collaborators/constants
+        self.core = PipelineCore(
+            engineer=self.engineer,  # internal, not a hyperparam anymore
+            feat_cols=FEAT_COLS,
+            target_col=TARGET_COL,
+            weight_col=WEIGHT_COL,
+            logger_print=self._log,
+            Weighting=Weighting,
+            ElasticityAnalyzer=ElasticityAnalyzer,
+            GAMModeler=GAMModeler,
+            ParamSearchCV=ParamSearchCV,
+        )
+
+        # gentle deprecation note if old code still passes a dict
+        if param_search_kwargs:
+            self._log(
+                "[PricingPipeline] note: 'param_search_kwargs' is ignored. "
+                "Tuning is controlled via ParamSearchCV.__init__ defaults."
+            )
 
     @classmethod
     def from_csv_folder(
@@ -637,239 +960,61 @@ class PricingPipeline:
 
         return product
 
-    # ---------------------------- Prep & weights ----------------------------
-
-    def _pp_prepare_topsellers(self) -> pd.DataFrame:
-        return self.engineer.prepare()
-
-    def _pp_ensure_columns(self, topsellers: pd.DataFrame) -> None:
-        if "asp" not in topsellers.columns and "price" in topsellers.columns:
-            topsellers["asp"] = pd.to_numeric(topsellers["price"], errors="coerce")
-        if "__intercept__" not in topsellers.columns:
-            topsellers["__intercept__"] = 1.0
-
-    def _pp_compute_weights(self, topsellers: pd.DataFrame) -> np.ndarray:
-        W = Weighting()
-        w = W.build(topsellers)
-        return w
-
-    # ---------------------------- Features / numeric ----------------------------
-
-    def _pp_assemble_numeric(self, topsellers: pd.DataFrame):
-        need_cols = FEAT_COLS + [TARGET_COL, WEIGHT_COL]
-        ts = topsellers[need_cols].copy()
-
-        # numerics
-        for c in FEAT_COLS + [TARGET_COL, WEIGHT_COL]:
-            ts[c] = pd.to_numeric(ts[c], errors="coerce")
-
-        ts = ts.dropna(subset=need_cols).reset_index(drop=True)
-
-        X = ts[FEAT_COLS].to_numpy(dtype=float)
-        y = ts[TARGET_COL].to_numpy(dtype=float)
-        w = ts[WEIGHT_COL].to_numpy(dtype=float)
-        w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
-        w[w <= 0] = 1e-6
-        return ts, X, y, w
-
-    def _pp_elasticity_best_effort(self, topsellers: pd.DataFrame) -> pd.DataFrame:
-        try:
-            return ElasticityAnalyzer.compute(topsellers)
-        except Exception:
-            return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
-
-    def _pp_standardize_continuous_inplace(self, X: np.ndarray) -> np.ndarray:
-        _cont = [c for c in ["price", "deal_discount_percent", "year", "month", "week"] if c in FEAT_COLS]
-        idx = [FEAT_COLS.index(c) for c in _cont]
-        if idx:
-            Z = X[:, idx]
-            mu = np.nanmean(Z, axis=0)
-            sd = np.nanstd(Z, axis=0)
-            sd[sd == 0] = 1.0
-            X[:, idx] = (Z - mu) / sd
-        return X
-
-    # ---------------------------- Split & objective ----------------------------
-
-    def _pp_train_val_split(self, ts: pd.DataFrame, y_all: np.ndarray, w_all: np.ndarray):
-        X_price = ts[["price"]].to_numpy(dtype=float)
-        X_tr, X_val, y_tr, y_val, w_tr, w_val = train_test_split(
-            X_price, y_all.copy(), w_all.copy(), test_size=0.20, random_state=42
-        )
-        w_tr = np.clip(np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
-        w_val = np.clip(np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
-        return {
-            "X_tr": X_tr, "X_val": X_val,
-            "y_tr": y_tr, "y_val": y_val,
-            "w_tr": w_tr, "w_val": w_val,
-            "price_val": X_val[:, 0],
-            "w_all": w_all, "y_all": y_all
-        }
-
-    def _pp_make_objective(self, split: dict):
-        from pygam import ExpectileGAM
-        X_tr, X_val = split["X_tr"], split["X_val"]
-        y_tr, y_val = split["y_tr"], split["y_val"]
-        w_tr, w_val = split["w_tr"], split["w_val"]
-        price_val   = split["price_val"]
-
-        # sparsity-aware validation weighting
-        q = np.linspace(0, 1, 21)
-        edges = np.quantile(price_val, q)
-        idx_bin = np.clip(np.searchsorted(edges, price_val, side="right") - 1, 0, len(edges) - 2)
-        counts = np.bincount(idx_bin, minlength=len(edges) - 1)
-        mask = counts[idx_bin] >= 10
-        w_val_eff = np.where(mask, w_val, 0.0)
-        w_val_eff = np.clip(np.nan_to_num(w_val_eff, nan=1.0), 0.1, 5.0)
-
-        def objective(ns: int, lam: float) -> float:
-            gam = ExpectileGAM(expectile=0.5, n_splines=int(ns), lam=float(lam), max_iter=5000)
-            gam.fit(X_tr, y_tr, weights=w_tr)
-
-            units_val = gam.predict(X_val).astype(float)
-            rev_true = price_val * y_val
-            rev_hat  = price_val * units_val
-
-            se = (rev_true - rev_hat) ** 2
-            num = float(np.sum(w_val_eff * se))
-            den = float(np.sum(w_val_eff)) if np.sum(w_val_eff) > 0 else len(se)
-            base = np.median(np.abs(rev_true)) or 1.0
-            scale = base if np.isfinite(base) and base > 1.0 else 1.0
-            return (num / max(den, 1.0)) / (scale ** 2)
-
-        return objective
-
-    # ---------------------------- Tuning & fit ----------------------------
-
-    def _pp_tune(self, objective) -> dict:
-        ps = ParamSearchCV(objective=objective, logger_print=self._log).fit()
-        # ps is a dict per the simplified implementation
-        return ps
-
-    def _pp_fit_full(self, ts: pd.DataFrame, y_all: np.ndarray, w_all: np.ndarray, ns_star: int, lam_star: float):
-        modeler = GAMModeler(
-            feature_cols=["price"],
-            base_gam_kwargs={"lam": float(lam_star), "n_splines": int(ns_star)},
-        )
-        modeler.fit(
-            train_df=ts[modeler.feature_cols],
-            y_train=y_all,
-            weights=w_all,
-            verbose=True,
-        )
-        return modeler
-
-    # ---------------------------- Results assembly ----------------------------
-
-    def _pp_assemble_results(self, topsellers: pd.DataFrame, modeler) -> pd.DataFrame:
-        return (
-            topsellers[["product", "price", "asin", "asp"]]
-            .copy()
-            .reset_index(drop=True)
-        )
-
-    def _pp_add_support_counts(self, topsellers: pd.DataFrame, all_gam_results: pd.DataFrame) -> pd.DataFrame:
-        base_df = getattr(self, "pricing_df", None)
-        if base_df is None and hasattr(self, "engineer") and hasattr(self.engineer, "pricing_df"):
-            base_df = self.engineer.pricing_df
-
-        all_gam_results["support_count"] = 0
-        for prod_key in all_gam_results["product"].dropna().unique():
-            g_pred = all_gam_results.loc[all_gam_results["product"] == prod_key]
-            if base_df is not None and {"product", "price"}.issubset(base_df.columns):
-                obs_prices = base_df.loc[base_df["product"].astype(str) == str(prod_key), "price"].to_numpy()
-                if obs_prices.size == 0:
-                    obs_prices = g_pred["price"].to_numpy()
-            else:
-                obs_prices = g_pred["price"].to_numpy()
-
-            u = np.unique(np.sort(obs_prices))
-            step = (np.nanmedian(np.diff(u)) if u.size >= 2 else max(0.25, np.nanstd(obs_prices) / 25.0))
-            win = 1.25 * step
-            P_pred = g_pred["price"].to_numpy()
-            supp = np.array([(np.abs(obs_prices - p) <= win).sum() for p in P_pred], dtype=int)
-            all_gam_results.loc[g_pred.index, "support_count"] = supp
-
-        all_gam_results["support_count"] = all_gam_results["support_count"].fillna(0).astype(int)
-        return all_gam_results
-
-    def _pp_add_predictions(self, modeler, df: pd.DataFrame) -> pd.DataFrame:
-        return modeler.add_predictions_to_df(
-            df, write_units=True, write_revenue=True, price_col="price", inplace=False
-        )
-
-    def _pp_postprocess_predictions(self, df: pd.DataFrame) -> pd.DataFrame:
-        for q_ in (0.025, 0.5, 0.975):
-            ucol = f"units_pred_{q_}"
-            rcol = f"revenue_pred_{q_}"
-            if ucol in df.columns:
-                df[ucol] = np.maximum(df[ucol].to_numpy(), 0.0)
-                if rcol in df.columns:
-                    df[rcol] = df["price"].to_numpy() * df[ucol].to_numpy()
-        pred_cols = [c for c in df.columns if c.startswith(("units_pred_", "revenue_pred_"))]
-        if not pred_cols:
-            raise ValueError(f"[_pp_postprocess_predictions] Prediction assembly failed. DataFrame cols={list(df.columns)}")
-        return df
-
-    def _pp_passthrough_actuals(self, topsellers: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-        df["deal_discount_percent"] = (
-            topsellers["deal_discount_percent"].fillna(0).clip(lower=0).reset_index(drop=True)
-        )
-        df["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(topsellers["shipped_units"], dtype=float)
-        df["daily_rev"] = df["revenue_actual"]
-        df["actual_revenue_scaled"] = (
-            topsellers["price"].to_numpy()
-            * (1 - df["deal_discount_percent"].to_numpy() / 100.0)
-            * np.asarray(topsellers["shipped_units"], dtype=float)
-        )
-        return df
-
     def _build_core_frames(self):
-        """
-        Glue: prepare data, weights, features, tune, refit, assemble outputs.
-        Returns: topsellers, elasticity_df, all_gam_results
-        """
-        print("\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────")
-        topsellers = self._pp_prepare_topsellers()
+        print(
+            "\n─────────────────────────────── 🧮 Starting Data Engineering ───────────────────────────────"
+        )
+        topsellers = self.core.prepare_topsellers()
         if topsellers.empty:
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        self._pp_ensure_columns(topsellers)
+        self.core.ensure_columns(topsellers)
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
-        w_stable = self._pp_compute_weights(topsellers)
+        w_stable = self.core.compute_weights(topsellers)
         topsellers[WEIGHT_COL] = w_stable
-        print(f"⚖️  Weights computed | median={np.nanmedian(w_stable):.3f} | p95={np.nanpercentile(w_stable,95):.3f}")
+        print(
+            f"⚖️  Weights computed | median={np.nanmedian(w_stable):.3f} | p95={np.nanpercentile(w_stable,95):.3f}"
+        )
 
-        ts, X, y, w = self._pp_assemble_numeric(topsellers)
-        print(f"⚖️  Weights ready | median={float(np.nanmedian(w)):.3f} | p95={float(np.nanpercentile(w,95)):.3f} | n={len(w):,}")
+        ts, X, y, w = self.core.assemble_numeric(topsellers)
+        print(
+            f"⚖️  Weights ready | median={float(np.nanmedian(w)):.3f} | p95={float(np.nanpercentile(w,95)):.3f} | n={len(w):,}"
+        )
 
-        elasticity_df = self._pp_elasticity_best_effort(topsellers)
-
-        X = self._pp_standardize_continuous_inplace(X)
+        elasticity_df = self.core.elasticity_best_effort(topsellers)
+        X = self.core.standardize_continuous_inplace(X)
 
         print("\n\n" + 35 * "- " + " 🤖 Modeling, Tuning & Prediction " + "- " * 35)
         if "price" not in ts.columns:
-            raise ValueError("Expected 'price' column to exist for univariate GAM tuning.")
+            raise ValueError(
+                "Expected 'price' column to exist for univariate GAM tuning."
+            )
 
-        split = self._pp_train_val_split(ts, y, w)  # dict with X_tr, X_val, ...
-        objective = self._pp_make_objective(split)
+        split = self.core.train_val_split(ts, y, w)
+        objective = self.core.make_objective(split)
+        best = self.core.tune(objective)
 
-        best = self._pp_tune(objective)  # dict with n_splines, lam, loss
         ns_star, lam_star = int(best["n_splines"]), float(best["lam"])
+        modeler = self.core.fit_full(ts, y, w, ns_star, lam_star)
 
-        modeler = self._pp_fit_full(ts, y, w, ns_star, lam_star)
-
-        all_gam_results = self._pp_assemble_results(topsellers, modeler)
-        all_gam_results = self._pp_add_support_counts(topsellers, all_gam_results)
-        all_gam_results = self._pp_add_predictions(modeler, all_gam_results)
-        all_gam_results = self._pp_postprocess_predictions(all_gam_results)
-        all_gam_results = self._pp_passthrough_actuals(topsellers, all_gam_results)
+        all_gam_results = self.core.assemble_results(topsellers, modeler)
+        all_gam_results = self.core.add_support_counts(topsellers, all_gam_results)
+        all_gam_results = self.core.add_predictions(modeler, all_gam_results)
+        all_gam_results = self.core.postprocess_predictions(all_gam_results)
+        all_gam_results = self.core.passthrough_actuals(topsellers, all_gam_results)
         all_gam_results = modeler.sanitize_results_for_downstream(all_gam_results)
 
-        print("\n" + 32 * "- " + " 🎯 Pipeline Complete at " + datetime.now().strftime("%H:%M:%S") + " " + 32 * "- " + "\n")
+        print(
+            "\n"
+            + 32 * "- "
+            + " 🎯 Pipeline Complete at "
+            + datetime.now().strftime("%H:%M:%S")
+            + " "
+            + 32 * "- "
+            + "\n"
+        )
         return topsellers, elasticity_df, all_gam_results
-
 
     def _build_best50(self, all_gam_results):
         """Pick best P50 revenue row per product, but only if support is sufficient."""
@@ -1113,7 +1258,6 @@ class PricingPipeline:
                 all_gam_results
             ),  # Add model fit KPIs
         }
- 
 
     # ——— simple weighted MSE we’ll reuse ———
     def _weighted_mse(self, y_true, y_pred, w=None) -> float:
@@ -1124,8 +1268,6 @@ class PricingPipeline:
         w = np.asarray(w, float)
         w = np.clip(np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None)
         return float(np.sum(w * (y_true - y_pred) ** 2) / np.sum(w))
-
-
 
     def _predict_units(self, model, df_val) -> np.ndarray:
         """

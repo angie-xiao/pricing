@@ -287,6 +287,10 @@ class Weighting:
         self.nan_fill = float(nan_fill)
         self.posinf_fill = float(posinf_fill)
         self.neginf_fill = float(neginf_fill)
+        self.best_ns_ = None
+        self.best_lam_ = None
+        self.best_params_ = {}
+        self.best_score_ = float("inf")
 
     def build(self, df: pd.DataFrame) -> np.ndarray:
         """Return 1-D numpy array of final sample weights aligned to df.index (finite, >0)."""
@@ -370,29 +374,89 @@ class ParamSearchCV:
         self.random_state = random_state
         self.verbose = verbose
 
+    def _lam_from_lam_prime(self, ns: int, lam_prime: float) -> float:
+        """lam = lam' / ns^2  (scale-invariant parameterization)"""
+        ns2 = max(1, int(ns)) ** 2
+        return float(lam_prime) / float(ns2)
+
     def fit(self):
         if self.objective is None:
             raise RuntimeError("ParamSearchCV requires an objective(ns, lam).")
 
-        ns_grid, lam_grid = self.n_splines_grid, self.lam_grid
-        self._log(f"[DBG] ns-grid={ns_grid}")
-        self._log(
-            f"[DBG] λ-grid=[{lam_grid[0]:.2e} … {lam_grid[-1]:.2e}] (n={len(lam_grid)})"
-        )
+        # ---------- Stage A: coarse, wide, scale-invariant ----------
+        ns_grid_A = [8, 12, 16, 20, 24, 28, 32, 40]
+        lam_p_gridA = np.power(10.0, np.linspace(-3.0, +3.0, 9))  # lam' in decades
 
-        best_loss, best_ns, best_lam = float("inf"), None, None
-        for ns in ns_grid:
-            for lam in lam_grid:
-                loss = float(self.objective(ns, lam))  # closure trains & scores
-                self._log(f"[CZ]   eval ns={ns} λ={lam:.6g} → loss={loss:.6f}")
+        best_loss, best_ns, best_lam_p = float("inf"), None, None
+        for ns in ns_grid_A:
+            for lam_p in lam_p_gridA:
+                lam = self._lam_from_lam_prime(ns, lam_p)
+                loss = float(self.objective(ns, lam))
+                self._log(
+                    f"[CZ-A] ns={ns:>2} λ'={lam_p:.3g} (λ={lam:.3g}) → loss={loss:.6f}"
+                )
                 if loss < best_loss:
-                    best_loss, best_ns, best_lam = loss, ns, lam
+                    best_loss, best_ns, best_lam_p = loss, ns, lam_p
 
-        self.best_score_, self.best_ns_, self.best_lam_ = best_loss, best_ns, best_lam
-        self.best_params_ = {"n_splines": best_ns, "lam": best_lam}
+        self._log(f"[A] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
+
+        # ---------- Stage B: local zoom around top-K ----------
+        # Re-evaluate all A points to rank the top-K; avoids storing each loss during A.
+        scored = []
+        for ns in ns_grid_A:
+            for lam_p in lam_p_gridA:
+                lam = self._lam_from_lam_prime(ns, lam_p)
+                loss = float(self.objective(ns, lam))
+                scored.append((loss, ns, lam_p))
+        scored.sort(key=lambda t: t[0])
+        topK = scored[:4]  # pick top 4 seeds
+
+        # Local neighborhood builders
+        def ns_neighbors(ns):
+            cand = [ns - 2, ns - 1, ns, ns + 1, ns + 2]
+            return [int(x) for x in cand if 8 <= x <= 48]
+
+        lam_p_zoom_factors = np.power(
+            10.0, np.linspace(-0.35, +0.35, 7)
+        )  # about ±0.35 decades
+
+        # Optionally subsample to cap evaluations (budget)
+        seen = set()
+        for _, ns0, lam_p0 in topK:
+            for ns in ns_neighbors(ns0):
+                for f in lam_p_zoom_factors:
+                    lam_p = float(lam_p0 * f)
+                    key = (ns, round(lam_p, 12))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    lam = self._lam_from_lam_prime(ns, lam_p)
+                    loss = float(self.objective(ns, lam))
+                    self._log(
+                        f"[CZ-B] ns={ns:>2} λ'={lam_p:.4g} (λ={lam:.4g}) → loss={loss:.6f}"
+                    )
+                    if loss < best_loss:
+                        best_loss, best_ns, best_lam_p = loss, ns, lam_p
+
+        self._log(f"[B] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
+
+        # ---------- Finalize ----------
+        self.best_params_ = {
+            "n_splines": int(best_ns),
+            "lam": self._lam_from_lam_prime(int(best_ns), float(best_lam_p)),
+        }
+        self.best_score_ = float(best_loss)
+
+        # after you’ve found the best combo:
+        self.best_params_ = {"n_splines": int(best_ns), "lam": float(best_lam_p)}
+        self.best_ns_ = int(best_ns)  # <-- add this
+        self.best_lam_ = float(best_lam_p)  # <-- add this
+        self.best_score_ = float(best_loss)
+
         self._log(
-            f"[TUNING] best ns={best_ns} | best λ={best_lam:.6g} | loss={best_loss:.6f}"
+            f"[TUNING] best ns={self.best_params_['n_splines']} | best λ={self.best_params_['lam']:.6g} | loss={self.best_score_:.6f}"
         )
+
         return self
 
     def _log(self, msg: str):
@@ -1176,7 +1240,7 @@ class PipelineCore:
             mu = np.clip(mu, 1e-9, None)
             dev = gam.distribution.deviance(yva, mu)
             loss = float(np.average(dev, weights=wva))
-            
+
             return loss
 
         # expose for ParamSearchCV
@@ -1864,7 +1928,7 @@ class viz:
 
     def gam_results(self, all_gam_results: pd.DataFrame):
 
-        df = all_gam_results.copy()  
+        df = all_gam_results.copy()
 
         # ---- NEW: normalize schema so the plotting code works with either old or new names ----
         rename = {}

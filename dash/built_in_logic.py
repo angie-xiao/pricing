@@ -374,6 +374,84 @@ class ParamSearchCV:
         self.random_state = random_state
         self.verbose = verbose
 
+    def _log(self, msg: str):
+        """Timestamped console log for debugging."""
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+    @staticmethod
+    def _zoom_bounds_around(
+        best: float,
+        *,
+        factor: float = 5.0,
+        lo_floor: float = 1e-8,
+        hi_ceiling: float = 1e8,
+    ) -> Tuple[float, float]:
+        best = float(max(best, lo_floor))
+        lo = max(best / float(factor), lo_floor)
+        hi = min(best * float(factor), hi_ceiling)
+        if not (lo < hi):
+            eps = 1e-6
+            lo = max(best * (1 - eps), lo_floor)
+            hi = min(best * (1 + eps), hi_ceiling)
+        return lo, hi
+
+    def _search_lambda_zoom(
+        self,
+        *,
+        evaluate: Callable[[float], float],
+        lam_min: float,
+        lam_max: float,
+        rounds: int,
+        n_grid: int,
+        zoom_factor: float,
+    ) -> Tuple[float, float, List[Dict]]:
+        history: List[Dict] = []
+        lo, hi = float(lam_min), float(lam_max)
+        best_lam: Optional[float] = None
+        best_loss: Optional[float] = None
+
+        for r in range(1, int(rounds) + 1):
+            grid = self._logspace(lo, hi, int(n_grid))
+            losses = []
+            for lam in grid:
+                lam_f = float(lam)
+                loss = float(evaluate(lam_f))
+                losses.append(loss)
+                history.append({"round": int(r), "lam": lam_f, "loss": loss})
+
+            idx = int(np.argmin(losses))
+            cand, cand_loss = float(grid[idx]), float(losses[idx])
+            if best_loss is None or cand_loss < best_loss:
+                best_lam, best_loss = cand, cand_loss
+
+            print("\n")
+            self._log(
+                f"[CZ] r{r}: window=({self._fmt(lo)}, {self._fmt(hi)}) → "
+                f"best λ={self._fmt(best_lam)} | loss={self._fmt(best_loss)}"
+            )
+            lo, hi = self._zoom_bounds_around(best_lam, factor=float(zoom_factor))
+
+        return float(best_lam), float(best_loss), history
+
+    @staticmethod
+    def _fmt(x, nd=4):
+        try:
+            if x is None:
+                return "NA"
+            if isinstance(x, (int, float)):
+                if math.isnan(x) or math.isinf(x):
+                    return str(x)
+                return f"{x:.{nd}g}"
+            return str(x)
+        except Exception:
+            return str(x)
+
+    @staticmethod
+    def _logspace(lo: float, hi: float, n: int) -> np.ndarray:
+        lo = max(lo, 1e-12)
+        hi = max(hi, lo * (1 + 1e-12))
+        return np.logspace(math.log10(lo), math.log10(hi), int(max(2, n)))
+
     def ns_neighbors(self, ns):
         # Tight neighborhood keeps budget small but allows refinement
         return [x for x in (ns - 1, ns, ns + 1) if 8 <= x <= 40]
@@ -454,16 +532,20 @@ class ParamSearchCV:
                 self._tlog(
                     "coarse",
                     badge=("🌟 new best score" if improved else "💤 no improvement"),
-                    ns=ns, lam_p=lam_p, lam=lam, loss=loss
+                    ns=ns,
+                    lam_p=lam_p,
+                    lam=lam,
+                    loss=loss,
                 )
                 scores_A.append((loss, ns, lam_p))
                 if improved:
                     best_loss, best_ns, best_lam_p = loss, ns, lam_p
 
         scores_A.sort(key=lambda t: t[0])
-        self._tlog("A_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+        self._tlog(
+            "A_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss
+        )
         return best_ns, best_lam_p, best_loss, scores_A
-
 
     def _stage_B_zoom(
         self,
@@ -500,7 +582,9 @@ class ParamSearchCV:
                 return loss
 
             # choose zoom window around current lam_p seed
-            lo, hi = self._zoom_bounds_around(float(lam_p0), factor=zoom_factor, lo_floor=1e-8, hi_ceiling=1e8)
+            lo, hi = self._zoom_bounds_around(
+                float(lam_p0), factor=zoom_factor, lo_floor=1e-8, hi_ceiling=1e8
+            )
 
             # run your existing zoom/search helper
             # EXPECTED signature (adjust to match your actual implementation if needed):
@@ -518,13 +602,26 @@ class ParamSearchCV:
 
             if best_loss_i < best_loss - 1e-12:
                 best_loss, best_ns, best_lam_p = best_loss_i, ns0, best_lam_p_i
-                self._tlog("zoom_best", badge="🌟 new best score", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+                self._tlog(
+                    "zoom_best",
+                    badge="🌟 new best score",
+                    ns=best_ns,
+                    lam_p=best_lam_p,
+                    loss=best_loss,
+                )
             else:
-                self._tlog("zoom_best", badge="💤 no improvement", ns=ns0, lam_p=best_lam_p_i, loss=best_loss_i)
+                self._tlog(
+                    "zoom_best",
+                    badge="💤 no improvement",
+                    ns=ns0,
+                    lam_p=best_lam_p_i,
+                    loss=best_loss_i,
+                )
 
-        self._tlog("B_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+        self._tlog(
+            "B_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss
+        )
         return best_ns, best_lam_p, best_loss
-
 
     def fit(self):
         """
@@ -561,89 +658,15 @@ class ParamSearchCV:
         self.best_ns_ = int(best_ns)
         self.best_lam_ = float(best_lam)
         self.best_score_ = float(best_loss)
-        self._tlog("best", badge="✅ finalized best", ns=self.best_ns_, lam=self.best_lam_, lam_p=best_lam_p, loss=self.best_score_)
+        self._tlog(
+            "best",
+            badge="✅ finalized best",
+            ns=self.best_ns_,
+            lam=self.best_lam_,
+            lam_p=best_lam_p,
+            loss=self.best_score_,
+        )
         return self
-
- 
-
-    def _log(self, msg: str):
-        """Timestamped console log for debugging."""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
-
-    @staticmethod
-    def _zoom_bounds_around(
-        best: float,
-        *,
-        factor: float = 5.0,
-        lo_floor: float = 1e-8,
-        hi_ceiling: float = 1e8,
-    ) -> Tuple[float, float]:
-        best = float(max(best, lo_floor))
-        lo = max(best / float(factor), lo_floor)
-        hi = min(best * float(factor), hi_ceiling)
-        if not (lo < hi):
-            eps = 1e-6
-            lo = max(best * (1 - eps), lo_floor)
-            hi = min(best * (1 + eps), hi_ceiling)
-        return lo, hi
-
-    def _search_lambda_zoom(
-        self,
-        *,
-        evaluate: Callable[[float], float],
-        lam_min: float,
-        lam_max: float,
-        rounds: int,
-        n_grid: int,
-        zoom_factor: float,
-    ) -> Tuple[float, float, List[Dict]]:
-        history: List[Dict] = []
-        lo, hi = float(lam_min), float(lam_max)
-        best_lam: Optional[float] = None
-        best_loss: Optional[float] = None
-
-        for r in range(1, int(rounds) + 1):
-            grid = self._logspace(lo, hi, int(n_grid))
-            losses = []
-            for lam in grid:
-                lam_f = float(lam)
-                loss = float(evaluate(lam_f))
-                losses.append(loss)
-                history.append({"round": int(r), "lam": lam_f, "loss": loss})
-
-            idx = int(np.argmin(losses))
-            cand, cand_loss = float(grid[idx]), float(losses[idx])
-            if best_loss is None or cand_loss < best_loss:
-                best_lam, best_loss = cand, cand_loss
-
-            print("\n")
-            self._log(
-                f"[CZ] r{r}: window=({self._fmt(lo)}, {self._fmt(hi)}) → "
-                f"best λ={self._fmt(best_lam)} | loss={self._fmt(best_loss)}"
-            )
-            lo, hi = self._zoom_bounds_around(best_lam, factor=float(zoom_factor))
-
-        return float(best_lam), float(best_loss), history
-
-    # ---------- internals ----------
-    @staticmethod
-    def _fmt(x, nd=4):
-        try:
-            if x is None:
-                return "NA"
-            if isinstance(x, (int, float)):
-                if math.isnan(x) or math.isinf(x):
-                    return str(x)
-                return f"{x:.{nd}g}"
-            return str(x)
-        except Exception:
-            return str(x)
-
-    @staticmethod
-    def _logspace(lo: float, hi: float, n: int) -> np.ndarray:
-        lo = max(lo, 1e-12)
-        hi = max(hi, lo * (1 + 1e-12))
-        return np.logspace(math.log10(lo), math.log10(hi), int(max(2, n)))
 
 
 class GAMModeler:

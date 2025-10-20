@@ -374,10 +374,157 @@ class ParamSearchCV:
         self.random_state = random_state
         self.verbose = verbose
 
+    def ns_neighbors(self, ns):
+        # Tight neighborhood keeps budget small but allows refinement
+        return [x for x in (ns - 1, ns, ns + 1) if 8 <= x <= 40]
+
+    def lam_p_zoom_grid(self, lam_p0):
+        # ±0.25 decades around the seed → ~×0.56..×1.78 multiplicative band
+        return list(np.power(10.0, np.linspace(-0.25, +0.25, 7)) * float(lam_p0))
+
+    def _pp_kv(self, d: dict) -> str:
+        """
+        Build a single-line, fixed-layout KV string with persistent column widths.
+        Column widths grow as longer values appear to keep pipes aligned across lines.
+        """
+        # Canonical column order for tuning logs
+        order = ["stage", "ns", "lam", "lam_p", "loss"]
+
+        # Initialize persistent widths on first use
+        if not hasattr(self, "_tlog_w"):
+            # Seed with sensible minima so early lines don't look jagged
+            self._tlog_w = {"stage": 8, "ns": 3, "lam": 12, "lam_p": 12, "loss": 10}
+            self._tlog_kw = max(len(k) for k in order)
+
+        def _val_str(v):
+            if isinstance(v, (int, float)):
+                return f"{float(v):.6g}"  # compact, consistent numeric formatting
+            return str(v)
+
+        parts = []
+
+        # Emit canonical columns first (if present), right-aligned to sticky widths
+        for k in order:
+            if k in d:
+                s = _val_str(d[k])
+                self._tlog_w[k] = max(self._tlog_w.get(k, 0), len(s))
+                parts.append(f"{k:>{self._tlog_kw}} = {s:>{self._tlog_w[k]}}")
+
+        # Append any extras in alpha order, maintaining sticky widths
+        extras = sorted(k for k in d.keys() if k not in order)
+        for k in extras:
+            s = _val_str(d[k])
+            self._tlog_w[k] = max(self._tlog_w.get(k, 0), len(s))
+            self._tlog_kw = max(self._tlog_kw, len(k))
+            parts.append(f"{k:>{self._tlog_kw}} = {s:>{self._tlog_w[k]}}")
+
+        return " | ".join(parts)
+
+    def _tlog(self, stage: str, badge: str | None = None, **kwargs):
+        from datetime import datetime
+
+        line = self._pp_kv(dict(stage=stage, **kwargs))
+        ts = datetime.now().strftime("%H:%M:%S")
+        prefix = (badge + " ") if badge else ""
+        print(f"[{ts}] {prefix}{line}", flush=True)
+
     def _lam_from_lam_prime(self, ns: int, lam_prime: float) -> float:
         """lam = lam' / ns^2  (scale-invariant parameterization)"""
         ns2 = max(1, int(ns)) ** 2
         return float(lam_prime) / float(ns2)
+
+    def _stage_A_coarse(self):
+        """
+        Stage A: coarse, wide, scale-invariant sweep over ns and λ' (lam_p).
+        Returns:
+            best_ns, best_lam_p, best_loss, scores_A  (scores_A: list[(loss, ns, lam_p)])
+        """
+        # Coarse grids (bounded, SKU-agnostic)
+        ns_grid_A = [8, 12, 16, 20, 24, 28, 32, 40]
+        lam_p_gridA = np.power(10.0, np.linspace(-3.0, +3.0, 9))  # λ' in decades
+
+        scores_A = []
+        best_loss, best_ns, best_lam_p = float("inf"), None, None
+
+        for ns in ns_grid_A:
+            for lam_p in lam_p_gridA:
+                lam = self._lam_from_lam_prime(ns, lam_p)  # λ = λ'/ns^2
+                loss = float(self.objective(ns, lam))
+                improved = loss < best_loss - 1e-12
+                self._tlog(
+                    "coarse",
+                    badge=("🌟 new best score" if improved else "💤 no improvement"),
+                    ns=ns, lam_p=lam_p, lam=lam, loss=loss
+                )
+                scores_A.append((loss, ns, lam_p))
+                if improved:
+                    best_loss, best_ns, best_lam_p = loss, ns, lam_p
+
+        scores_A.sort(key=lambda t: t[0])
+        self._tlog("A_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+        return best_ns, best_lam_p, best_loss, scores_A
+
+
+    def _stage_B_zoom(
+        self,
+        scores_A,
+        *,
+        best_ns,
+        best_lam_p,
+        best_loss,
+        top_k: int = 3,
+        eps: float = 1.25,
+        rounds: int = 3,
+        n_grid: int = 9,
+        zoom_factor: float = 5.0,
+    ):
+        """
+        Stage B: local zoom around top-K seeds from Stage A.
+        Returns:
+            best_ns, best_lam_p, best_loss
+        Notes:
+            - This uses the class helpers `_zoom_bounds_around(...)` and `_search_lambda_zoom(...)`
+            you already have. If your current Stage B has slightly different names/signatures,
+            keep the inner logic the same—only the function boundary is new.
+        """
+        # Keep only strong seeds within an epsilon band around the best and cap K.
+        topK = [t for t in scores_A if t[0] <= eps * best_loss][:top_k]
+
+        for loss0, ns0, lam_p0 in topK:
+            # define an evaluator for a fixed ns, searching over lam'
+            def _eval(lam_p):
+                lam = self._lam_from_lam_prime(ns0, lam_p)
+                loss = float(self.objective(ns0, lam))
+                # light tracing for zoom evaluations
+                self._tlog("zoom", ns=ns0, lam_p=lam_p, lam=lam, loss=loss)
+                return loss
+
+            # choose zoom window around current lam_p seed
+            lo, hi = self._zoom_bounds_around(float(lam_p0), factor=zoom_factor, lo_floor=1e-8, hi_ceiling=1e8)
+
+            # run your existing zoom/search helper
+            # EXPECTED signature (adjust to match your actual implementation if needed):
+            #   best_lam_p_i, best_loss_i, history = self._search_lambda_zoom(
+            #       evaluate=_eval, lam_min=lo, lam_max=hi, rounds=rounds, n_grid=n_grid, zoom_factor=zoom_factor
+            #   )
+            best_lam_p_i, best_loss_i, _hist = self._search_lambda_zoom(
+                evaluate=_eval,
+                lam_min=lo,
+                lam_max=hi,
+                rounds=rounds,
+                n_grid=n_grid,
+                zoom_factor=zoom_factor,
+            )
+
+            if best_loss_i < best_loss - 1e-12:
+                best_loss, best_ns, best_lam_p = best_loss_i, ns0, best_lam_p_i
+                self._tlog("zoom_best", badge="🌟 new best score", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+            else:
+                self._tlog("zoom_best", badge="💤 no improvement", ns=ns0, lam_p=best_lam_p_i, loss=best_loss_i)
+
+        self._tlog("B_best", badge="🏁 end", ns=best_ns, lam_p=best_lam_p, loss=best_loss)
+        return best_ns, best_lam_p, best_loss
+
 
     def fit(self):
         """
@@ -395,59 +542,18 @@ class ParamSearchCV:
         if self.objective is None:
             raise RuntimeError("ParamSearchCV requires an objective(ns, lam).")
 
-        # ---------- Stage A: coarse, wide, scale-invariant ----------
-        # Coarse grids (bounded, SKU-agnostic)
-        ns_grid_A = [8, 12, 16, 20, 24, 28, 32, 40]
-        lam_p_gridA = np.power(10.0, np.linspace(-3.0, +3.0, 9))  # λ' in decades
+        # ---------- Stage A ----------
+        best_ns, best_lam_p, best_loss, scores_A = self._stage_A_coarse()
 
-        scores_A = []
-        best_loss, best_ns, best_lam_p = float("inf"), None, None
-
-        for ns in ns_grid_A:
-            for lam_p in lam_p_gridA:
-                lam = self._lam_from_lam_prime(ns, lam_p)  # λ = λ'/ns^2
-                loss = float(self.objective(ns, lam))
-                self._log(
-                    f"[CZ-A] ns={ns:>2} λ'={lam_p:.3g} (λ={lam:.3g}) → loss={loss:.6f}"
-                )
-                scores_A.append((loss, ns, lam_p))
-                if loss < best_loss:
-                    best_loss, best_ns, best_lam_p = loss, ns, lam_p
-
-        scores_A.sort(key=lambda t: t[0])
-        self._log(f"[A] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
-
-        # ---------- Stage B: local zoom around top-K ----------
-        # Keep only strong seeds within an epsilon band around the best and cap K.
-        EPS = 1.25  # seeds within 25% of best loss
-        topK = [t for t in scores_A if t[0] <= EPS * best_loss][:3]
-
-        def ns_neighbors(ns):
-            # Tight neighborhood keeps budget small but allows refinement
-            return [x for x in (ns - 1, ns, ns + 1) if 8 <= x <= 40]
-
-        def lam_p_zoom_grid(lam_p0):
-            # ±0.25 decades around the seed → ~×0.56..×1.78 multiplicative band
-            return list(np.power(10.0, np.linspace(-0.25, +0.25, 7)) * float(lam_p0))
-
-        seen = set()
-        for _, ns0, lam_p0 in topK:
-            for ns in ns_neighbors(ns0):
-                for lam_p in lam_p_zoom_grid(lam_p0):
-                    key = (int(ns), float(f"{lam_p:.12g}"))  # dedup
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
-                    lam = self._lam_from_lam_prime(ns, lam_p)
-                    loss = float(self.objective(ns, lam))
-                    self._log(
-                        f"[CZ-B] ns={ns:>2} λ'={lam_p:.4g} (λ={lam:.4g}) → loss={loss:.6f}"
-                    )
-                    if loss < best_loss:
-                        best_loss, best_ns, best_lam_p = loss, int(ns), float(lam_p)
-
-        self._log(f"[B] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
+        # ---------- Stage B ----------
+        best_ns, best_lam_p, best_loss = self._stage_B_zoom(
+            scores_A,
+            best_ns=best_ns,
+            best_lam_p=best_lam_p,
+            best_loss=best_loss,
+            # keep defaults, or override to match your existing constants:
+            # top_k=3, eps=1.25, rounds=3, n_grid=9, zoom_factor=5.0,
+        )
 
         # ---------- Finalize ----------
         best_lam = self._lam_from_lam_prime(best_ns, best_lam_p)  # actual λ
@@ -455,10 +561,10 @@ class ParamSearchCV:
         self.best_ns_ = int(best_ns)
         self.best_lam_ = float(best_lam)
         self.best_score_ = float(best_loss)
-        self._log(
-            f"[TUNING] best ns={self.best_ns_} | best λ={self.best_lam_:.6g} (λ'={best_lam_p:.6g}) | loss={self.best_score_:.6f}"
-        )
+        self._tlog("best", badge="✅ finalized best", ns=self.best_ns_, lam=self.best_lam_, lam_p=best_lam_p, loss=self.best_score_)
         return self
+
+ 
 
     def _log(self, msg: str):
         """Timestamped console log for debugging."""

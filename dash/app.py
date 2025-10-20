@@ -1,8 +1,5 @@
 # app.py
 import os
-from datetime import datetime
-import numpy as np
-import pandas as pd
 from dash import Dash, html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 

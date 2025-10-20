@@ -380,83 +380,84 @@ class ParamSearchCV:
         return float(lam_prime) / float(ns2)
 
     def fit(self):
+        """
+        Progressive Zoom, scale-invariant tuner.
+        - Stage A: coarse, wide search over n_splines (ns) and λ' (lam_prime)
+        - Stage B: local zoom around the top-K Stage-A seeds
+        Notes:
+        * Actual λ used for fitting is λ = λ' / ns^2  (handled by _lam_from_lam_prime).
+        * Attributes exposed:
+            - self.best_ns_   : int (n_splines)
+            - self.best_lam_  : float (actual λ used to fit final model)
+            - self.best_params_: {"n_splines": int, "lam": float}
+            - self.best_score_: float (loss)
+        """
         if self.objective is None:
             raise RuntimeError("ParamSearchCV requires an objective(ns, lam).")
 
         # ---------- Stage A: coarse, wide, scale-invariant ----------
+        # Coarse grids (bounded, SKU-agnostic)
         ns_grid_A = [8, 12, 16, 20, 24, 28, 32, 40]
-        lam_p_gridA = np.power(10.0, np.linspace(-3.0, +3.0, 9))  # lam' in decades
+        lam_p_gridA = np.power(10.0, np.linspace(-3.0, +3.0, 9))  # λ' in decades
 
+        scores_A = []
         best_loss, best_ns, best_lam_p = float("inf"), None, None
+
         for ns in ns_grid_A:
             for lam_p in lam_p_gridA:
-                lam = self._lam_from_lam_prime(ns, lam_p)
+                lam = self._lam_from_lam_prime(ns, lam_p)  # λ = λ'/ns^2
                 loss = float(self.objective(ns, lam))
                 self._log(
                     f"[CZ-A] ns={ns:>2} λ'={lam_p:.3g} (λ={lam:.3g}) → loss={loss:.6f}"
                 )
+                scores_A.append((loss, ns, lam_p))
                 if loss < best_loss:
                     best_loss, best_ns, best_lam_p = loss, ns, lam_p
 
+        scores_A.sort(key=lambda t: t[0])
         self._log(f"[A] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
 
         # ---------- Stage B: local zoom around top-K ----------
-        # Re-evaluate all A points to rank the top-K; avoids storing each loss during A.
-        scored = []
-        for ns in ns_grid_A:
-            for lam_p in lam_p_gridA:
-                lam = self._lam_from_lam_prime(ns, lam_p)
-                loss = float(self.objective(ns, lam))
-                scored.append((loss, ns, lam_p))
-        scored.sort(key=lambda t: t[0])
-        topK = scored[:4]  # pick top 4 seeds
+        # Keep only strong seeds within an epsilon band around the best and cap K.
+        EPS = 1.25  # seeds within 25% of best loss
+        topK = [t for t in scores_A if t[0] <= EPS * best_loss][:3]
 
-        # Local neighborhood builders
         def ns_neighbors(ns):
-            cand = [ns - 2, ns - 1, ns, ns + 1, ns + 2]
-            return [int(x) for x in cand if 8 <= x <= 48]
+            # Tight neighborhood keeps budget small but allows refinement
+            return [x for x in (ns - 1, ns, ns + 1) if 8 <= x <= 40]
 
-        lam_p_zoom_factors = np.power(
-            10.0, np.linspace(-0.35, +0.35, 7)
-        )  # about ±0.35 decades
+        def lam_p_zoom_grid(lam_p0):
+            # ±0.25 decades around the seed → ~×0.56..×1.78 multiplicative band
+            return list(np.power(10.0, np.linspace(-0.25, +0.25, 7)) * float(lam_p0))
 
-        # Optionally subsample to cap evaluations (budget)
         seen = set()
         for _, ns0, lam_p0 in topK:
             for ns in ns_neighbors(ns0):
-                for f in lam_p_zoom_factors:
-                    lam_p = float(lam_p0 * f)
-                    key = (ns, round(lam_p, 12))
+                for lam_p in lam_p_zoom_grid(lam_p0):
+                    key = (int(ns), float(f"{lam_p:.12g}"))  # dedup
                     if key in seen:
                         continue
                     seen.add(key)
+
                     lam = self._lam_from_lam_prime(ns, lam_p)
                     loss = float(self.objective(ns, lam))
                     self._log(
                         f"[CZ-B] ns={ns:>2} λ'={lam_p:.4g} (λ={lam:.4g}) → loss={loss:.6f}"
                     )
                     if loss < best_loss:
-                        best_loss, best_ns, best_lam_p = loss, ns, lam_p
+                        best_loss, best_ns, best_lam_p = loss, int(ns), float(lam_p)
 
         self._log(f"[B] best ns={best_ns} λ'={best_lam_p:.6g}  (loss={best_loss:.6f})")
 
         # ---------- Finalize ----------
-        self.best_params_ = {
-            "n_splines": int(best_ns),
-            "lam": self._lam_from_lam_prime(int(best_ns), float(best_lam_p)),
-        }
+        best_lam = self._lam_from_lam_prime(best_ns, best_lam_p)  # actual λ
+        self.best_params_ = {"n_splines": int(best_ns), "lam": float(best_lam)}
+        self.best_ns_ = int(best_ns)
+        self.best_lam_ = float(best_lam)
         self.best_score_ = float(best_loss)
-
-        # after you’ve found the best combo:
-        self.best_params_ = {"n_splines": int(best_ns), "lam": float(best_lam_p)}
-        self.best_ns_ = int(best_ns)  # <-- add this
-        self.best_lam_ = float(best_lam_p)  # <-- add this
-        self.best_score_ = float(best_loss)
-
         self._log(
-            f"[TUNING] best ns={self.best_params_['n_splines']} | best λ={self.best_params_['lam']:.6g} | loss={self.best_score_:.6f}"
+            f"[TUNING] best ns={self.best_ns_} | best λ={self.best_lam_:.6g} (λ'={best_lam_p:.6g}) | loss={self.best_score_:.6f}"
         )
-
         return self
 
     def _log(self, msg: str):
@@ -726,14 +727,13 @@ class GAMModeler:
             else (0.025, 0.5, 0.975)
         )
 
+        # 1) write UNITS first (no revenue yet)
         for q in (0.025, 0.5, 0.975):
             if q not in self.models_:
-                # log + skip if that quantile wasn't fitted
                 self._logger(
                     f"[GAMModeler] Skip q={q} — not fitted; fitted_qs={fitted_qs}"
                 )
                 continue
-
             units = self._predict_units(
                 P,
                 q=q,
@@ -741,11 +741,35 @@ class GAMModeler:
                 median_filter_window=self.median_filter_window,
                 group_idx=group_idx,
             )
-
             if write_units:
                 df[f"units_pred_{q}"] = units
-            if write_revenue:
-                df[f"revenue_pred_{q}"] = P * units
+
+        # 2) support-aware shrinkage (this now affects revenue too)
+        if "support_count" in df.columns:
+            supp = (
+                pd.to_numeric(df["support_count"], errors="coerce")
+                .fillna(0.0)
+                .to_numpy()
+            )
+            soft_min = 12.0
+            floor = 0.25
+            shrink = np.clip(supp / soft_min, floor, 1.0)
+            for q in (0.025, 0.5, 0.975):
+                col = f"units_pred_{q}"
+                if col in df:
+                    df[col] = np.maximum(
+                        0.0,
+                        pd.to_numeric(df[col], errors="coerce").to_numpy() * shrink,
+                    )
+
+        # 3) now write (or recompute) REVENUE from the (possibly shrunk) units
+        if write_revenue:
+            for q in (0.025, 0.5, 0.975):
+                ucol = f"units_pred_{q}"
+                if ucol in df:
+                    df[f"revenue_pred_{q}"] = (
+                        P * pd.to_numeric(df[ucol], errors="coerce").to_numpy()
+                    )
 
         return df
 

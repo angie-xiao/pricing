@@ -29,8 +29,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.neighbors import KernelDensity, NearestNeighbors
 from sklearn.isotonic import IsotonicRegression
-from pygam import ExpectileGAM
-from pygam import PoissonGAM, s
+from pygam import ExpectileGAM, s, GammaGAM
 
 
 # local import
@@ -509,7 +508,6 @@ class GAMModeler:
 
     def _build_gam(self, expectile: float):
         # Use a constrained spline if requested (reduces spikes in sparse zones).
-        from pygam import ExpectileGAM, s
 
         kwargs = dict(self.base_gam_kwargs)
         terms = s(0, constraints=("monotonic_dec" if self.enforce_monotonic else None))
@@ -800,72 +798,93 @@ class PipelineCore:
             return float(np.average(err * err, weights=sample_weight))  # weighted MSE
         return float(np.mean(err * err))
 
-    # dealing with sparsity
     def _bin_and_aggregate(
         self,
-        ts: pd.DataFrame,
+        df: pd.DataFrame,
         *,
-        price_col: str = "price",
-        target_col: str = None,
-        weight_col: str = None,
+        price_col: str,
+        target_col: str,
+        weight_col: str,
+        bins: int = 20,
+        group_cols: (
+            list[str] | None
+        ) = None,  # accepted for compatibility; ignored in univariate agg
     ) -> pd.DataFrame:
         """
-        Aggregate rows into price bins to remove single-price spikes.
-        Bin width is auto via Freedman-Diaconis; falls back to ~0.25 if too small/degenerate.
-        Aggregation: weighted mean price & target, sum of weights.
+        Aggregate raw points into price bins for *training only* (univariate fit).
+        Returns a small DataFrame with columns: ["price", target_col, weight_col].
+
+        Strategy:
+        - Bin prices using quantiles (fallback to uniform bins if quantiles collapse)
+        - Within each non-empty bin, compute:
+            price  := weight-avg price within the bin
+            target := weight-avg target within the bin
+            weight := sum of weights within the bin
         """
+        # Extract arrays
+        p = df[price_col].to_numpy(dtype=float)
+        y = df[target_col].to_numpy(dtype=float)
+        w = df[weight_col].to_numpy(dtype=float)
 
-        if target_col is None:
-            target_col = self.TARGET_COL
-        if weight_col is None:
-            weight_col = self.WEIGHT_COL
+        # Basic sanitation
+        m = np.isfinite(p) & np.isfinite(y) & np.isfinite(w)
+        if not np.all(m):
+            p, y, w = p[m], y[m], w[m]
 
-        p = ts[price_col].to_numpy(float)
-        y = ts[target_col].to_numpy(float)
-        w = ts[weight_col].to_numpy(float)
+        w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
+        w[w <= 0] = 1e-6
 
-        if p.size < 5:
-            return ts.copy()
+        if p.size == 0:
+            # Degenerate fallback: return empty frame with expected columns
+            return pd.DataFrame({"price": [], target_col: [], weight_col: []})
 
-        # Freedman–Diaconis bin width
-        iqr = np.subtract(*np.percentile(p, [75, 25]))
-        n = p.size
-        h = 2.0 * iqr / (n ** (1.0 / 3.0)) if iqr > 0 else 0.0
-        if not np.isfinite(h) or h <= 0:
-            h = 0.25  # fallback
+        # Make bin edges from quantiles; if too few unique edges, fall back to uniform bins
+        q_edges = np.quantile(p, np.linspace(0, 1, bins + 1))
+        q_edges = np.unique(q_edges)
+        if q_edges.size < 3:  # quantiles collapsed
+            pmin, pmax = float(np.min(p)), float(np.max(p))
+            if pmax == pmin:
+                # All prices identical: single-bin aggregate
+                return pd.DataFrame(
+                    {
+                        "price": [float(pmin)],
+                        target_col: [float(np.average(y, weights=w))],
+                        weight_col: [float(np.sum(w))],
+                    }
+                )
+            edges = np.linspace(pmin, pmax, bins + 1)
+        else:
+            edges = q_edges
 
-        # build bins
-        pmin, pmax = np.min(p), np.max(p)
-        nbins = max(int(np.ceil((pmax - pmin) / h)), 1)
-        edges = np.linspace(pmin, pmax, nbins + 1)
+        # Digitize into bins [0 .. nbins-1]
+        idx = np.digitize(p, edges[1:-1], right=False)
+        nb = edges.size - 1
 
-        # assign bins
-        b = np.clip(np.digitize(p, edges, right=False) - 1, 0, nbins - 1)
+        # Aggregate per bin
+        rows = []
+        for b in range(nb):
+            sel = idx == b
+            if not np.any(sel):
+                continue
+            w_b = w[sel]
+            p_b = p[sel]
+            y_b = y[sel]
 
-        # aggregate
-        df = ts.copy()
-        df["_bin"] = b
-        g = df.groupby("_bin", as_index=False)
+            wsum = float(np.sum(w_b))
+            # Weight-averaged representatives
+            p_bar = float(np.sum(p_b * w_b) / wsum)
+            y_bar = float(np.sum(y_b * w_b) / wsum)
 
-        def wmean(a, w_):
-            w_ = np.clip(np.asarray(w_, float), 1e-12, None)
-            return float(np.sum(a * w_) / np.sum(w_))
+            rows.append((p_bar, y_bar, wsum))
 
-        agg = g.apply(
-            lambda sub: pd.Series(
-                {
-                    price_col: wmean(
-                        sub[price_col].to_numpy(float), sub[weight_col].to_numpy(float)
-                    ),
-                    target_col: wmean(
-                        sub[target_col].to_numpy(float), sub[weight_col].to_numpy(float)
-                    ),
-                    weight_col: float(np.sum(sub[weight_col].to_numpy(float))),
-                }
-            )
-        ).reset_index(drop=True)
+        if not rows:
+            return pd.DataFrame({"price": [], target_col: [], weight_col: []})
 
-        return agg[[price_col, target_col, weight_col]]
+        out = pd.DataFrame(rows, columns=["price", target_col, weight_col]).sort_values(
+            "price"
+        )
+        out = out.reset_index(drop=True)
+        return out
 
     def _support_prior(
         self, prices: np.ndarray, bandwidth: float | None = None
@@ -933,19 +952,31 @@ class PipelineCore:
 
     # ---------------------------- Features / numeric ----------------------------
     def assemble_numeric(self, topsellers: pd.DataFrame):
+        # minimal, no DataEngineer dependency
         need_cols = self.FEAT_COLS + [self.TARGET_COL, self.WEIGHT_COL]
         ts = topsellers[need_cols].copy()
 
-        for c in self.FEAT_COLS + [self.TARGET_COL, self.WEIGHT_COL]:
+        # coerce to numeric
+        for c in need_cols:
             ts[c] = pd.to_numeric(ts[c], errors="coerce")
 
         ts = ts.dropna(subset=need_cols).reset_index(drop=True)
 
+        # matrices
         X = ts[self.FEAT_COLS].to_numpy(dtype=float)
         y = ts[self.TARGET_COL].to_numpy(dtype=float)
         w = ts[self.WEIGHT_COL].to_numpy(dtype=float)
+
+        # sanitize weights
         w = np.nan_to_num(w, nan=1.0, posinf=3.0, neginf=1e-6)
         w[w <= 0] = 1e-6
+
+        # remember which column is price (needed by make_objective)
+        if hasattr(self, "FEAT_COLS") and "price" in self.FEAT_COLS:
+            self._price_col = self.FEAT_COLS.index("price")
+        else:
+            self._price_col = 0  # fallback
+
         return ts, X, y, w
 
     def elasticity_best_effort(self, topsellers: pd.DataFrame) -> pd.DataFrame:
@@ -954,30 +985,40 @@ class PipelineCore:
         except Exception:
             return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
 
-    def standardize_continuous_inplace(self, X: np.ndarray) -> np.ndarray:
-        _cont = [
-            c
-            for c in ["price", "deal_discount_percent", "year", "month", "week"]
-            if c in self.FEAT_COLS
-        ]
-        idx = [self.FEAT_COLS.index(c) for c in _cont]
-        if idx:
-            Z = X[:, idx]
-            mu = np.nanmean(Z, axis=0)
-            sd = np.nanstd(Z, axis=0)
-            sd[sd == 0] = 1.0
-            X[:, idx] = (Z - mu) / sd
-        return X
+    def standardize_continuous_inplace(self, X: np.ndarray, cont_idx=(0,)):
+        """
+        Z-score selected continuous columns of X in place.
+        Default assumes column 0 is 'price'. Categorical columns are excluded.
+        Saves params for reuse at predict-time.
+        """
+        if X.size == 0 or not cont_idx:
+            return
+
+        cont_idx = tuple(cont_idx)  # ensure indexable
+        mu = np.nanmean(X[:, cont_idx], axis=0)
+        sd = np.nanstd(X[:, cont_idx], axis=0)
+        sd = np.where(sd < 1e-12, 1.0, sd)  # guard
+
+        # in-place standardization
+        X[:, cont_idx] = (X[:, cont_idx] - mu) / sd
+
+        # store for downstream (prediction grids etc.)
+        self._zparams = {"idx": np.array(cont_idx), "mu": mu, "sd": sd}
 
     # ---------------------------- Split & objective ----------------------------
-
     def train_val_split(self, ts: pd.DataFrame, y_all: np.ndarray, w_all: np.ndarray):
-        # ORIGINAL validation arrays from raw points
+        """
+        Build a simple train/val split for the univariate price GAM:
+        - TRAIN: binned & aggregated by price (reduces noise; uses weights)
+        - VAL:   original point-wise (raw price column)
+        No dependency on cached X/feature columns.
+        """
+        # --- validation on raw points ---
         X_price_val = ts[["price"]].to_numpy(dtype=float)
-        y_val = y_all.copy()
-        w_val = w_all.copy()
+        y_val = np.asarray(y_all, dtype=float).copy()
+        w_val = np.asarray(w_all, dtype=float).copy()
 
-        # --- NEW: aggregate for training only ---
+        # --- aggregate for training (by price only) ---
         train_agg = self._bin_and_aggregate(
             ts[["price", self.TARGET_COL, self.WEIGHT_COL]].copy(),
             price_col="price",
@@ -988,13 +1029,18 @@ class PipelineCore:
         y_tr = train_agg[self.TARGET_COL].to_numpy(dtype=float)
         w_tr = train_agg[self.WEIGHT_COL].to_numpy(dtype=float)
 
-        # sanitation
+        # --- sanitize weights ---
         w_tr = np.clip(
             np.nan_to_num(w_tr, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
         w_val = np.clip(
             np.nan_to_num(w_val, nan=1.0, posinf=3.0, neginf=1e-6), 1e-6, None
         )
+
+        # remember which column is price for objective() (assemble_numeric already sets this,
+        # but keep a defensive fallback)
+        if not hasattr(self, "_price_col"):
+            self._price_col = 0
 
         return {
             "X_tr": X_price_tr,
@@ -1012,7 +1058,7 @@ class PipelineCore:
         self, price_val: np.ndarray, obs_prices: np.ndarray
     ) -> np.ndarray:
         """
-        Estimates a smooth density at each query price via Kernel Density Estimation on the training prices 
+        Estimates a smooth density at each query price via Kernel Density Estimation on the training prices
         and uses that density (or a monotone transform) as a support weight.
 
         CV'd KDE density at each validation price → weight in [0.25, 1.0].
@@ -1040,7 +1086,7 @@ class PipelineCore:
         self, price_val: np.ndarray, obs_prices: np.ndarray, k: int = 15
     ) -> np.ndarray:
         """
-        Scores how well each query price is supported by nearby observed prices 
+        Scores how well each query price is supported by nearby observed prices
         in the training set using k-nearest neighbors.
 
         kNN radius (inverse local density) → weight in [0.25, 1.0].
@@ -1065,7 +1111,7 @@ class PipelineCore:
     ) -> np.ndarray:
         """
         Post-processes a predicted units vs. price curve to enforce monotonic non-increasing shape (and non-negativity). In short: it makes demand go down or flat as price increases, never up, and clips below 0.
-        
+
         Optional, zero-parameter shape enforcement over a curve.
         Set increasing=True/False or pass None to skip.
         """
@@ -1075,127 +1121,150 @@ class PipelineCore:
         return iso.fit_transform(prices, np.maximum(units_hat, 0.0))
 
     def make_objective(
-        self, split: dict, loss_fn=None, price_col: int = 0, use_isotonic: bool = False
-    ):
-
-        X_tr, y_tr = split["X_tr"], split["y_tr"]
-        X_val, y_val = split["X_val"], split["y_val"]
-        w_tr, w_val = split.get("w_tr"), split.get("w_val")
-
-        loss = loss_fn or self._loss
-        log = getattr(self, "_log", lambda *a, **k: None)
-
-        # optional post-fit monotone adjust (NOT used unless toggled)
-        def maybe_isotonic(units_pred, price_vec):
-            if not use_isotonic:
-                return units_pred
-            # If you later want this, plug your existing isotonic_nonneg here
-            # units_pred = isotonic_nonneg(price_vec, units_pred)  # monotone non-increasing
-            return units_pred
-
-        def obj(ns: int, lam: float) -> float:
-            # Fold A: train→val
-            gam = PoissonGAM(s(0, n_splines=ns)).set_params(lam=lam)
-            gam.fit(X_tr, y_tr, weights=w_tr)
-            u_val = gam.predict(X_val)
-            # u_val = maybe_isotonic(u_val, X_val[:, price_col])
-            rev_hat_val = X_val[:, price_col] * np.clip(u_val, 0, None)
-            rev_true_val = X_val[:, price_col] * np.clip(y_val, 0, None)
-            loss_a = loss(rev_true_val, rev_hat_val, sample_weight=w_val)
-
-            # Fold B: val→train
-            gam_b = PoissonGAM(s(0, n_splines=ns)).set_params(lam=lam)
-            gam_b.fit(X_val, y_val, weights=w_val)
-            u_tr = gam_b.predict(X_tr)
-            # u_tr = maybe_isotonic(u_tr, X_tr[:, price_col])
-            rev_hat_tr = X_tr[:, price_col] * np.clip(u_tr, 0, None)
-            rev_true_tr = X_tr[:, price_col] * np.clip(y_tr, 0, None)
-            loss_b = loss(rev_true_tr, rev_hat_tr, sample_weight=w_tr)
-
-            return 0.5 * (loss_a + loss_b)
-
-        return obj
-
-    # ---------------------------- Tuning & fit ----------------------------
-
-    def tune(
         self,
         split: dict,
         *,
-        price_col: int = 0,
-        weighting: str | None = "knn",  # one of {"knn","kde",None}
-        k: int = 15,  # for KNN
-        kde_bandwidth: str | float = "scott",  # for KDE
-        use_isotonic: bool = False,  # we keep it OFF unless you flip it
-        n_splines_grid=None,  # override if you want, else ParamSearchCV defaults
-        n_lam: int = 12,
-        lam_floor_init: float = 1e-4,
-        lam_span_decades: float = 5.0,
+        price_col: int | None = None,
+        use_isotonic: bool = False,  # kept for signature compatibility; ignored here
+    ):
+        # which column is price?
+        price_j = self._price_col if price_col is None else price_col
+
+        Xtr, ytr, wtr = split["X_tr"], split["y_tr"], split["w_tr"]
+        Xva, yva, wva = split["X_val"], split["y_val"], split["w_val"]
+
+        # indices for linear (non-price) features
+        p = Xtr.shape[1]
+        other_idx = [j for j in range(p) if j != price_j]
+
+        # safety on targets
+        ytr = np.asarray(ytr, dtype=float)
+        yva = np.asarray(yva, dtype=float)
+        eps = 1e-9
+        ytr = np.clip(ytr, eps, None)
+        yva = np.clip(yva, eps, None)
+
+        # build a terms object: spline on price + linear for others
+        from pygam import GammaGAM, s, l
+
+        base_terms = s(price_j)  # n_splines & lam will be set per-eval
+        if other_idx:
+            for j in other_idx:
+                base_terms = base_terms + l(j)
+
+        def fit_and_score(n_splines: int, lam: float) -> float:
+            # fresh model each time
+            gam = GammaGAM(terms=base_terms, fit_intercept=True)
+
+            # set per-term λ: spline gets "lam", linear terms get 0 (no smoothing)
+            # term order matches construction: [s(price)] + [l(...), l(...), ...]
+            n_terms = 1 + len(other_idx)
+            lam_vec = np.zeros(n_terms, dtype=float)
+            lam_vec[0] = float(lam)
+
+            # tell the spline how many basis functions
+            gam.n_splines = [n_splines] + [1] * len(
+                other_idx
+            )  # linear terms effectively 1-dof
+            gam.lam = lam_vec
+
+            # fit
+            gam.fit(Xtr, ytr, weights=wtr)
+
+            # predict & deviance on val
+            mu = gam.predict(Xva)
+            mu = np.clip(mu, 1e-9, None)
+            dev = gam.distribution.deviance(yva, mu)
+            loss = float(np.average(dev, weights=wva))
+            
+            return loss
+
+        # expose for ParamSearchCV
+        def objective(ns: int, lam: float) -> float:
+            return fit_and_score(int(ns), float(lam))
+
+        return objective
+
+    # ---------------------------- Tuning & fit ----------------------------
+    def tune_auto(
+        self,
+        split: dict,
+        *,
+        price_col: int = 0,  # used only as a fallback if p_tr/p_val missing
+        weighting: str | None = "knn",  # {"knn","kde",None}
+        k: int = 15,
+        kde_bandwidth: str | float = "scott",
+        use_isotonic: bool = False,
     ) -> dict:
-        """
-        Objective-only tuner. Expects `split` with X_tr, y_tr, X_val, y_val.
-        Optionally augments split with support weights (w_tr, w_val) if missing.
-        """
         import numpy as np
 
-        # 1) Add support weights if requested and missing
+        # --- pull arrays ---
         X_tr, X_val = split["X_tr"], split["X_val"]
-        if weighting in {"knn", "kde"}:
-            # Only fill if not already present
-            if split.get("w_tr") is None or split.get("w_val") is None:
-                if weighting == "knn":
-                    try:
-                        w_tr = knn_support_weights(
-                            X_tr[:, price_col], X_tr[:, price_col], k=k
-                        )
-                        w_val = knn_support_weights(
-                            X_val[:, price_col], X_tr[:, price_col], k=k
-                        )
-                    except NameError as e:
-                        raise NameError(
-                            "knn_support_weights(...) is not defined/imported"
-                        ) from e
-                else:  # weighting == "kde"
-                    try:
-                        w_tr = kde_support_weights(
-                            X_tr[:, price_col], bandwidth=kde_bandwidth
-                        )
-                        w_val = kde_support_weights(
-                            X_val[:, price_col],
-                            fit_on=X_tr[:, price_col],
-                            bandwidth=kde_bandwidth,
-                        )
-                    except NameError as e:
-                        raise NameError(
-                            "kde_support_weights(...) is not defined/imported"
-                        ) from e
+        # Prefer RAW prices carried in the split; fallback to X[:, price_col]
+        p_tr = split.get("p_tr")
+        p_val = split.get("p_val")
+        if p_tr is None:
+            p_tr = X_tr[:, price_col]
+        if p_val is None:
+            p_val = X_val[:, price_col]
 
-                split = dict(split)  # avoid mutating caller’s dict
-                split["w_tr"], split["w_val"] = w_tr, w_val
+        # tiny debug (helps catch accidental standardization)
+        log = getattr(self, "_log", lambda *a, **k: None)
+        try:
+            log(
+                f"[DBG] price(raw) train range = [{float(np.min(p_tr)):.2f}, {float(np.max(p_tr)):.2f}] | "
+                f"val range = [{float(np.min(p_val)):.2f}, {float(np.max(p_val)):.2f}]"
+            )
+        except Exception:
+            pass
 
-                # tiny debug helps
-                log = getattr(self, "_log", lambda *a, **k: None)
-                log(
-                    f"[DBG] weights: w_tr μ={float(np.mean(w_tr)):.4f} σ={float(np.std(w_tr)):.4f} | "
-                    f"w_val μ={float(np.mean(w_val)):.4f} σ={float(np.std(w_val)):.4f}"
+        # --- add support weights only if missing ---
+        if weighting in {"knn", "kde"} and (
+            split.get("w_tr") is None or split.get("w_val") is None
+        ):
+            if weighting == "knn":
+                w_tr = self.knn_support_weights(p_tr, p_tr, k=k)
+                w_val = self.knn_support_weights(p_val, p_tr, k=k)
+            else:  # "kde"
+                w_tr = self.kde_support_weights(p_tr, bandwidth=kde_bandwidth)
+                w_val = self.kde_support_weights(
+                    p_val, fit_on=p_tr, bandwidth=kde_bandwidth
                 )
+            split = dict(split)  # avoid mutating caller's dict
+            split["w_tr"], split["w_val"] = w_tr, w_val
 
-        # 2) Build the objective closure (fresh GAM per (ns, λ); no isotonic unless you flip it)
-        objective = self.make_objective(
-            split, price_col=price_col, use_isotonic=use_isotonic
+        # --- objective closure (uses p_tr/p_val inside make_objective) ---
+        objective = self.make_objective(split, use_isotonic=False)
+
+        # --- coarse search (ParamSearchCV has sane defaults) ---
+        ps = self.ParamSearchCV(
+            objective=objective, logger_print=getattr(self, "_log", None)
+        ).fit()
+        best_ns, best_lam = ps.best_ns_, ps.best_lam_
+        log(
+            f"[TUNING] coarse best ns={best_ns} λ={best_lam:g} loss={ps.best_score_:.6f}"
         )
 
-        # 3) Run the dumb tuner (objective-only); grids can be overridden via args
-        ps = self.ParamSearchCV(
-            n_splines_grid=n_splines_grid,
-            n_lam=n_lam,
-            lam_floor_init=lam_floor_init,
-            lam_span_decades=lam_span_decades,
+        # --- small refine around the winner ---
+        ns_ref = sorted({max(8, best_ns - 2), best_ns, min(32, best_ns + 2)})
+        lam_ref = np.geomspace(max(best_lam / 4.0, 1e-5), best_lam * 4.0, 8)
+
+        ps2 = self.ParamSearchCV(
+            n_splines_grid=ns_ref,
+            n_lam=len(lam_ref),
+            lam_floor_init=lam_ref[0],
+            lam_span_decades=np.log10(lam_ref[-1] / lam_ref[0]),
             objective=objective,
             logger_print=getattr(self, "_log", None),
-        ).fit()
+        )
+        ps2.lam_grid = lam_ref  # use exact vector
+        ps2.fit()
 
-        return {"n_splines": ps.best_ns_, "lam": ps.best_lam_, "loss": ps.best_score_}
+        return {
+            "n_splines": ps2.best_ns_,
+            "lam": ps2.best_lam_,
+            "loss": ps2.best_score_,
+        }
 
     def fit_full(self, ts, y_all, w_all, ns_star: int, lam_star: float):
         modeler = self.GAMModeler(
@@ -1398,7 +1467,8 @@ class PricingPipeline:
         elasticity_df = self.core.elasticity_best_effort(topsellers)
 
         # standardize continuous features in place (no need to keep Z/mu/sd around here)
-        self.core.standardize_continuous_inplace(X)
+        p_raw = ts["price"].to_numpy().astype(float)  # keep this safe
+        self.core.standardize_continuous_inplace(X)  # may standardize price
 
         # 2) Tuning
         print("\n\n" + 35 * "- " + " 🤖 Modeling, Tuning & Prediction " + "- " * 35)
@@ -1407,21 +1477,27 @@ class PricingPipeline:
                 "Expected 'price' column to exist for univariate GAM tuning."
             )
 
-        # Your existing split builder (contains X_tr/X_val/y_tr/y_val and may include w_tr/w_val)
+        ts, X, y, w = self.core.assemble_numeric(topsellers)
+
+        # If DE already standardizes, skip this; otherwise keep but limit to continuous cols:
+        # self.core.standardize_continuous_inplace(X, cols=("price","discount_pct"))
+
         split = self.core.train_val_split(ts, y, w)
 
-        # Build objective with the split; support-weights are added inside tune() if missing
-        # (no isotonic smoothing)
-        best = self.core.tune(
-            split=split,
-            price_col=0,  # adjust if your price isn't the 0th column in X
-            weighting="knn",  # or "kde" or None
-            k=15,  # KNN k
-            use_isotonic=False,  # per your request, keep OFF
-            # grids can be overridden if you want; else ParamSearchCV defaults are used:
-            # n_splines_grid=[8,10,12,14,17,20,24,28,32],
-            # n_lam=12, lam_floor_init=1e-4, lam_span_decades=5.0
-        )  # -> {"n_splines": int, "lam": float, "loss": float}
+        objective = self.core.make_objective(
+            split, price_col=None, use_isotonic=False
+        )  # None → uses cached _price_col
+        best = self.core.tune_auto(
+            split, price_col=None, weighting=None, use_isotonic=False
+        )
+
+        # # split already built by your train_val_split(ts, y, w)
+        # split = self.core.train_val_split(ts, y, w)
+
+        # # one-call tuning (no manual grids, no isotonic)
+        # best = self.core.tune_auto(
+        #     split, price_col=0, weighting="knn", use_isotonic=False
+        # )
 
         ns_star, lam_star = int(best["n_splines"]), float(best["lam"])
         self._log(f"[TUNING] best ns={ns_star} | best λ={lam_star:g}")
@@ -1787,6 +1863,42 @@ class viz:
             return "Expected Avg Daily Revenue ($)"
 
     def gam_results(self, all_gam_results: pd.DataFrame):
+
+        df = all_gam_results.copy()  
+
+        # ---- NEW: normalize schema so the plotting code works with either old or new names ----
+        rename = {}
+
+        # X-axis
+        if "asp" not in df.columns and "price" in df.columns:
+            rename["price"] = "asp"
+
+        # Predictions
+        has_new_preds = {"rev_p50", "rev_p025", "rev_p975"} <= set(df.columns)
+        if has_new_preds:
+            rename.update(
+                {
+                    "rev_p50": "revenue_pred_0.5",
+                    "rev_p025": "revenue_pred_0.025",
+                    "rev_p975": "revenue_pred_0.975",
+                }
+            )
+        # Some variants I’ve seen in older runs
+        if "revenue_pred_p50" in df.columns:
+            rename["revenue_pred_p50"] = "revenue_pred_0.5"
+        if "revenue_pred_p025" in df.columns:
+            rename["revenue_pred_p025"] = "revenue_pred_0.025"
+        if "revenue_pred_p975" in df.columns:
+            rename["revenue_pred_p975"] = "revenue_pred_0.975"
+
+        # Actuals
+        if "revenue_actual" not in df.columns:
+            if "actual_revenue" in df.columns:
+                rename["actual_revenue"] = "revenue_actual"
+            elif "revenue" in df.columns:
+                rename["revenue"] = "revenue_actual"
+
+        # the rest of your current function can stay the same
         need_cols = [
             "product",
             "asp",
@@ -1795,9 +1907,11 @@ class viz:
             "revenue_pred_0.5",
             "revenue_pred_0.975",
         ]
-        missing = [c for c in need_cols if c not in all_gam_results.columns]
+        missing = [c for c in need_cols if c not in df.columns]
         if missing:
-            return self.empty_fig(f"Missing column(s): {', '.join(missing)}")
+            raise ValueError(
+                f"gam_results: missing columns after normalization: {missing}"
+            )
 
         fig = go.Figure()
 

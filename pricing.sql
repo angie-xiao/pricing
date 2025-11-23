@@ -16,13 +16,16 @@ CREATE TEMP TABLE filtered_shipments AS (
     WHERE o.region_id = 1
         AND o.marketplace_id = 7
         AND o.gl_product_group IN (199)
-        AND o.order_datetime >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days'
+        AND o.order_datetime >= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD') - interval '730 days' -- adjustable filter 
         AND o.order_datetime <= TO_DATE('{RUN_DATE_YYYY-MM-DD}', 'YYYY-MM-DD')
         AND o.order_condition != 6
         AND o.shipped_units > 0
         and o.our_price > 0
         AND o.is_retail_merchant = 'Y'
-        -- AND o.asin = 'B07DK2BQGD' -- Debugging for specific ASIN
+        AND o.asin in (
+            'B06ZZ4679J','B089LLHMQL','B08NTPM4Z1','B08NTQ7XVB','B08NTSCMZS','B09P323G3B',
+            'B09P32SSRL','B09P3L3BJQ','B09V65VY5J','B0B3S7JJ7G','B0B3S91RJC','B0DP36S67M'
+        ) -- adjustable filter 
 );
 
 
@@ -74,7 +77,7 @@ CREATE TEMP TABLE orders_with_vendor AS (
     FROM orders_with_manufacturer o
         LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
         ON v.vendor_code = o.vendor_code
-    WHERE v.company_code = 'BO92F'
+    WHERE v.company_code = 'CI08L' -- adjustable filter 
 );
 
 /* Step 2d: Add revenue share amount (final base_orders) */

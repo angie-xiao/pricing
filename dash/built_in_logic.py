@@ -1,6 +1,6 @@
 """
-oct 14
-- coarse + zoom search preliminarily working but needs more fine tuning
+too much weight assigned to monoticity. not enough to elasticity (e.g., gently scented 16lb)
+
 -------
 
 1. need to be more thoughtful about the occurrence of "infrequent" prices
@@ -912,63 +912,65 @@ class GAMModeler:
 
 
 class Optimizer:
-    @staticmethod
-    def run(all_gam_results: pd.DataFrame) -> dict:
+    def __init__(self):
+        """
+        Initialize the Optimizer.
+        No parameters needed.
+        """
+        pass
+
+    def run(self, all_gam_results: pd.DataFrame) -> dict:
+        """
+        Optimize prices using direct price-dependent elasticity adjustment.
+
+        Key insight: For inelastic products, we boost revenue predictions MORE at
+        higher prices. The multiplier increases linearly with the actual price value.
+        """
         df = all_gam_results.copy()
 
-        # choose prediction basis
+        # Choose prediction basis
         if "revenue_pred_0.5" in df.columns:
             base_col = "revenue_pred_0.5"
-            avg_col = "revenue_pred_avg" if "revenue_pred_avg" in df.columns else None
         else:
-            base_col = "units_pred_0.5" if "units_pred_0.5" in df.columns else None
-            avg_col = "units_pred_avg" if "units_pred_avg" in df.columns else None
+            base_col = "units_pred_0.5"
 
         if base_col is None:
-            raise ValueError(
-                "No prediction columns (units or revenue) found in all_gam_results."
-            )
+            raise ValueError("No prediction columns found in all_gam_results.")
 
-        # compute weighted_pred (same logic; just make it numeric/finitized)
-        if avg_col is not None:
-            if "ratio" in df.columns:
-                max_ratio = (
-                    float(df["ratio"].max()) if pd.notna(df["ratio"].max()) else 0.0
-                )
-                if max_ratio > 0:
-                    confidence_weight = 1.0 - (df["ratio"] / max_ratio)
-                else:
-                    confidence_weight = 0.5
-            else:
-                confidence_weight = 0.5
-            # clip & fill for safety
-            if not np.isscalar(confidence_weight):
-                confidence_weight = confidence_weight.clip(0.0, 1.0).fillna(0.5)
-            df["weighted_pred"] = df[base_col] * confidence_weight + df[avg_col] * (
-                1.0 - confidence_weight
-            )
+        # Direct price-dependent elasticity adjustment
+        if "ratio" in df.columns and "price" in df.columns:
+            # Base multiplier from elasticity ratio
+            # Lower ratio (inelastic) → higher base multiplier
+            base_mult = 1.0 / (df["ratio"].abs() + 0.01)
+
+            # KEY: Make multiplier scale with actual price value 
+            elasticity_multiplier = base_mult * (1.0 + (df["price"] / 20.0) ** 2)
+
+
+            # Apply multiplier to revenue predictions
+            df["elasticity_adjusted_revenue"] = df[base_col] * elasticity_multiplier
+
+            optimization_col = "elasticity_adjusted_revenue"
         else:
-            df["weighted_pred"] = df[base_col]
+            optimization_col = base_col
 
-        # ---- minimal sanitization: drop non-finite metrics per selection ----
+        # Sanitize metrics
+        opt_metric = pd.to_numeric(df[optimization_col], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
+        df_opt = df.loc[opt_metric.notna()]
+
         base_metric = pd.to_numeric(df[base_col], errors="coerce").replace(
             [np.inf, -np.inf], np.nan
         )
         df_base = df.loc[base_metric.notna()]
 
-        weighted_metric = pd.to_numeric(df["weighted_pred"], errors="coerce").replace(
-            [np.inf, -np.inf], np.nan
-        )
-        df_weighted = df.loc[weighted_metric.notna()]
-
         return {
             "best_avg": DataEng.pick_best_by_group(df_base, "product", base_col),
-            "best_weighted": DataEng.pick_best_by_group(
-                df_weighted, "product", "weighted_pred"
-            ),
+            "best_weighted": DataEng.pick_best_by_group(df_opt, "product", optimization_col),
         }
 
-
+ 
 class PipelineCore:
     """
     Stateless-ish helpers extracted from PricingPipeline._build_core_frames.
@@ -1934,7 +1936,8 @@ class PricingPipeline:
         topsellers, elasticity_df, all_gam_results = self._build_core_frames()
 
         # 2) Optimizer tables
-        optimizer_results = Optimizer.run(all_gam_results)  # Get all optimizer results
+        optimizer = Optimizer()
+        optimizer_results = optimizer.run(all_gam_results)  # Get all optimizer results
         best_avg = optimizer_results["best_avg"]
         best_weighted = optimizer_results["best_weighted"]  # Get best_weighted result
 

@@ -816,7 +816,11 @@ class GAMModeler:
             # l(1): Event -> Linear Shift (Holiday = Sales Boost)
             # We rely on 'monotonic_dec' to prevent the "Witch Hat" spikes
             term = s(
-                0, n_splines=int(tuned_ns), constraints="monotonic_dec", lam=safe_lam
+                0,
+                n_splines=int(tuned_ns),
+                # constraints="monotonic_dec",
+                constraints=None,
+                lam=safe_lam,
             ) + l(1)
 
             gam = ExpectileGAM(expectile=float(q), terms=term, max_iter=5000)

@@ -6,6 +6,16 @@ too much weight assigned to monoticity. not enough to elasticity (e.g., gently s
 1. need to be more thoughtful about the occurrence of "infrequent" prices
 2. inelasticity is not being scaled enough (case of unscented 16lb)
 3. treat promo vs BAU differently? promo data is more uncommon. so skip aggregation?
+
+
+--------
+
+📈 Better elasticity summary chart
+(clean, interpretable, not from min/max)
+
+🧠 Non-circular elasticity-informed optimizer
+(uses derivative shape as a stability score, not a multiplier)
+
 """
 
 # --------- built_in_logic.py  ---------
@@ -29,7 +39,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.neighbors import KernelDensity, NearestNeighbors
 from sklearn.isotonic import IsotonicRegression
-from pygam import ExpectileGAM, s, GammaGAM
+from pygam import ExpectileGAM, s, l, f
 
 
 # local import
@@ -238,11 +248,22 @@ class DataEngineer:
         return df[df["product"].isin(top_n)].copy()
 
     def prepare(self):
+        """
+        filter out days where there were no / negligible sales (e.g. oos)
+        """
         df = self._normalize_inputs()
         df = self._cast_types(df)
         df_days, df_agg = self._aggregate_daily(df)
         df_agg = self._add_temporal_features(df_agg)
+
+        # filter for top n
         df_filtered = self._filter_top_n(df_agg)
+
+        # --- FIX: Remove Negligible Sales (Partial Stockouts) ---
+        # We filter out weeks with < 5 units. These are likely weeks where
+        # the item was out-of-stock for most days, creating a misleading
+        # "low demand" signal that skews the log-linear model.
+        df_filtered = df_filtered[df_filtered["shipped_units"] >= 5].copy()
 
         df_filtered["asin"] = df_filtered["asin"].astype(str)
         df_filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)
@@ -348,8 +369,8 @@ class ParamSearchCV:
         self,
         n_splines_grid=None,
         n_lam: int = 12,
-        lam_floor_init: float = 1e-4,
-        lam_span_decades: float = 5.0,  # lam_max = lam_floor_init * 10**lam_span_decades
+        lam_floor_init: float = 1e-5,
+        lam_span_decades: float = 3.0,  # lam_max = lam_floor_init * 10**lam_span_decades
         random_state: int | None = 42,
         verbose: bool = True,
         objective=None,  # <-- closure: objective(ns, lam) -> float
@@ -365,7 +386,7 @@ class ParamSearchCV:
         self.n_splines_grid = (
             list(n_splines_grid)
             if n_splines_grid is not None
-            else [8, 10, 12, 14, 17, 20, 24, 28, 32]
+            else [8, 10, 12, 14, 17, 20, 24, 28, 32, 40]
         )
         lam_min = float(lam_floor_init)
         lam_max = lam_min * (10.0 ** float(lam_span_decades))
@@ -682,7 +703,7 @@ class GAMModeler:
         base_gam_kwargs=None,
         logger_print=None,
         # NEW: light-touch controls (no hand-tuned alphas)
-        monotone_default: str | None = "down",  # "down", "up", or None
+        monotone_default: str | None = None,  # "down", "up", or None
         median_filter_window: int | None = None,  # odd int; None disables
     ):
         self.feature_cols = list(feature_cols)
@@ -701,10 +722,9 @@ class GAMModeler:
         return np.where(x > 20, x, np.log1p(np.exp(x)))
 
     def _build_gam(self, expectile: float):
-        # Use a constrained spline if requested (reduces spikes in sparse zones).
-
+        # Unconstrained spline – allow any shape (flat, U-shape, bumps, etc.)
         kwargs = dict(self.base_gam_kwargs)
-        terms = s(0, constraints=("monotonic_dec" if self.enforce_monotonic else None))
+        terms = s(0)  # <<< no constraints
         return ExpectileGAM(expectile=expectile, terms=terms, **kwargs)
 
     def _project_monotone(
@@ -750,89 +770,99 @@ class GAMModeler:
         m = s.rolling(window=window, center=True, min_periods=1).median().to_numpy()
         return np.where(np.isnan(m), y, m)
 
-    def fit(
-        self,
-        train_df: pd.DataFrame,
-        y_train: np.ndarray,
-        weights: np.ndarray | None = None,
-        verbose: bool = False,
-    ) -> "GAMModeler":
-        X = (
+    def fit(self, train_df, y_train, weights=None, verbose=False):
+        # 1. Prepare Feature Matrix X: [Price, Event]
+        X_price = np.log1p(
             pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
             .to_numpy(dtype=float)
             .reshape(-1, 1)
         )
-        y = np.asarray(y_train, dtype=float)
-        w = None if weights is None else np.asarray(weights, dtype=float)
 
-        # Decide which quantiles to fit (defaults to 0.025/0.5/0.975)
+        # Event (Binary/Encoded)
+        if "event_encoded" in train_df.columns:
+            X_event = (
+                train_df["event_encoded"].fillna(0).to_numpy(dtype=float).reshape(-1, 1)
+            )
+        else:
+            X_event = np.zeros_like(X_price)
+
+        # Stack: [Price, Event]
+        X = np.hstack([X_price, X_event])
+
+        # 2. Targets & Weights
+        y = np.log1p(np.asarray(y_train, dtype=float))
+
+        if weights is not None:
+            w_standard = np.asarray(weights, dtype=float)
+            w_revenue = w_standard * y
+        else:
+            w_standard = np.ones(len(y))
+            w_revenue = y
+
+        # 3. Tuner Params & Safety
+        tuned_ns = self.base_gam_kwargs.get("n_splines", None)
+        if tuned_ns is None:
+            n_unique = len(np.unique(X_price))
+            tuned_ns = max(3, min(6, n_unique // 2))
+
+        safe_lam = 0.5
+
         qs = getattr(self, "quantiles_", (0.025, 0.5, 0.975))
         self.models_ = {}
 
         for q in qs:
-            gam = ExpectileGAM(
-                expectile=float(q), **self.base_gam_kwargs, max_iter=5000
-            )
-            gam.fit(X, y, weights=w)
+            # --- FORMULA: Price + Event ---
+            # s(0): Price -> Monotonic DOWN (High Price = Low Sales)
+            # l(1): Event -> Linear Shift (Holiday = Sales Boost)
+            # We rely on 'monotonic_dec' to prevent the "Witch Hat" spikes
+            term = s(
+                0, n_splines=int(tuned_ns), constraints="monotonic_dec", lam=safe_lam
+            ) + l(1)
+
+            gam = ExpectileGAM(expectile=float(q), terms=term, max_iter=5000)
+
+            # Hybrid Weighting
+            this_w = w_revenue if float(q) == 0.5 else w_standard
+
+            gam.fit(X, y, weights=this_w)
             self.models_[float(q)] = gam
-            if verbose:
-                self._logger(
-                    f"[GAMModeler] Fitted ExpectileGAM(q={q}) "
-                    f"with kwargs={{'lam': {gam.lam}, 'n_splines': {gam.n_splines}, 'expectile': {q}, 'max_iter': 5000}}"
-                )
 
         self.fitted_ = True
         return self
 
     def _predict_units(
         self,
-        prices: np.ndarray,
+        prices,
+        events=None,
         *,
-        q: float,
-        monotone: str | None = None,  # <- NEW
-        median_filter_window: int | None = None,  # <- NEW
-        group_idx: np.ndarray | None = None,  # optional labels (e.g., product)
-    ) -> np.ndarray:
-        """
-        Predict units at quantile q for given prices, then optionally:
-          - enforce monotonicity per group via isotonic regression
-          - apply a light median filter per group
-        """
+        q,
+        monotone=None,
+        median_filter_window=None,
+        group_idx=None,
+    ):
         if not self.fitted_ or q not in self.models_:
             raise RuntimeError(f"GAM for q={q} is not fitted")
 
         model = self.models_[q]
-        # raw prediction (expectile GAM approximates conditional expectile of units)
-        units = model.predict(prices.reshape(-1, 1)).astype(float)
-        # clamp at 0 to avoid tiny negatives
-        units = np.maximum(units, 0.0)
 
-        # If no grouping, treat whole vector as one group
-        if group_idx is None:
-            if monotone in ("down", "up"):
-                units = self._project_monotone(prices, units, monotone)
-            units = self._maybe_median_filter(units, median_filter_window)
-            return units
+        # 1. Prepare Prediction Matrix X_pred
+        X_price = np.log1p(prices.reshape(-1, 1))
 
-        # Group-aware projection & smoothing (e.g., per product)
-        units_out = units.copy()
-        # Ensure numpy array of labels
-        g = np.asarray(group_idx)
-        # Iterate each group label once
-        for label in np.unique(g):
-            mask = g == label
-            if not np.any(mask):
-                continue
-            u = units[mask]
-            p = prices[mask]
+        # Events
+        if events is not None:
+            X_event = events.reshape(-1, 1)
+        else:
+            X_event = np.zeros_like(X_price)
 
-            if monotone in ("down", "up"):
-                u = self._project_monotone(p, u, monotone)
+        # Stack: [Price, Event] (2 Columns)
+        X_pred = np.hstack([X_price, X_event])
 
-            u = self._maybe_median_filter(u, median_filter_window)
-            units_out[mask] = u
+        # 2. Predict
+        log_units = model.predict(X_pred)
 
-        return units_out
+        # 3. Inverse Transform
+        units = np.expm1(log_units)
+        return np.maximum(units, 0.0)
 
     def add_predictions_to_df(
         self,
@@ -847,130 +877,165 @@ class GAMModeler:
             df = df.copy()
 
         P = pd.to_numeric(df[price_col], errors="coerce").to_numpy(dtype=float)
-        group_idx = df["product"].to_numpy() if "product" in df.columns else None
 
-        # Prefer whatever was actually fitted; if not present, fall back to the usual trio
-        fitted_qs = (
-            tuple(sorted(self.models_.keys()))
-            if getattr(self, "models_", None)
-            else (0.025, 0.5, 0.975)
-        )
+        # 1. Real Events
+        if "event_encoded" in df.columns:
+            E_real = df["event_encoded"].fillna(0).to_numpy(dtype=float)
+        else:
+            E_real = np.zeros_like(P)
 
-        # 1) write UNITS first (no revenue yet)
+        # 2. BAU Events (Force 0)
+        E_bau = np.zeros_like(P)
+
         for q in (0.025, 0.5, 0.975):
             if q not in self.models_:
-                self._logger(
-                    f"[GAMModeler] Skip q={q} — not fitted; fitted_qs={fitted_qs}"
-                )
                 continue
-            units = self._predict_units(
-                P,
-                q=q,
-                monotone=self.monotone_default,
-                median_filter_window=self.median_filter_window,
-                group_idx=group_idx,
-            )
+
+            # Predict Real
+            units_real = self._predict_units(P, events=E_real, q=q)
+
+            # Predict BAU
+            units_bau = self._predict_units(P, events=E_bau, q=q)
+
             if write_units:
-                df[f"units_pred_{q}"] = units
+                df[f"units_pred_{q}"] = units_real
+                df[f"units_pred_bau_{q}"] = units_bau
 
-        # 2) support-aware shrinkage (this now affects revenue too)
-        if "support_count" in df.columns:
-            supp = (
-                pd.to_numeric(df["support_count"], errors="coerce")
-                .fillna(0.0)
-                .to_numpy()
-            )
-            soft_min = 12.0
-            floor = 0.25
-            shrink = np.clip(supp / soft_min, floor, 1.0)
-            for q in (0.025, 0.5, 0.975):
-                col = f"units_pred_{q}"
-                if col in df:
-                    df[col] = np.maximum(
-                        0.0,
-                        pd.to_numeric(df[col], errors="coerce").to_numpy() * shrink,
-                    )
-
-        # 3) now write (or recompute) REVENUE from the (possibly shrunk) units
         if write_revenue:
             for q in (0.025, 0.5, 0.975):
+                # Real Rev
                 ucol = f"units_pred_{q}"
                 if ucol in df:
-                    df[f"revenue_pred_{q}"] = (
-                        P * pd.to_numeric(df[ucol], errors="coerce").to_numpy()
-                    )
+                    df[f"revenue_pred_{q}"] = P * df[ucol]
 
-        return df
+                # BAU Rev
+                ubau = f"units_pred_bau_{q}"
+                if ubau in df:
+                    df[f"revenue_pred_bau_{q}"] = P * df[ubau]
 
-    @staticmethod
-    def sanitize_results_for_downstream(df: pd.DataFrame) -> pd.DataFrame:
-        # Any light-touch cleaning can live here
-        cols = [c for c in df.columns if c.startswith("units_pred_")]
-        for c in cols:
-            df[c] = np.maximum(df[c].to_numpy(), 0.0)
         return df
 
 
 class Optimizer:
     def __init__(self):
-        """
-        Initialize the Optimizer.
-        No parameters needed.
-        """
         pass
 
-    def run(self, all_gam_results: pd.DataFrame) -> dict:
-        """
-        Optimize prices using direct price-dependent elasticity adjustment.
+    def pick_price_convex_frontier(
+        self,
+        df_prod: pd.DataFrame,
+        rev_col: str = "conservative_rev",  # Changed default to conservative metric
+        price_col: str = "price",
+        max_rev_drop: float = 0.10,
+        min_support: int = 4,  # UPDATED: Minimum 4 weeks of data required
+    ) -> pd.Series:
 
-        Key insight: For inelastic products, we boost revenue predictions MORE at
-        higher prices. The multiplier increases linearly with the actual price value.
-        """
+        if df_prod.empty:
+            raise ValueError("df_prod is empty for this product.")
+
+        # 1) Filter by support (Revised Point 5)
+        # Since data is weekly, we reject prices seen for less than min_support weeks.
+        if "support_count" in df_prod.columns:
+            df_prod = df_prod[df_prod["support_count"] >= min_support].copy()
+
+        # Fallback: if filtering kills all rows, revert to top 3 supported rows to avoid empty return
+        if df_prod.empty:
+            return pd.Series(dtype=float)
+
+        # 2) Compress by price
+        # We take the mean of the revenue metric (conservative_rev) for duplicate price rows
+        g = df_prod.groupby(price_col, as_index=False).agg({rev_col: "mean"})
+        g = g.sort_values(price_col).reset_index(drop=True)
+
+        # 3) Convex Frontier Logic (Unchanged)
+        prices = g[price_col].to_numpy(dtype=float)
+        revs = g[rev_col].to_numpy(dtype=float)
+        n = len(g)
+        efficient = np.ones(n, dtype=bool)
+
+        for i in range(n):
+            for j in range(n):
+                if j == i:
+                    continue
+                # Dominated: higher price exists with >= revenue
+                if prices[j] > prices[i] and revs[j] >= revs[i]:
+                    efficient[i] = False
+                    break
+
+        frontier = g[efficient].copy()
+        if frontier.empty:
+            idx = g[rev_col].idxmax()
+            return g.loc[idx]
+
+        # 4) Select highest price within allowed drop from max frontier revenue
+        R_max = frontier[rev_col].max()
+        frontier = frontier[frontier[rev_col] >= (1.0 - max_rev_drop) * R_max]
+        idx = frontier[price_col].idxmax()
+
+        return frontier.loc[idx]
+
+    def run(self, all_gam_results: pd.DataFrame) -> dict:
+        if all_gam_results.empty:
+            raise ValueError("all_gam_results is empty.")
+
         df = all_gam_results.copy()
 
-        # Choose prediction basis
-        if "revenue_pred_0.5" in df.columns:
-            base_col = "revenue_pred_0.5"
+        # --- NEW: Compute Risk-Adjusted Revenue (Elaborated Point 4) ---
+        # 70% weight to P50 (Expected), 30% weight to P025 (Worst Case)
+        # This penalizes prices where the uncertainty band is massive.
+        if "revenue_pred_0.5" in df.columns and "revenue_pred_0.025" in df.columns:
+            df["conservative_rev"] = (
+                0.7 * df["revenue_pred_0.5"] + 0.3 * df["revenue_pred_0.025"]
+            )
         else:
-            base_col = "units_pred_0.5"
+            # Fallback if quantiles missing
+            df["conservative_rev"] = df.get("revenue_pred_0.5", 0)
 
-        if base_col is None:
-            raise ValueError("No prediction columns found in all_gam_results.")
+        # Sanitize
+        df["conservative_rev"] = df["conservative_rev"].fillna(0)
+        df_base = df[df["conservative_rev"] > 0].copy()
 
-        # Direct price-dependent elasticity adjustment
-        if "ratio" in df.columns and "price" in df.columns:
-            # Base multiplier from elasticity ratio
-            # Lower ratio (inelastic) → higher base multiplier
-            base_mult = 1.0 / (df["ratio"].abs() + 0.01)
+        # 1) Baseline: Simple Argmax on Conservative Score
+        best_avg = DataEng.pick_best_by_group(df_base, "product", "conservative_rev")
 
-            # KEY: Make multiplier scale with actual price value 
-            elasticity_multiplier = base_mult * (1.0 + (df["price"] / 20.0) ** 2)
+        # 2) Convex Frontier with strict Support Filter
+        convex_rows = []
+        for product, df_prod in df_base.groupby("product"):
+            try:
+                picked = self.pick_price_convex_frontier(
+                    df_prod,
+                    rev_col="conservative_rev",  # Optimizing risk-adjusted metric
+                    price_col="price",
+                    min_support=4,  # Require 4 weeks of history
+                )
+                if not picked.empty:
+                    # Match back to original row to get full metadata
+                    mask = df_prod["price"] == picked["price"]
+                    # If multiple matches, pick best P50
+                    df_match = (
+                        df_prod[mask]
+                        .sort_values("revenue_pred_0.5", ascending=False)
+                        .head(1)
+                    )
+                    convex_rows.append(df_match.iloc[0])
+                else:
+                    # Fallback if no prices met support threshold: pick max support price
+                    fallback = df_prod.sort_values(
+                        "support_count", ascending=False
+                    ).iloc[0]
+                    convex_rows.append(fallback)
+            except Exception as e:
+                print(f"Optimizer skipped {product}: {e}")
+                continue
 
-
-            # Apply multiplier to revenue predictions
-            df["elasticity_adjusted_revenue"] = df[base_col] * elasticity_multiplier
-
-            optimization_col = "elasticity_adjusted_revenue"
-        else:
-            optimization_col = base_col
-
-        # Sanitize metrics
-        opt_metric = pd.to_numeric(df[optimization_col], errors="coerce").replace(
-            [np.inf, -np.inf], np.nan
-        )
-        df_opt = df.loc[opt_metric.notna()]
-
-        base_metric = pd.to_numeric(df[base_col], errors="coerce").replace(
-            [np.inf, -np.inf], np.nan
-        )
-        df_base = df.loc[base_metric.notna()]
+        best_convex = pd.DataFrame(convex_rows).reset_index(drop=True)
 
         return {
-            "best_avg": DataEng.pick_best_by_group(df_base, "product", base_col),
-            "best_weighted": DataEng.pick_best_by_group(df_opt, "product", optimization_col),
+            "best_avg": best_avg,
+            "best_weighted": best_convex,
+            "best_convex": best_convex,
         }
 
- 
+
 class PipelineCore:
     """
     Stateless-ish helpers extracted from PricingPipeline._build_core_frames.
@@ -1005,6 +1070,22 @@ class PipelineCore:
 
         # NEW
         self.support_weighting = support_weighting.lower()
+
+    def sanitize_results_for_downstream(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Regular instance method to clean up predictions (clip negatives, fill NaNs).
+        """
+        # 1. Identify ALL prediction columns (Units AND Revenue)
+        cols = [c for c in df.columns if "units_pred_" in c or "revenue_pred_" in c]
+
+        for c in cols:
+            # 2. Coerce to numeric and Fill NaNs with 0.0
+            arr = pd.to_numeric(df[c], errors="coerce").fillna(0.0).to_numpy()
+
+            # 3. Clip negative values (Revenue/Units can't be negative)
+            df[c] = np.maximum(arr, 0.0)
+
+        return df
 
     # convenient setter if you prefer to construct engineer in PricingPipeline
     def set_engineer(self, engineer) -> None:
@@ -1466,7 +1547,8 @@ class PipelineCore:
 
         # --- small refine around the winner ---
         ns_ref = sorted({max(8, best_ns - 2), best_ns, min(32, best_ns + 2)})
-        lam_ref = np.geomspace(max(best_lam / 4.0, 1e-5), best_lam * 4.0, 8)
+        # lam_ref = np.geomspace(max(best_lam / 4.0, 1e-5), best_lam * 4.0, 8)
+        lam_ref = np.geomspace(max(best_lam / 4.0, 1e-5), min(best_lam * 4.0, 1e-2), 8)
 
         ps2 = self.ParamSearchCV(
             n_splines_grid=ns_ref,
@@ -1486,29 +1568,66 @@ class PipelineCore:
         }
 
     def fit_full(self, ts, y_all, w_all, ns_star: int, lam_star: float):
-        modeler = self.GAMModeler(
-            feature_cols=["price"],
-            base_gam_kwargs={"lam": float(lam_star), "n_splines": int(ns_star)},
-            monotone_default="down",  # enforce non-increasing units vs price
-            median_filter_window=None,  # keep off by default
-        )
-        modeler.fit(
-            train_df=ts[modeler.feature_cols],
-            y_train=y_all,
-            weights=w_all,
-            verbose=True,
-        )
-        return modeler
+        """
+        Fits a separate GAM for each product to prevent high-volume SKUs
+        from distorting the curves of low-volume SKUs.
+        """
+        modelers = {}
+
+        # Default to 0 if product_encoded missing (single product case)
+        if "product_encoded" not in ts.columns:
+            ts["product_encoded"] = 0
+
+        groups = ts.groupby("product_encoded")
+
+        for pid, group_df in groups:
+            # 1. Subset Targets & Weights
+            idx = group_df.index
+            y_sub = y_all[idx]
+            w_sub = w_all[idx]
+
+            # 2. Configure Modeler
+            # We train on Price + Event.
+            # We do NOT need a Product Factor f(2) because we are already in a product-specific loop.
+            modeler = self.GAMModeler(
+                feature_cols=["price"],
+                base_gam_kwargs={"lam": float(lam_star), "n_splines": int(ns_star)},
+                monotone_default="down",
+                median_filter_window=None,
+            )
+
+            # 3. Select Columns (Price + Event)
+            # Critical: Ensure 'event_encoded' is passed!
+            cols_needed = modeler.feature_cols + ["event_encoded"]
+            cols_to_pass = [c for c in cols_needed if c in group_df.columns]
+
+            try:
+                modeler.fit(
+                    train_df=group_df[cols_to_pass],
+                    y_train=y_sub,
+                    weights=w_sub,
+                    verbose=False,
+                )
+                modelers[pid] = modeler
+            except Exception as e:
+                print(f"⚠️ Failed to fit model for Product {pid}: {e}")
+
+        return modelers  # Returns Dict {pid: modeler}
 
     # ---------------------------- Results assembly ----------------------------
 
-    @staticmethod
-    def assemble_results(topsellers: pd.DataFrame, modeler) -> pd.DataFrame:
-        return (
-            topsellers[["product", "price", "asin", "asp"]]
-            .copy()
-            .reset_index(drop=True)
-        )
+    def assemble_results(self, topsellers: pd.DataFrame, modeler) -> pd.DataFrame:
+        """
+        Selects relevant columns from topsellers to prepare the results frame.
+        Now a regular instance method.
+        """
+        # We keep 'product_encoded' so downstream steps (add_predictions) can map models
+        cols = ["product", "price", "asin", "asp", "product_encoded"]
+
+        # Select only cols that actually exist (safety)
+        existing_cols = [c for c in cols if c in topsellers.columns]
+
+        return topsellers[existing_cols].copy().reset_index(drop=True)
 
     def add_support_counts(
         self, topsellers: pd.DataFrame, all_gam_results: pd.DataFrame
@@ -1545,14 +1664,39 @@ class PipelineCore:
         )
         return all_gam_results
 
-    def add_predictions(self, modeler, df: pd.DataFrame) -> pd.DataFrame:
-        return modeler.add_predictions_to_df(
-            df,
-            write_units=True,
-            write_revenue=True,
-            price_col="price",
-            inplace=False,
-        )
+    def add_predictions(self, modelers, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Iterates through the {pid: modeler} dict and predicts for each product group.
+        """
+        results = []
+
+        # Ensure grouping column exists
+        if "product_encoded" not in df.columns:
+            return df  # Should not happen if prep pipeline ran
+
+        groups = df.groupby("product_encoded")
+
+        for pid, group_df in groups:
+            if pid in modelers:
+                m = modelers[pid]
+                # Predict on this product's slice
+                # Note: 'inplace=False' returns a copy with preds added
+                res = m.add_predictions_to_df(
+                    group_df,
+                    write_units=True,
+                    write_revenue=True,
+                    price_col="price",
+                    inplace=False,
+                )
+                results.append(res)
+            else:
+                # If no model found (e.g. filtered out), return original rows
+                results.append(group_df)
+
+        if not results:
+            return df
+
+        return pd.concat(results).sort_index()
 
     def passthrough_actuals(
         self, topsellers: pd.DataFrame, df: pd.DataFrame
@@ -1672,12 +1816,13 @@ class PricingPipeline:
         self.core.ensure_columns(topsellers)
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
-        w_stable = self.core.compute_weights(topsellers)
-        topsellers[WEIGHT_COL] = w_stable
-        print(
-            f"⚖️  Weights computed | median={np.nanmedian(w_stable):.3f} | p95={np.nanpercentile(w_stable,95):.3f}"
-        )
+        # # DO NOT comment this block out:
+        # w_stable = np.ones(len(topsellers), dtype=float)
+        # topsellers[WEIGHT_COL] = w_stable
+        # print(f"⚖️  Weights disabled | using uniform weight=1.0 for all {len(w_stable):,} rows")
 
+        print("⚖️  Computing weights...")
+        topsellers[self.core.WEIGHT_COL] = self.core.compute_weights(topsellers)
         ts, X, y, w = self.core.assemble_numeric(topsellers)
         print(
             f"⚖️  Weights ready | median={float(np.nanmedian(w)):.3f} | p95={float(np.nanpercentile(w,95)):.3f} | n={len(w):,}"
@@ -1728,7 +1873,7 @@ class PricingPipeline:
         all_gam_results = self.core.add_support_counts(topsellers, all_gam_results)
         all_gam_results = self.core.add_predictions(modeler, all_gam_results)
         all_gam_results = self.core.passthrough_actuals(topsellers, all_gam_results)
-        all_gam_results = modeler.sanitize_results_for_downstream(all_gam_results)
+        all_gam_results = self.core.sanitize_results_for_downstream(all_gam_results)
 
         print(
             "\n"
@@ -1742,27 +1887,18 @@ class PricingPipeline:
         return topsellers, elasticity_df, all_gam_results
 
     def _build_best50(self, all_gam_results):
-        """Pick best P50 revenue row per product, but only if support is sufficient."""
-        # require these cols
-        need = {"revenue_pred_0.5", "units_pred_0.5", "support_count"}
-        if not need.issubset(all_gam_results.columns):
-            # graceful fallback to old behavior
-            idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
-            ...
-            return best50
+        """
+        Robust Index-Free Strategy: Sort & Drop Duplicates.
+        This completely avoids .idxmax() and .loc[], making KeyError impossible.
+        """
+        # 1. Work with a clean copy that has valid revenue
+        #    (If revenue is NaN, we can't optimize it anyway)
+        df = all_gam_results.dropna(subset=["revenue_pred_0.5"]).copy()
 
-        MIN_SUPPORT = 6  # tune: 5–8 works well
-        eligible = all_gam_results[all_gam_results["support_count"] >= MIN_SUPPORT]
-        # if a product has no eligible rows, fall back to the global argmax for that product
-        if eligible.empty:
-            idx = all_gam_results.groupby("product")["revenue_pred_0.5"].idxmax()
-        else:
-            idx = eligible.groupby("product")["revenue_pred_0.5"].idxmax()
-
-        best50 = (
-            all_gam_results.loc[
-                idx,
-                [
+        # Guard: if everything is empty/NaN, return empty schema
+        if df.empty:
+            return pd.DataFrame(
+                columns=[
                     "product",
                     "asin",
                     "price",
@@ -1770,12 +1906,50 @@ class PricingPipeline:
                     "units_pred_0.5",
                     "revenue_pred_0.5",
                     "support_count",
-                ],
-            ]
+                ]
+            )
+
+        # 2. Split into "High Support" (Preferred) vs "Low Support"
+        MIN_SUPPORT = 6
+        mask_supp = df["support_count"] >= MIN_SUPPORT
+
+        # 3. Strategy:
+        #    a) Sort by Revenue Descending (Best revenue at top)
+        #    b) Drop duplicates on 'product' (Keeps only the first/best row)
+
+        # Priority A: Products with High Support
+        # Sort by revenue desc -> keep top row per product
+        best_high_supp = (
+            df[mask_supp]
+            .sort_values(by="revenue_pred_0.5", ascending=False)
             .drop_duplicates(subset=["product"])
-            .reset_index(drop=True)
         )
-        return best50
+
+        # Priority B: Products that ONLY have Low Support (Fallback)
+        # Filter for products NOT in our high-support set
+        covered_products = set(best_high_supp["product"])
+        remaining_df = df[~df["product"].isin(covered_products)]
+
+        best_low_supp = remaining_df.sort_values(
+            by="revenue_pred_0.5", ascending=False
+        ).drop_duplicates(subset=["product"])
+
+        # 4. Combine and Cleanup
+        best50 = pd.concat([best_high_supp, best_low_supp], ignore_index=True)
+
+        cols = [
+            "product",
+            "asin",
+            "price",
+            "asp",
+            "units_pred_0.5",
+            "revenue_pred_0.5",
+            "support_count",
+        ]
+        # Safety: select only columns that actually exist
+        final_cols = [c for c in cols if c in best50.columns]
+
+        return best50[final_cols].reset_index(drop=True)
 
     def _normalize_key_types(self, *dfs):
         """Ensure asin is str across frames."""
@@ -2133,6 +2307,23 @@ class viz:
                 f"gam_results: missing columns after normalization: {missing}"
             )
 
+        # This keeps the line smooth by ignoring holiday spikes
+        y_p50 = (
+            "revenue_pred_bau_0.5"
+            if "revenue_pred_bau_0.5" in df.columns
+            else "revenue_pred_0.5"
+        )
+        y_lower = (
+            "revenue_pred_bau_0.025"
+            if "revenue_pred_bau_0.025" in df.columns
+            else "revenue_pred_0.025"
+        )
+        y_upper = (
+            "revenue_pred_bau_0.975"
+            if "revenue_pred_bau_0.975" in df.columns
+            else "revenue_pred_0.975"
+        )
+
         fig = go.Figure()
 
         if "order_date" in all_gam_results.columns:
@@ -2142,20 +2333,67 @@ class viz:
         else:
             opacities = pd.Series(0.55, index=all_gam_results.index)
 
-        for group_name, g in all_gam_results.groupby("product"):
-            g = g.dropna(subset=["asp"]).copy()
-            if g.empty:
-                continue
-            g = g.sort_values("asp")
-            group_opacities = (
-                opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
-            )
+        # for group_name, g in all_gam_results.groupby("product"):
+        #     g = g.dropna(subset=["asp"]).copy()
+        #     if g.empty:
+        #         continue
+        #     g = g.sort_values("asp")
+        #     group_opacities = (
+        #         opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
+        #     )
 
-            # ------- pred bands -------
+        #     # ------- pred bands -------
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=g["asp"],
+        #             y=g["revenue_pred_0.975"],
+        #             mode="lines",
+        #             line=dict(width=0),
+        #             showlegend=False,
+        #         )
+        #     )
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=g["asp"],
+        #             y=g["revenue_pred_0.025"],
+        #             mode="lines",
+        #             line=dict(width=0),
+        #             fill="tonexty",
+        #             fillcolor="rgba(232, 233, 235, 0.7)",  # bright gray, opc = 0.7
+        #             opacity=0.25,
+        #             name=f"{group_name} • Predicted Rev Band",
+        #         )
+        #     )
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=g["asp"],
+        #             y=g["revenue_pred_0.5"],
+        #             mode="lines",
+        #             name=f"{group_name} • Predicted Rev (P50)",
+        #             line=dict(color="rgba(184, 33, 50, 1)"),
+        #         )
+        #     )
+
+        #     # ----------------------- actual ---------------------------------
+        #     fig.add_trace(
+        #         go.Scatter(
+        #             x=g["asp"],
+        #             y=g["revenue_actual"],
+        #             mode="markers",
+        #             marker_symbol="x",
+        #             name=f"{group_name} • Actual Revenue",
+        #             marker=dict(size=8, color="#808992", opacity=group_opacities),
+        #         )
+        #     )
+
+        for group_name, g in all_gam_results.groupby("product"):
+            g = g.dropna(subset=["asp"]).sort_values("asp")
+
+            # 1. Grey Bands (Uncertainty) - Use BAU
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
-                    y=g["revenue_pred_0.975"],
+                    y=g[y_upper],
                     mode="lines",
                     line=dict(width=0),
                     showlegend=False,
@@ -2164,26 +2402,28 @@ class viz:
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
-                    y=g["revenue_pred_0.025"],
+                    y=g[y_lower],
                     mode="lines",
                     line=dict(width=0),
                     fill="tonexty",
-                    fillcolor="rgba(232, 233, 235, 0.7)",  # bright gray, opc = 0.7
+                    fillcolor="rgba(232, 233, 235, 0.7)",
                     opacity=0.25,
-                    name=f"{group_name} • Predicted Rev Band",
+                    name=f"{group_name} • Predicted Rev Band (BAU)",
                 )
             )
+
+            # 2. Red Line (Recommended) - Use BAU
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
-                    y=g["revenue_pred_0.5"],
+                    y=g[y_p50],
                     mode="lines",
-                    name=f"{group_name} • Predicted Rev (P50)",
+                    name=f"{group_name} • Predicted Rev (BAU)",
                     line=dict(color="rgba(184, 33, 50, 1)"),
                 )
             )
 
-            # ----------------------- actual ---------------------------------
+            # 3. Actuals (Keep Real!) - These will float ABOVE the line on Event days
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
@@ -2191,7 +2431,7 @@ class viz:
                     mode="markers",
                     marker_symbol="x",
                     name=f"{group_name} • Actual Revenue",
-                    marker=dict(size=8, color="#808992", opacity=group_opacities),
+                    marker=dict(size=8, color="#808992", opacity=0.6),
                 )
             )
             # ------------------- Diamonds for pred prices -------------------

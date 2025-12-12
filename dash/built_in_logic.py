@@ -1833,23 +1833,46 @@ class PricingPipeline:
             GAMModeler=GAMModeler,
             ParamSearchCV=ParamSearchCV,
         )
-        # self.core.set_engineer(self.engineer)  # <-- one line and done
 
     @classmethod
-    def from_csv_folder(
-        cls,
-        base_dir,
-        data_folder="data",
-        pricing_file="pricing.csv",
-        product_file="products.csv",
-        top_n=10,
-        param_search_kwargs=None,
-    ):
-        pricing_df = pd.read_csv(os.path.join(base_dir, data_folder, pricing_file))
-        product_df = pd.read_csv(os.path.join(base_dir, data_folder, product_file))
-        return cls(
-            pricing_df, product_df, top_n, param_search_kwargs
-        ).assemble_dashboard_frames()
+    def from_csv_folder(cls, base_dir, data_folder="data", pricing_file=None,
+                        product_file=None, top_n=10):
+        """
+        Load pricing and product data from folder.
+        Now supports both .csv and .xlsx extensions for both files.
+
+        Args:
+            base_dir: Base directory path
+            data_folder: Data folder name (default: "data")
+            pricing_file: Name of pricing file (e.g., 'boxie_pricing.xlsx' or 'boxie_pricing.csv')
+            product_file: Name of product file (e.g., 'boxie_product.csv' or 'boxie_products.xlsx')
+            top_n: Number of top products to process
+        """
+        import os
+        import pandas as pd
+
+        pricing_path = os.path.join(base_dir, data_folder, pricing_file)
+        product_path = os.path.join(base_dir, data_folder, product_file)
+
+        # Read pricing file based on extension
+        if pricing_file.endswith('.xlsx'):
+            price_df = pd.read_excel(pricing_path)
+        elif pricing_file.endswith('.csv'):
+            price_df = pd.read_csv(pricing_path)
+        else:
+            raise ValueError(f"Unsupported pricing file format: {pricing_file}")
+
+        # Read product file based on extension
+        if product_file.endswith('.xlsx'):
+            prod_df = pd.read_excel(product_path)
+        elif product_file.endswith('.csv'):
+            prod_df = pd.read_csv(product_path)
+        else:
+            raise ValueError(f"Unsupported product file format: {product_file}")
+
+        # Continue with existing pipeline logic
+        return cls(price_df, prod_df, top_n=top_n)
+
 
     def _build_curr_price_df(self):
         product = self.engineer.product_df.copy()

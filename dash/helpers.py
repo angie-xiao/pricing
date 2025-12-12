@@ -102,62 +102,114 @@ class Cache:
 
         return h.hexdigest()[:12]
 
-
     @staticmethod
     def build_frames_with_cache(
         base_dir: str,
         data_folder: str = "data",
-        pricing_file: str = "pricing.csv",
-        product_file: str = "products.csv",
+        pricing_pattern: str = "_pricing",
+        product_pattern: str = "_product",
         top_n: int = 10,
         force_rebuild: bool = True,
-        param_search_kwargs: dict = None  # Add this parameter
+        param_search_kwargs: dict = None
     ) -> Dict[str, pd.DataFrame]:
+        """
+        Discover and process multiple pricing/product file pairs with caching support.
+        Now supports both .csv and .xlsx extensions for both pricing and product files.
+        Handles patterns: *_pricing.* and *_product.*
+        """
+        import os
+        import pickle
+        import pandas as pd
+        from built_in_logic import PricingPipeline
+
         cache_dir = os.path.join(base_dir, ".cache")
         os.makedirs(cache_dir, exist_ok=True)
 
-        pricing_path = os.path.join(base_dir, data_folder, pricing_file)
-        product_path = os.path.join(base_dir, data_folder, product_file)
-        
-        # Include parameters in signature
-        param_sig = ""
-        if param_search_kwargs:
-            param_items = sorted(param_search_kwargs.items())
-            param_sig = "|".join(f"{k}:{v}" for k, v in param_items)
-        
-        sig = Cache.files_sig(
-            [pricing_path, product_path], 
-            top_n=top_n, 
-            version=f"{Cache.code_sig()}|{param_sig}"
-        )
+        data_path = os.path.join(base_dir, data_folder)
+        all_files = os.listdir(data_path)
 
-        cache_fp = os.path.join(cache_dir, f"frames_{sig}.pkl")
+        # Find pricing files (both .csv and .xlsx)
+        pricing_files = [
+            f for f in all_files
+            if pricing_pattern in f.lower() and (f.endswith('.csv') or f.endswith('.xlsx'))
+        ]
 
-        # Clear cache if force_rebuild
-        if force_rebuild and os.path.exists(cache_fp):
-            os.remove(cache_fp)
+        # Find product files (both .csv and .xlsx)
+        product_files = [
+            f for f in all_files
+            if product_pattern in f.lower() and (f.endswith('.csv') or f.endswith('.xlsx'))
+        ]
 
-        if force_rebuild or not os.path.exists(cache_fp):
-            from built_in_logic import PricingPipeline
-  
+        results = {}
+        product_lines = []
 
-            frames = PricingPipeline.from_csv_folder(
-                base_dir,
-                data_folder="data",
-                pricing_file="pricing.csv",
-                product_file="products.csv",
-                top_n=10,
+        for pricing_file in pricing_files:
+            # Extract prefix (e.g., 'boxie' from 'boxie_pricing.xlsx')
+            prefix = pricing_file.lower().replace(pricing_pattern.lower(), '')
+            prefix = prefix.replace('.xlsx', '').replace('.csv', '').strip('_')
+
+            # Find matching product file with same prefix
+            matching_product = None
+            for pf in product_files:
+                if pf.lower().startswith(prefix + product_pattern.lower()):
+                    matching_product = pf
+                    break
+
+            if not matching_product:
+                print(f"Warning: No matching product file found for {pricing_file}")
+                continue
+
+            print(f"Processing: {pricing_file} + {matching_product}")
+
+            # Build paths
+            pricing_path = os.path.join(data_path, pricing_file)
+            product_path = os.path.join(data_path, matching_product)
+
+            # Include parameters in signature
+            param_sig = ""
+            if param_search_kwargs:
+                param_items = sorted(param_search_kwargs.items())
+                param_sig = "|".join(f"{k}:{v}" for k, v in param_items)
+
+            sig = Cache.files_sig(
+                [pricing_path, product_path],
+                top_n=top_n,
+                version=f"{Cache.code_sig()}|{param_sig}"
             )
-            # Only save to cache if not forcing rebuild
-            if not force_rebuild:
-                with open(cache_fp, "wb") as f:
-                    pickle.dump(frames, f)
-            
-            return frames
 
-        # Load from cache
-        with open(cache_fp, "rb") as f:
-            return pickle.load(f)
+            cache_fp = os.path.join(cache_dir, f"frames_{prefix}_{sig}.pkl")
+
+            # Clear cache if force_rebuild
+            if force_rebuild and os.path.exists(cache_fp):
+                os.remove(cache_fp)
+
+            if force_rebuild or not os.path.exists(cache_fp):
+                frames = PricingPipeline.from_csv_folder(
+                    base_dir,
+                    data_folder=data_folder,
+                    pricing_file=pricing_file,
+                    product_file=matching_product,
+                    top_n=top_n,
+                )
+
+                # Only save to cache if not forcing rebuild
+                if not force_rebuild:
+                    with open(cache_fp, "wb") as f:
+                        pickle.dump(frames, f)
+            else:
+                # Load from cache
+                with open(cache_fp, "rb") as f:
+                    frames = pickle.load(f)
+
+            # Add to results with prefix
+            for key, df in frames.items():
+                results[f"{prefix}_{key}"] = df
+
+            product_lines.append(prefix)
+
+        results['_product_lines'] = product_lines
+        return results
+
 
 
 # =====================================================================

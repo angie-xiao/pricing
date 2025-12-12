@@ -23,9 +23,9 @@ CREATE TEMP TABLE filtered_shipments AS (
         and o.our_price > 0
         AND o.is_retail_merchant = 'Y'
         AND o.asin in (
-            'B06ZZ4679J','B089LLHMQL','B08NTPM4Z1','B08NTQ7XVB','B08NTSCMZS','B09P323G3B',
-            'B09P32SSRL','B09P3L3BJQ','B09V65VY5J','B0B3S7JJ7G','B0B3S91RJC','B0DP36S67M'
-        ) -- adjustable filter 
+            'B06ZZ4679J','B089LLHMQL','B08NTPM4Z1','B08NTQ7XVB','B08NTSCMZS','B09P323G3B','B09P32SSRL',
+            'B09P3L3BJQ','B09V65VY5J','B0B3S7JJ7G','B0B3S91RJC','B0DP36S67M'
+        ) -- required filter
 );
 
 
@@ -49,7 +49,7 @@ CREATE TEMP TABLE orders_with_asin_attrs AS (
         ON maa.marketplace_id = fs.marketplace_id
         AND maa.region_id = fs.region_id
         AND maa.asin = fs.asin
-    -- WHERE fs.asin = 'B07DK2BQGD'  -- Debugging for specific ASIN
+    -- WHERE fs.asin = 'B07DK2BQGD'  -- debugging
 );
 
 
@@ -77,7 +77,7 @@ CREATE TEMP TABLE orders_with_vendor AS (
     FROM orders_with_manufacturer o
         LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
         ON v.vendor_code = o.vendor_code
-    WHERE v.company_code = 'CI08L' -- adjustable filter 
+    WHERE v.company_code = 'CI08L' -- required filter
 );
 
 /* Step 2d: Add revenue share amount (final base_orders) */
@@ -363,4 +363,4 @@ CREATE TEMP TABLE orders_event AS (
 );
 
 
--- SELECT * FROM orders_event;
+SELECT * FROM orders_event;

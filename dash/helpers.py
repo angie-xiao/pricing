@@ -932,12 +932,6 @@ class OverviewHelpers:
         except Exception:
             return "—"
 
-
-    # @staticmethod
-    # def elasticity_texts(
-    #     product_name: str, elasticity_df: pd.DataFrame
-    # ) -> Tuple[str, str]:
-    #     return Metrics.update_elasticity_kpi_by_product(product_name, elasticity_df)
     def elasticity_texts(self, product_name, elasticity_df):
         """
         Returns (main_value_text, subtext_label).
@@ -1132,10 +1126,6 @@ def fmt_date(dt):
 # metrics / scenario / notes wrappers
 def model_fit_units(prod_df):
     return Metrics.model_fit_units(prod_df)
-
-
-# def update_elasticity_kpi_by_product(product_name, elast_df):
-#     return Metrics.update_elasticity_kpi_by_product(product_name, elast_df)
 
 
 def scenario_table(prod_df):

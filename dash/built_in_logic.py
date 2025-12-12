@@ -21,7 +21,7 @@ too much weight assigned to monoticity. not enough to elasticity (e.g., gently s
 # --------- built_in_logic.py  ---------
 # (RMSE-focused; Top-N only; adds annualized opps & data range)
 from __future__ import annotations
-from typing import Callable, Optional, List, Dict, Tuple, Iterable
+from typing import Callable, Optional, List, Dict, Tuple
 import math
 import os
 import pandas as pd
@@ -36,7 +36,7 @@ from dash_bootstrap_templates import load_figure_template
 
 # ML
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV
 from sklearn.neighbors import KernelDensity, NearestNeighbors
 from sklearn.isotonic import IsotonicRegression
 from pygam import ExpectileGAM, s, l, f
@@ -285,23 +285,13 @@ class DataEngineer:
 
 
 class Weighting:
-    """
-    Lightweight, safe weighting:
-      - optional time decay (order_date)
-      - rarity as inverse local frequency over `rarity_col` (e.g., price/SKU),
-        gently blended & tightly bounded so it cannot dominate
-      - single normalization path (median -> 1) keeps scale stable
-      - quantile clip + final sanitization (finite, >0) avoids NaN/Inf issues
-    """
-
     def __init__(
         self,
         *,
         time_col: str = "order_date",
-        # rarity_col: str = "price",
-        half_life_days: int | None = 90,  # None to disable time decay
-        # rarity_gamma: float = 0,          # 0=off, 1=full strength
-        rarity_bounds: tuple[float, float] = (0.90, 1.12),
+        half_life_days: int | None = 90,
+        support_method: str | None = None,  # "knn", "kde", or None
+        support_params: dict | None = None,
         normalize: bool = True,
         clip_quantiles: tuple[float, float] = (0.05, 0.95),
         nan_fill: float = 1.0,
@@ -309,36 +299,36 @@ class Weighting:
         neginf_fill: float = 0.0,
     ):
         self.time_col = time_col
-        # self.rarity_col = rarity_col
         self.half_life_days = half_life_days
-        # self.rarity_gamma = float(rarity_gamma)
-        self.rarity_bounds = rarity_bounds
+        self.support_method = support_method
+        self.support_params = support_params or {}
+        
         self.normalize = bool(normalize)
         self.clip_quantiles = clip_quantiles
         self.nan_fill = float(nan_fill)
         self.posinf_fill = float(posinf_fill)
         self.neginf_fill = float(neginf_fill)
-        self.best_ns_ = None
-        self.best_lam_ = None
-        self.best_params_ = {}
-        self.best_score_ = float("inf")
 
-    def build(self, df: pd.DataFrame) -> np.ndarray:
-        """Return 1-D numpy array of final sample weights aligned to df.index (finite, >0)."""
-        w_time = self._time_weights(df, col=self.time_col)
-        # w_rar = self._rarity_multiplier(df, col=self.rarity_col)
+    def build(self, df: pd.DataFrame, price_col: str = "price") -> np.ndarray:
+        """Generates combined weights (Time Decay * Density/Support)."""
+        # 1. Time Decay
+        w = self._time_weights(df, col=self.time_col)
 
-        # combine
-        # w = w_time * w_rar
-        w = w_time
+        # 2. Density/Support Weighting
+        if self.support_method and price_col in df.columns:
+            prices = df[price_col].to_numpy(dtype=float)
+            # Call internal instance method using self
+            w_supp = self.compute_support(
+                prices, prices, method=self.support_method, **self.support_params
+            )
+            w *= w_supp
 
-        # single normalization (median -> 1)
+        # 3. Normalization & Clipping
         if self.normalize:
             med = np.nanmedian(w)
             if np.isfinite(med) and med > 0:
                 w = w / med
 
-        # light clipping
         lo_q, hi_q = self.clip_quantiles
         finite_mask = np.isfinite(w)
         if finite_mask.any():
@@ -346,7 +336,6 @@ class Weighting:
             if np.isfinite(qlo) and np.isfinite(qhi) and qhi > qlo:
                 w = np.clip(w, qlo, qhi)
 
-        # final sanitization
         w = np.nan_to_num(
             w, nan=self.nan_fill, posinf=self.posinf_fill, neginf=self.neginf_fill
         )
@@ -361,18 +350,81 @@ class Weighting:
         if s.notna().any():
             ref = s.max()
             dt_days = (ref - s).dt.days.to_numpy()
-            # fill NaT deltas with median
             if np.isnan(dt_days).any():
                 med_days = np.nanmedian(dt_days)
-                if not np.isfinite(med_days):
-                    med_days = 0.0
-                dt_days = np.where(np.isfinite(dt_days), dt_days, med_days)
+                dt_days = np.where(np.isfinite(dt_days), dt_days, med_days or 0.0)
             hl = max(1.0, float(self.half_life_days))
             w = 0.5 ** (np.clip(dt_days, 0.0, None) / hl)
             return w.astype(float, copy=False)
-        else:
-            return np.ones(len(df), dtype=float)
+        return np.ones(len(df), dtype=float)
 
+    # --- Refactored Instance Methods (No Decorators) ---
+
+    def compute_support(self, query: np.ndarray, ref: np.ndarray, method="knn", **kwargs) -> np.ndarray:
+        """Dispatcher for support weighting."""
+        if method == "knn":
+            return self.knn_support(query, ref, **kwargs)
+        elif method == "kde":
+            return self.kde_support(query, ref, **kwargs)
+        return np.ones_like(query, dtype=float)
+
+    def knn_support(self, query_prices: np.ndarray, ref_prices: np.ndarray, k: int = 15) -> np.ndarray:
+        """kNN radius (inverse local density)."""
+        x = np.asarray(ref_prices, float)
+        x = x[np.isfinite(x)]
+        q = np.asarray(query_prices, float)
+        
+        if x.size < max(3, k + 1):
+            return np.ones_like(q, float)
+
+        k = min(k, x.size - 1)
+        nn = NearestNeighbors(n_neighbors=k)
+        nn.fit(x.reshape(-1, 1))
+        
+        dists, _ = nn.kneighbors(q.reshape(-1, 1), n_neighbors=k)
+        rad = dists[:, -1]
+        
+        dens = 1.0 / np.maximum(rad, np.finfo(float).eps)
+        dmin, dmax = dens.min(), dens.max()
+        rng = dmax - dmin
+        if rng < 1e-12:
+            return np.ones_like(q)
+            
+        dens_norm = (dens - dmin) / rng
+        return 0.25 + 0.75 * dens_norm
+
+    def kde_support(self, query_prices: np.ndarray, ref_prices: np.ndarray, bandwidth: str | float = "scott") -> np.ndarray:
+        """Gaussian KDE density."""
+        x = np.asarray(ref_prices, float)
+        x = x[np.isfinite(x)]
+        q = np.asarray(query_prices, float)
+        
+        if x.size < 2:
+            return np.ones_like(q, float)
+
+        if isinstance(bandwidth, str) and bandwidth == "auto":
+            std = np.std(x)
+            lo = max(1e-3, 0.05 * std)
+            hi = max(lo * 1.01, 2.0 * std)
+            params = {"bandwidth": np.logspace(np.log10(lo), np.log10(hi), 15)}
+            gs = GridSearchCV(KernelDensity(kernel="gaussian"), params, cv=5, n_jobs=1)
+            gs.fit(x.reshape(-1, 1))
+            kde = gs.best_estimator_
+        else:
+            bw = bandwidth if isinstance(bandwidth, (int, float)) else 1.0 
+            kde = KernelDensity(kernel="gaussian", bandwidth=bw).fit(x.reshape(-1, 1))
+
+        log_d = kde.score_samples(q.reshape(-1, 1))
+        d = np.exp(log_d)
+        
+        dmin, dmax = d.min(), d.max()
+        rng = dmax - dmin
+        if rng < 1e-12:
+            return np.ones_like(q)
+
+        d_norm = (d - dmin) / rng
+        return 0.25 + 0.75 * d_norm
+    
 
 class ParamSearchCV:
     def __init__(
@@ -781,6 +833,9 @@ class GAMModeler:
         return np.where(np.isnan(m), y, m)
 
     def fit(self, train_df, y_train, weights=None, verbose=False):
+        '''
+        prioritize high-rev data points
+        '''
         # 1. Prepare Feature Matrix X: [Price, Event]
         X_price = np.log1p(
             pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
@@ -1538,8 +1593,9 @@ class PipelineCore:
             split.get("w_tr") is None or split.get("w_val") is None
         ):
             if weighting == "knn":
-                w_tr = self.knn_support_weights(p_tr, p_tr, k=k)
-                w_val = self.knn_support_weights(p_val, p_tr, k=k)
+                weigher = self.Weighting()
+                w_tr = weigher.knn_support(p_tr, p_tr, k=k)
+                w_val = weigher.knn_support(p_val, p_tr, k=k) 
             else:  # "kde"
                 w_tr = self.kde_support_weights(p_tr, bandwidth=kde_bandwidth)
                 w_val = self.kde_support_weights(
@@ -1831,10 +1887,6 @@ class PricingPipeline:
         self.core.ensure_columns(topsellers)
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
 
-        # # DO NOT comment this block out:
-        # w_stable = np.ones(len(topsellers), dtype=float)
-        # topsellers[WEIGHT_COL] = w_stable
-        # print(f"⚖️  Weights disabled | using uniform weight=1.0 for all {len(w_stable):,} rows")
 
         print("⚖️  Computing weights...")
         topsellers[self.core.WEIGHT_COL] = self.core.compute_weights(topsellers)
@@ -1869,14 +1921,6 @@ class PricingPipeline:
         best = self.core.tune_auto(
             split, price_col=None, weighting=None, use_isotonic=False
         )
-
-        # # split already built by your train_val_split(ts, y, w)
-        # split = self.core.train_val_split(ts, y, w)
-
-        # # one-call tuning (no manual grids, no isotonic)
-        # best = self.core.tune_auto(
-        #     split, price_col=0, weighting="knn", use_isotonic=False
-        # )
 
         ns_star, lam_star = int(best["n_splines"]), float(best["lam"])
         self._log(f"[TUNING] best ns={ns_star} | best λ={lam_star:g}")
@@ -2348,59 +2392,6 @@ class viz:
         else:
             opacities = pd.Series(0.55, index=all_gam_results.index)
 
-        # for group_name, g in all_gam_results.groupby("product"):
-        #     g = g.dropna(subset=["asp"]).copy()
-        #     if g.empty:
-        #         continue
-        #     g = g.sort_values("asp")
-        #     group_opacities = (
-        #         opacities[g.index] if "order_date" in all_gam_results.columns else 0.55
-        #     )
-
-        #     # ------- pred bands -------
-        #     fig.add_trace(
-        #         go.Scatter(
-        #             x=g["asp"],
-        #             y=g["revenue_pred_0.975"],
-        #             mode="lines",
-        #             line=dict(width=0),
-        #             showlegend=False,
-        #         )
-        #     )
-        #     fig.add_trace(
-        #         go.Scatter(
-        #             x=g["asp"],
-        #             y=g["revenue_pred_0.025"],
-        #             mode="lines",
-        #             line=dict(width=0),
-        #             fill="tonexty",
-        #             fillcolor="rgba(232, 233, 235, 0.7)",  # bright gray, opc = 0.7
-        #             opacity=0.25,
-        #             name=f"{group_name} • Predicted Rev Band",
-        #         )
-        #     )
-        #     fig.add_trace(
-        #         go.Scatter(
-        #             x=g["asp"],
-        #             y=g["revenue_pred_0.5"],
-        #             mode="lines",
-        #             name=f"{group_name} • Predicted Rev (P50)",
-        #             line=dict(color="rgba(184, 33, 50, 1)"),
-        #         )
-        #     )
-
-        #     # ----------------------- actual ---------------------------------
-        #     fig.add_trace(
-        #         go.Scatter(
-        #             x=g["asp"],
-        #             y=g["revenue_actual"],
-        #             mode="markers",
-        #             marker_symbol="x",
-        #             name=f"{group_name} • Actual Revenue",
-        #             marker=dict(size=8, color="#808992", opacity=group_opacities),
-        #         )
-        #     )
-
         for group_name, g in all_gam_results.groupby("product"):
             g = g.dropna(subset=["asp"]).sort_values("asp")
 
@@ -2644,3 +2635,5 @@ class viz:
             text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper"
         )
         return fig
+
+

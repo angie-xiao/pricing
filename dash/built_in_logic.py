@@ -80,45 +80,55 @@ TARGET_COL = "shipped_units"
 WEIGHT_COL = "w"
 
 
+
 class ElasticityAnalyzer:
-    @staticmethod
-    def compute(topsellers: pd.DataFrame) -> pd.DataFrame:
-        eps = 1e-9
+    def compute(self, topsellers: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculates Price Elasticity using Log-Log Regression Slope (Beta).
+        Formula: ln(Qty) = Beta * ln(Price) + Alpha
+        """
+        def _calc_log_log_slope(g):
+            # Need enough points for a regression
+            if len(g) < 4: 
+                return np.nan
+            
+            # 1. Log-Log Transform
+            #    Add +1 or +0.01 to avoid log(0) errors
+            y = np.log(g["shipped_units"] + 1)
+            x = np.log(g["price"] + 0.01)
+            
+            # 2. Linear Fit (y = mx + c)
+            try:
+                # Returns [slope, intercept]
+                slope, _ = np.polyfit(x, y, 1)
+                return slope
+            except Exception:
+                return np.nan
+
+        # Apply regression per product
         elasticity = (
             topsellers.groupby("product")
-            .agg(
-                asp_max=("price", "max"),
-                asp_min=("price", "min"),
-                shipped_units_max=("shipped_units", "max"),
-                shipped_units_min=("shipped_units", "min"),
-                product_count=("product", "count"),
-            )
-            .reset_index()
+            .apply(_calc_log_log_slope)
+            .reset_index(name="ratio")
         )
 
-        # Calculate elasticity metrics
-        elasticity["pct_change_price"] = 100.0 * (
-            np.log(np.maximum(elasticity["asp_max"], eps))
-            - np.log(np.maximum(elasticity["asp_min"], eps))
-        )
-        elasticity["pct_change_qty"] = 100.0 * (
-            np.log(np.maximum(elasticity["shipped_units_max"], eps))
-            - np.log(np.maximum(elasticity["shipped_units_min"], eps))
-        )
-
-        # Calculate price elasticity ratio
-        elasticity["ratio"] = elasticity["pct_change_qty"] / np.where(
-            elasticity["pct_change_price"] == 0, np.nan, elasticity["pct_change_price"]
+        # 3. Labeling Logic (Economic Definitions)
+        #    Slope = -1.5  -> Price +1%, Vol -1.5% -> ELASTIC (Sensitive)
+        #    Slope = -0.5  -> Price +1%, Vol -0.5% -> INELASTIC (Not Sensitive)
+        
+        elasticity["magnitude"] = elasticity["ratio"].abs()
+        
+        elasticity["elasticity_label"] = np.where(
+            elasticity["magnitude"] > 1.0, "ELASTIC", "INELASTIC"
         )
 
-        # Add normalized elasticity score (0-100)
-        elasticity["elasticity_score"] = 100 * (1 - elasticity["ratio"].rank(pct=True))
+        # 4. Percentile Score (0-100) for the UI
+        #    Higher magnitude = Higher score (More sensitive)
+        elasticity["elasticity_score"] = elasticity["magnitude"].rank(pct=True) * 100
+        
+        elasticity = elasticity.fillna(0)
 
-        # Add confidence metric based on data points
-        elasticity["confidence"] = np.minimum(100, elasticity["product_count"] / 5)
-
-        return elasticity.sort_values("ratio", ascending=False).reset_index(drop=True)
-
+        return elasticity.sort_values("magnitude", ascending=False).reset_index(drop=True)
 
 class DataEngineer:
     def __init__(self, pricing_df, product_df, top_n=10, granularity="daily"):
@@ -1282,13 +1292,14 @@ class PipelineCore:
             self._price_col = 0  # fallback
 
         return ts, X, y, w
-
+        
     def elasticity_best_effort(self, topsellers: pd.DataFrame) -> pd.DataFrame:
-        try:
-            return self.ElasticityAnalyzer.compute(topsellers)
-        except Exception:
-            return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
-
+            try:
+                # FIX: Instantiate the class () then call .compute()
+                return self.ElasticityAnalyzer().compute(topsellers)
+            except Exception:
+                return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
+            
     def standardize_continuous_inplace(self, X: np.ndarray, cont_idx=(0,)):
         """
         Z-score selected continuous columns of X in place.

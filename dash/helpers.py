@@ -580,34 +580,34 @@ class Metrics:
         return f"${rmse:,.0f}", sub
     
     
-    @staticmethod
-    def update_elasticity_kpi_by_product(
-        product_name: str, elast_df: pd.DataFrame
-    ) -> Tuple[str, str]:
-        try:
-            row = elast_df.loc[elast_df["product"] == product_name]
-            if row.empty or "ratio" not in row:
-                return "—", ""
+    # @staticmethod
+    # def update_elasticity_kpi_by_product(
+    #     product_name: str, elast_df: pd.DataFrame
+    # ) -> Tuple[str, str]:
+    #     try:
+    #         row = elast_df.loc[elast_df["product"] == product_name]
+    #         if row.empty or "ratio" not in row:
+    #             return "—", ""
 
-            ratio = float(row["ratio"].iloc[0])
+    #         ratio = float(row["ratio"].iloc[0])
 
-            # Use elasticity_score instead of pct
-            elasticity_score = float(row["elasticity_score"].iloc[0])
-            value_text = f"{ratio:,.2f}"
+    #         # Use elasticity_score instead of pct
+    #         elasticity_score = float(row["elasticity_score"].iloc[0])
+    #         value_text = f"{ratio:,.2f}"
 
-            # Calculate elasticity tier
-            elasticity_tier = int(round(elasticity_score))
-            top_share = max(1, elasticity_tier)
+    #         # Calculate elasticity tier
+    #         elasticity_tier = int(round(elasticity_score))
+    #         top_share = max(1, elasticity_tier)
 
-            subtext = (
-                "Top ~{0}% most ELASTIC".format(top_share)
-                if elasticity_score >= 50
-                else "Top ~{0}% most INELASTIC".format(top_share)
-            )
-            return value_text, subtext
+    #         subtext = (
+    #             "Top ~{0}% most ELASTIC".format(top_share)
+    #             if elasticity_score >= 50
+    #             else "Top ~{0}% most INELASTIC".format(top_share)
+    #         )
+    #         return value_text, subtext
 
-        except Exception:
-            return "—", ""
+    #     except Exception:
+    #         return "—", ""
 
 
 class Scenario:
@@ -933,11 +933,44 @@ class OverviewHelpers:
             return "—"
 
 
-    @staticmethod
-    def elasticity_texts(
-        product_name: str, elasticity_df: pd.DataFrame
-    ) -> Tuple[str, str]:
-        return Metrics.update_elasticity_kpi_by_product(product_name, elasticity_df)
+    # @staticmethod
+    # def elasticity_texts(
+    #     product_name: str, elasticity_df: pd.DataFrame
+    # ) -> Tuple[str, str]:
+    #     return Metrics.update_elasticity_kpi_by_product(product_name, elasticity_df)
+    def elasticity_texts(self, product_name, elasticity_df):
+        """
+        Returns (main_value_text, subtext_label).
+        Now a regular instance method (no @staticmethod).
+        """
+        if elasticity_df is None or elasticity_df.empty:
+            return "N/A", "No data"
+            
+        row = elasticity_df[elasticity_df["product"] == product_name]
+        if row.empty:
+            return "N/A", "No data"
+            
+        # 1. Get Values (Ratio = Slope)
+        beta = row["ratio"].iloc[0]
+        score = row["elasticity_score"].iloc[0]
+        magnitude = abs(beta)
+        
+        # 2. Economic Category (|E| > 1 is Elastic)
+        if magnitude >= 1.05:
+            cat = "ELASTIC"
+        elif magnitude <= 0.95:
+            cat = "INELASTIC"
+        else:
+            cat = "BALANCED DEMAND"
+            
+        # 3. Relative Rank Text
+        if score > 50:
+            rank_str = f"Top {100 - score:.0f}% most Sensitive"
+        else:
+            rank_str = f"Bottom {score:.0f}% Sensitivity"
+
+        return f"{beta:.2f}", f"{cat} • {rank_str}"
+
 
     @staticmethod
     def filter_product_rows(asin: str, all_gam_results: pd.DataFrame) -> pd.DataFrame:
@@ -1101,8 +1134,8 @@ def model_fit_units(prod_df):
     return Metrics.model_fit_units(prod_df)
 
 
-def update_elasticity_kpi_by_product(product_name, elast_df):
-    return Metrics.update_elasticity_kpi_by_product(product_name, elast_df)
+# def update_elasticity_kpi_by_product(product_name, elast_df):
+#     return Metrics.update_elasticity_kpi_by_product(product_name, elast_df)
 
 
 def scenario_table(prod_df):

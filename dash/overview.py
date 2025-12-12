@@ -65,7 +65,8 @@ def register_callbacks(
             asp_val = OH.recommended_price_text(asin, best50_optimal_pricing_df)
 
             # Elasticity KPI
-            elast_val, elast_sub = OH.elasticity_texts(pname, elasticity_df)
+            # elast_val, elast_sub = OH.elasticity_texts(pname, elasticity_df)
+            elast_val, elast_sub = OH().elasticity_texts(pname, elasticity_df)
 
             # Filtered data & dual graph
             filt = OH.filter_product_rows(asin, all_gam_results)

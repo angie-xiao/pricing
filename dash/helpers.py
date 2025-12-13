@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
-import pickle
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -54,166 +52,7 @@ class Paths:
 
 
 # =====================================================================
-#                         Caching / Build
-# =====================================================================
-
-
-class Cache:
-    @staticmethod
-    def files_sig(paths: List[str], top_n: int = 10, version: str = "v1") -> str:
-        parts: List[str] = []
-        for p in paths:
-            ap = os.path.abspath(p)
-            try:
-                st = os.stat(ap)
-                parts.append(f"{ap}:{st.st_mtime_ns}:{st.st_size}")
-            except FileNotFoundError:
-                parts.append(f"{ap}:NA")
-        sig_str = "|".join(parts) + f":top{top_n}:ver:{version}"
-        return hashlib.sha1(sig_str.encode()).hexdigest()
-
-    @staticmethod
-    def code_sig() -> str:
-        """
-        Hash of: our version tag + source of _make_weights + file mtimes.
-        Any change to weighting logic or this file will bust the cache.
-        """
-        import hashlib, inspect, os, built_in_logic
-
-        h = hashlib.sha256()
-        # 1) explicit version tag
-        ver = getattr(built_in_logic, "WEIGHT_LOGIC_VERSION", "unknown").encode()
-        h.update(ver)
-
-        # 2) function source (most direct way to detect logic changes)
-        try:
-            src = inspect.getsource(built_in_logic._make_weights).encode()
-            h.update(src)
-        except Exception:
-            h.update(b"no-source")
-
-        # 3) file mtime as a fallback
-        try:
-            fp = inspect.getfile(built_in_logic)
-            mtime = str(os.path.getmtime(fp)).encode()
-            h.update(mtime)
-        except Exception:
-            pass
-
-        return h.hexdigest()[:12]
-
-    @staticmethod
-    def build_frames_with_cache(
-        base_dir: str,
-        data_folder: str = "data",
-        pricing_pattern: str = "_pricing",
-        product_pattern: str = "_product",
-        top_n: int = 10,
-        force_rebuild: bool = True,
-        param_search_kwargs: dict = None
-    ) -> Dict[str, pd.DataFrame]:
-        """
-        Discover and process multiple pricing/product file pairs with caching support.
-        Now supports both .csv and .xlsx extensions for both pricing and product files.
-        Handles patterns: *_pricing.* and *_product.*
-        """
-        import os
-        import pickle
-        import pandas as pd
-        from built_in_logic import PricingPipeline
-
-        cache_dir = os.path.join(base_dir, ".cache")
-        os.makedirs(cache_dir, exist_ok=True)
-
-        data_path = os.path.join(base_dir, data_folder)
-        all_files = os.listdir(data_path)
-
-        # Find pricing files (both .csv and .xlsx)
-        pricing_files = [
-            f for f in all_files
-            if pricing_pattern in f.lower() and (f.endswith('.csv') or f.endswith('.xlsx'))
-        ]
-
-        # Find product files (both .csv and .xlsx)
-        product_files = [
-            f for f in all_files
-            if product_pattern in f.lower() and (f.endswith('.csv') or f.endswith('.xlsx'))
-        ]
-
-        results = {}
-        product_lines = []
-
-        for pricing_file in pricing_files:
-            # Extract prefix (e.g., 'boxie' from 'boxie_pricing.xlsx')
-            prefix = pricing_file.lower().replace(pricing_pattern.lower(), '')
-            prefix = prefix.replace('.xlsx', '').replace('.csv', '').strip('_')
-
-            # Find matching product file with same prefix
-            matching_product = None
-            for pf in product_files:
-                if pf.lower().startswith(prefix + product_pattern.lower()):
-                    matching_product = pf
-                    break
-
-            if not matching_product:
-                print(f"Warning: No matching product file found for {pricing_file}")
-                continue
-
-            print(f"Processing: {pricing_file} + {matching_product}")
-
-            # Build paths
-            pricing_path = os.path.join(data_path, pricing_file)
-            product_path = os.path.join(data_path, matching_product)
-
-            # Include parameters in signature
-            param_sig = ""
-            if param_search_kwargs:
-                param_items = sorted(param_search_kwargs.items())
-                param_sig = "|".join(f"{k}:{v}" for k, v in param_items)
-
-            sig = Cache.files_sig(
-                [pricing_path, product_path],
-                top_n=top_n,
-                version=f"{Cache.code_sig()}|{param_sig}"
-            )
-
-            cache_fp = os.path.join(cache_dir, f"frames_{prefix}_{sig}.pkl")
-
-            # Clear cache if force_rebuild
-            if force_rebuild and os.path.exists(cache_fp):
-                os.remove(cache_fp)
-
-            if force_rebuild or not os.path.exists(cache_fp):
-                frames = PricingPipeline.from_csv_folder(
-                    base_dir,
-                    data_folder=data_folder,
-                    pricing_file=pricing_file,
-                    product_file=matching_product,
-                    top_n=top_n,
-                )
-
-                # Only save to cache if not forcing rebuild
-                if not force_rebuild:
-                    with open(cache_fp, "wb") as f:
-                        pickle.dump(frames, f)
-            else:
-                # Load from cache
-                with open(cache_fp, "rb") as f:
-                    frames = pickle.load(f)
-
-            # Add to results with prefix
-            for key, df in frames.items():
-                results[f"{prefix}_{key}"] = df
-
-            product_lines.append(prefix)
-
-        results['_product_lines'] = product_lines
-        return results
-
-
-
-# =====================================================================
-#                         Data engineering 
+#                         Data engineering
 # =====================================================================
 class DataEng:
     @staticmethod
@@ -221,7 +60,7 @@ class DataEng:
         out = df.copy()
         out.columns = out.columns.str.strip().str.lower()
         return out
- 
+
     @staticmethod
     def compute_product_series(df, tag_col="tag", var_col="variation"):
         if tag_col in df.columns and var_col in df.columns:
@@ -580,7 +419,7 @@ class Formatters:
 
 
 class Metrics:
- 
+
     @staticmethod
     def model_fit_units(prod_df: pd.DataFrame) -> Tuple[str, str]:
         """(value_text, subtext) RMSE on daily revenue (P50) + weighted relative error."""
@@ -630,8 +469,7 @@ class Metrics:
 
         sub = f"{rel:+.0%} vs actual" if np.isfinite(rel) else ""
         return f"${rmse:,.0f}", sub
-    
-    
+
     # @staticmethod
     # def update_elasticity_kpi_by_product(
     #     product_name: str, elast_df: pd.DataFrame
@@ -749,7 +587,9 @@ class Scenario:
                 daily_rev_best = float(best_row["revenue_pred_0.5"].iloc[0])
                 daily_units_best = float(best_row["units_pred_0.5"].iloc[0])
                 rec_price = float(best_row["asp"].iloc[0])
-            elif {"price", "revenue_pred_0.5", "units_pred_0.5"}.issubset(best_row.columns):
+            elif {"price", "revenue_pred_0.5", "units_pred_0.5"}.issubset(
+                best_row.columns
+            ):
                 daily_rev_best = float(best_row["revenue_pred_0.5"].iloc[0])
                 daily_units_best = float(best_row["units_pred_0.5"].iloc[0])
                 rec_price = float(best_row["price"].iloc[0])
@@ -757,8 +597,13 @@ class Scenario:
                 return "—", "—"
 
             # --- Current price ---
-            if "asin" in curr_price_df.columns and "current_price" in curr_price_df.columns:
-                cp_series = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
+            if (
+                "asin" in curr_price_df.columns
+                and "current_price" in curr_price_df.columns
+            ):
+                cp_series = curr_price_df.loc[
+                    curr_price_df["asin"] == asin, "current_price"
+                ]
                 curr_price = float(cp_series.iloc[0]) if len(cp_series) else None
             else:
                 curr_price = None
@@ -968,7 +813,7 @@ class OverviewHelpers:
         cp = curr_price_df.loc[curr_price_df["asin"] == asin, "current_price"]
         return f"${float(cp.iloc[0]):,.2f}" if len(cp) else "—"
 
-    @staticmethod 
+    @staticmethod
     def recommended_price_text(asin: str, best50_df: pd.DataFrame) -> str:
         row = best50_df.loc[best50_df["asin"] == asin]
         if not len(row):
@@ -991,16 +836,16 @@ class OverviewHelpers:
         """
         if elasticity_df is None or elasticity_df.empty:
             return "N/A", "No data"
-            
+
         row = elasticity_df[elasticity_df["product"] == product_name]
         if row.empty:
             return "N/A", "No data"
-            
+
         # 1. Get Values (Ratio = Slope)
         beta = row["ratio"].iloc[0]
         score = row["elasticity_score"].iloc[0]
         magnitude = abs(beta)
-        
+
         # 2. Economic Category (|E| > 1 is Elastic)
         if magnitude >= 1.05:
             cat = "ELASTIC"
@@ -1008,7 +853,7 @@ class OverviewHelpers:
             cat = "INELASTIC"
         else:
             cat = "BALANCED DEMAND"
-            
+
         # 3. Relative Rank Text
         if score > 50:
             rank_str = f"Top {100 - score:.0f}% most Sensitive"
@@ -1016,7 +861,6 @@ class OverviewHelpers:
             rank_str = f"Bottom {score:.0f}% Sensitivity"
 
         return f"{beta:.2f}", f"{cat} • {rank_str}"
-
 
     @staticmethod
     def filter_product_rows(asin: str, all_gam_results: pd.DataFrame) -> pd.DataFrame:

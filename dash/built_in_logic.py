@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Tuple
 import math
 import os
+import glob
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -80,23 +81,23 @@ TARGET_COL = "shipped_units"
 WEIGHT_COL = "w"
 
 
-
 class ElasticityAnalyzer:
     def compute(self, topsellers: pd.DataFrame) -> pd.DataFrame:
         """
         Calculates Price Elasticity using Log-Log Regression Slope (Beta).
         Formula: ln(Qty) = Beta * ln(Price) + Alpha
         """
+
         def _calc_log_log_slope(g):
             # Need enough points for a regression
-            if len(g) < 4: 
+            if len(g) < 4:
                 return np.nan
-            
+
             # 1. Log-Log Transform
             #    Add +1 or +0.01 to avoid log(0) errors
             y = np.log(g["shipped_units"] + 1)
             x = np.log(g["price"] + 0.01)
-            
+
             # 2. Linear Fit (y = mx + c)
             try:
                 # Returns [slope, intercept]
@@ -115,9 +116,9 @@ class ElasticityAnalyzer:
         # 3. Labeling Logic (Economic Definitions)
         #    Slope = -1.5  -> Price +1%, Vol -1.5% -> ELASTIC (Sensitive)
         #    Slope = -0.5  -> Price +1%, Vol -0.5% -> INELASTIC (Not Sensitive)
-        
+
         elasticity["magnitude"] = elasticity["ratio"].abs()
-        
+
         elasticity["elasticity_label"] = np.where(
             elasticity["magnitude"] > 1.0, "ELASTIC", "INELASTIC"
         )
@@ -125,10 +126,13 @@ class ElasticityAnalyzer:
         # 4. Percentile Score (0-100) for the UI
         #    Higher magnitude = Higher score (More sensitive)
         elasticity["elasticity_score"] = elasticity["magnitude"].rank(pct=True) * 100
-        
+
         elasticity = elasticity.fillna(0)
 
-        return elasticity.sort_values("magnitude", ascending=False).reset_index(drop=True)
+        return elasticity.sort_values("magnitude", ascending=False).reset_index(
+            drop=True
+        )
+
 
 class DataEngineer:
     def __init__(self, pricing_df, product_df, top_n=10, granularity="daily"):
@@ -302,7 +306,7 @@ class Weighting:
         self.half_life_days = half_life_days
         self.support_method = support_method
         self.support_params = support_params or {}
-        
+
         self.normalize = bool(normalize)
         self.clip_quantiles = clip_quantiles
         self.nan_fill = float(nan_fill)
@@ -360,7 +364,9 @@ class Weighting:
 
     # --- Refactored Instance Methods (No Decorators) ---
 
-    def compute_support(self, query: np.ndarray, ref: np.ndarray, method="knn", **kwargs) -> np.ndarray:
+    def compute_support(
+        self, query: np.ndarray, ref: np.ndarray, method="knn", **kwargs
+    ) -> np.ndarray:
         """Dispatcher for support weighting."""
         if method == "knn":
             return self.knn_support(query, ref, **kwargs)
@@ -368,37 +374,44 @@ class Weighting:
             return self.kde_support(query, ref, **kwargs)
         return np.ones_like(query, dtype=float)
 
-    def knn_support(self, query_prices: np.ndarray, ref_prices: np.ndarray, k: int = 15) -> np.ndarray:
+    def knn_support(
+        self, query_prices: np.ndarray, ref_prices: np.ndarray, k: int = 15
+    ) -> np.ndarray:
         """kNN radius (inverse local density)."""
         x = np.asarray(ref_prices, float)
         x = x[np.isfinite(x)]
         q = np.asarray(query_prices, float)
-        
+
         if x.size < max(3, k + 1):
             return np.ones_like(q, float)
 
         k = min(k, x.size - 1)
         nn = NearestNeighbors(n_neighbors=k)
         nn.fit(x.reshape(-1, 1))
-        
+
         dists, _ = nn.kneighbors(q.reshape(-1, 1), n_neighbors=k)
         rad = dists[:, -1]
-        
+
         dens = 1.0 / np.maximum(rad, np.finfo(float).eps)
         dmin, dmax = dens.min(), dens.max()
         rng = dmax - dmin
         if rng < 1e-12:
             return np.ones_like(q)
-            
+
         dens_norm = (dens - dmin) / rng
         return 0.25 + 0.75 * dens_norm
 
-    def kde_support(self, query_prices: np.ndarray, ref_prices: np.ndarray, bandwidth: str | float = "scott") -> np.ndarray:
+    def kde_support(
+        self,
+        query_prices: np.ndarray,
+        ref_prices: np.ndarray,
+        bandwidth: str | float = "scott",
+    ) -> np.ndarray:
         """Gaussian KDE density."""
         x = np.asarray(ref_prices, float)
         x = x[np.isfinite(x)]
         q = np.asarray(query_prices, float)
-        
+
         if x.size < 2:
             return np.ones_like(q, float)
 
@@ -411,12 +424,12 @@ class Weighting:
             gs.fit(x.reshape(-1, 1))
             kde = gs.best_estimator_
         else:
-            bw = bandwidth if isinstance(bandwidth, (int, float)) else 1.0 
+            bw = bandwidth if isinstance(bandwidth, (int, float)) else 1.0
             kde = KernelDensity(kernel="gaussian", bandwidth=bw).fit(x.reshape(-1, 1))
 
         log_d = kde.score_samples(q.reshape(-1, 1))
         d = np.exp(log_d)
-        
+
         dmin, dmax = d.min(), d.max()
         rng = dmax - dmin
         if rng < 1e-12:
@@ -424,7 +437,7 @@ class Weighting:
 
         d_norm = (d - dmin) / rng
         return 0.25 + 0.75 * d_norm
-    
+
 
 class ParamSearchCV:
     def __init__(
@@ -833,9 +846,9 @@ class GAMModeler:
         return np.where(np.isnan(m), y, m)
 
     def fit(self, train_df, y_train, weights=None, verbose=False):
-        '''
+        """
         prioritize high-rev data points
-        '''
+        """
         # 1. Prepare Feature Matrix X: [Price, Event]
         X_price = np.log1p(
             pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
@@ -1347,14 +1360,14 @@ class PipelineCore:
             self._price_col = 0  # fallback
 
         return ts, X, y, w
-        
+
     def elasticity_best_effort(self, topsellers: pd.DataFrame) -> pd.DataFrame:
-            try:
-                # FIX: Instantiate the class () then call .compute()
-                return self.ElasticityAnalyzer().compute(topsellers)
-            except Exception:
-                return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
-            
+        try:
+            # FIX: Instantiate the class () then call .compute()
+            return self.ElasticityAnalyzer().compute(topsellers)
+        except Exception:
+            return pd.DataFrame(columns=["product", "ratio", "elasticity_score"])
+
     def standardize_continuous_inplace(self, X: np.ndarray, cont_idx=(0,)):
         """
         Z-score selected continuous columns of X in place.
@@ -1595,7 +1608,7 @@ class PipelineCore:
             if weighting == "knn":
                 weigher = self.Weighting()
                 w_tr = weigher.knn_support(p_tr, p_tr, k=k)
-                w_val = weigher.knn_support(p_val, p_tr, k=k) 
+                w_val = weigher.knn_support(p_val, p_tr, k=k)
             else:  # "kde"
                 w_tr = self.kde_support_weights(p_tr, bandwidth=kde_bandwidth)
                 w_val = self.kde_support_weights(
@@ -1834,45 +1847,36 @@ class PricingPipeline:
             ParamSearchCV=ParamSearchCV,
         )
 
-    @classmethod
-    def from_csv_folder(cls, base_dir, data_folder="data", pricing_file=None,
-                        product_file=None, top_n=10):
-        """
-        Load pricing and product data from folder.
-        Now supports both .csv and .xlsx extensions for both files.
+    def load_from_folder(self, data_folder: str):
+        # 1. Find the files (Flexible Pattern Matching)
+        #    Pattern "*product*" matches "boxie_product.csv" AND "boxie_products.csv"
+        try:
+            p_file = glob.glob(os.path.join(data_folder, "*pricing*.*"))[0]
+            prod_file = glob.glob(os.path.join(data_folder, "*product*.*"))[0]
+        except IndexError:
+            print(f"❌ Error: Could not find files in {data_folder}")
+            print(f"   Looking for: *pricing*.* and *product*.*")
+            print(f"   Found in folder: {os.listdir(data_folder)}")
+            return self
 
-        Args:
-            base_dir: Base directory path
-            data_folder: Data folder name (default: "data")
-            pricing_file: Name of pricing file (e.g., 'boxie_pricing.xlsx' or 'boxie_pricing.csv')
-            product_file: Name of product file (e.g., 'boxie_product.csv' or 'boxie_products.xlsx')
-            top_n: Number of top products to process
-        """
-        import os
-        import pandas as pd
+        print(f"✓ Found: {os.path.basename(p_file)} & {os.path.basename(prod_file)}")
 
-        pricing_path = os.path.join(base_dir, data_folder, pricing_file)
-        product_path = os.path.join(base_dir, data_folder, product_file)
+        # 2. Read Files
+        self.pricing_df = (
+            pd.read_excel(p_file) if p_file.endswith(".xlsx") else pd.read_csv(p_file)
+        )
+        self.product_df = pd.read_csv(prod_file)
 
-        # Read pricing file based on extension
-        if pricing_file.endswith('.xlsx'):
-            price_df = pd.read_excel(pricing_path)
-        elif pricing_file.endswith('.csv'):
-            price_df = pd.read_csv(pricing_path)
-        else:
-            raise ValueError(f"Unsupported pricing file format: {pricing_file}")
+        # 3. Clean Columns
+        self.pricing_df.columns = self.pricing_df.columns.str.lower().str.strip()
+        self.product_df.columns = self.product_df.columns.str.lower().str.strip()
 
-        # Read product file based on extension
-        if product_file.endswith('.xlsx'):
-            prod_df = pd.read_excel(product_path)
-        elif product_file.endswith('.csv'):
-            prod_df = pd.read_csv(product_path)
-        else:
-            raise ValueError(f"Unsupported product file format: {product_file}")
+        # 4. Sync with DataEngineer (Critical Step)
+        #    We must pass the loaded data to the internal engineer so the pipeline can use it.
+        self.engineer.pricing_df = self.pricing_df
+        self.engineer.product_df = self.product_df
 
-        # Continue with existing pipeline logic
-        return cls(price_df, prod_df, top_n=top_n)
-
+        return self
 
     def _build_curr_price_df(self):
         product = self.engineer.product_df.copy()
@@ -1909,7 +1913,6 @@ class PricingPipeline:
 
         self.core.ensure_columns(topsellers)
         print("✅ Data loaded & preprocessed. Proceeding to weight computation...")
-
 
         print("⚖️  Computing weights...")
         topsellers[self.core.WEIGHT_COL] = self.core.compute_weights(topsellers)
@@ -2658,5 +2661,3 @@ class viz:
             text=title, x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper"
         )
         return fig
-
-

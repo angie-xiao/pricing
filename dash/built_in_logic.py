@@ -144,7 +144,7 @@ class DataEngineer:
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
-        self.granularity = "monthly"  # "daily", "weekly", "monthly", "run"
+        self.granularity = granularity # "daily", "weekly", "monthly", "run"
 
     @staticmethod
     def _nonneg(s: pd.Series) -> pd.Series:
@@ -1787,25 +1787,40 @@ class PipelineCore:
 
         return pd.concat(results).sort_index()
 
-    def passthrough_actuals(
-        self, topsellers: pd.DataFrame, df: pd.DataFrame
-    ) -> pd.DataFrame:
-        df["deal_discount_percent"] = (
-            topsellers["deal_discount_percent"]
-            .fillna(0)
-            .clip(lower=0)
-            .reset_index(drop=True)
+
+    def passthrough_actuals(self, topsellers: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+        # Create a proper merge key to align actual data with predictions
+        # Merge on product + price (rounded to avoid floating point issues)
+
+        topsellers_actual = topsellers.copy()
+        topsellers_actual['price_key'] = topsellers_actual['price'].round(2)
+        topsellers_actual['revenue_actual'] = (
+            topsellers_actual['price'] * topsellers_actual['shipped_units']
         )
-        df["revenue_actual"] = topsellers["price"].to_numpy() * np.asarray(
-            topsellers["shipped_units"], dtype=float
+
+        df['price_key'] = df['price'].round(2)
+
+        # Merge to get actual revenue where prices match
+        df = df.merge(
+            topsellers_actual[['product', 'price_key', 'revenue_actual', 'shipped_units', 'deal_discount_percent']],
+            on=['product', 'price_key'],
+            how='left',
+            suffixes=('', '_actual')
         )
-        df["daily_rev"] = df["revenue_actual"]
-        df["actual_revenue_scaled"] = (
-            topsellers["price"].to_numpy()
-            * (1 - df["deal_discount_percent"].to_numpy() / 100.0)
-            * np.asarray(topsellers["shipped_units"], dtype=float)
+
+        # Fill missing values with 0 (prices that weren't actually observed)
+        df['revenue_actual'] = df['revenue_actual'].fillna(0)
+        df['deal_discount_percent'] = df['deal_discount_percent'].fillna(0).clip(lower=0)
+
+        df['daily_rev'] = df['revenue_actual']
+        df['actual_revenue_scaled'] = (
+            df['price'] * (1 - df['deal_discount_percent'] / 100.0) *
+            df.get('shipped_units', 0)
         )
+
+        df.drop(columns=['price_key'], inplace=True)
         return df
+
 
 
 class PricingPipeline:

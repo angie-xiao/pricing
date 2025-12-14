@@ -144,7 +144,7 @@ class DataEngineer:
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
-        self.granularity = granularity  # "daily", "weekly", "monthly", "run"
+        self.granularity = "monthly"  # "daily", "weekly", "monthly", "run"
 
     @staticmethod
     def _nonneg(s: pd.Series) -> pd.Series:
@@ -221,7 +221,7 @@ class DataEngineer:
             df_days["year"] = df_days["order_date"].dt.year
             df_days["week"] = df_days["order_date"].dt.isocalendar().week
             df_days["month"] = df_days["order_date"].dt.month
-            group_cols = ["asin", "product", "event_name", "year", "week", "month"] 
+            group_cols = ["asin", "product", "event_name", "year", "week", "month"]
 
         df_agg = (
             df_days[
@@ -247,7 +247,7 @@ class DataEngineer:
             pd.to_numeric(df_agg["price"], errors="coerce").fillna(0).round(2)
         )
         return df_days, df_agg
- 
+
     def _filter_top_n(self, df):
         top_n = (
             df.groupby("product")["revenue"]
@@ -270,11 +270,19 @@ class DataEngineer:
         # filter for top n
         df_filtered = self._filter_top_n(df_agg)
 
-        # --- FIX: Remove Negligible Sales (Partial Stockouts) ---
-        # We filter out weeks with < 5 units. These are likely weeks where
-        # the item was out-of-stock for most days, creating a misleading
-        # "low demand" signal that skews the log-linear model.
+        # --- FIX 1: Remove Negligible Sales (Partial Stockouts) ---
         df_filtered = df_filtered[df_filtered["shipped_units"] >= 5].copy()
+
+        # --- FIX 2: Remove HVEs (High Volume Events) ---
+        # We drop any row that has an event_name, so the model only learns from BAU.
+        # This prevents "Double Discounting" (suggesting a low price that will be discounted again).
+        if "event_name" in df_filtered.columns:
+            # Keep rows where event_name is NaN (missing) or explicitly "BAU"
+            # Drop everything else (Prime Day, Big Deal Days, etc.)
+            is_bau = df_filtered["event_name"].isna() | (
+                df_filtered["event_name"].astype(str).str.upper() == "BAU"
+            )
+            df_filtered = df_filtered[is_bau].copy()
 
         df_filtered["asin"] = df_filtered["asin"].astype(str)
         df_filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)

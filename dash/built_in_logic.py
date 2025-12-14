@@ -276,13 +276,13 @@ class DataEngineer:
         # --- FIX 2: Remove HVEs (High Volume Events) ---
         # We drop any row that has an event_name, so the model only learns from BAU.
         # This prevents "Double Discounting" (suggesting a low price that will be discounted again).
-        if "event_name" in df_filtered.columns:
-            # Keep rows where event_name is NaN (missing) or explicitly "BAU"
-            # Drop everything else (Prime Day, Big Deal Days, etc.)
-            is_bau = df_filtered["event_name"].isna() | (
-                df_filtered["event_name"].astype(str).str.upper() == "BAU"
-            )
-            df_filtered = df_filtered[is_bau].copy()
+        # if "event_name" in df_filtered.columns:
+        #     # Keep rows where event_name is NaN (missing) or explicitly "BAU"
+        #     # Drop everything else (Prime Day, Big Deal Days, etc.)
+        #     is_bau = df_filtered["event_name"].isna() | (
+        #         df_filtered["event_name"].astype(str).str.upper() == "BAU"
+        #     )
+        #     df_filtered = df_filtered[is_bau].copy()
 
         df_filtered["asin"] = df_filtered["asin"].astype(str)
         df_filtered.rename(columns={"revenue": "revenue_share_amt"}, inplace=True)
@@ -1789,37 +1789,45 @@ class PipelineCore:
 
 
     def passthrough_actuals(self, topsellers: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-        # Create a proper merge key to align actual data with predictions
-        # Merge on product + price (rounded to avoid floating point issues)
+        # Create a mapping from (product, price) to actual revenue
+        # This ensures we match the correct revenue to the correct price point
 
-        topsellers_actual = topsellers.copy()
-        topsellers_actual['price_key'] = topsellers_actual['price'].round(2)
-        topsellers_actual['revenue_actual'] = (
-            topsellers_actual['price'] * topsellers_actual['shipped_units']
-        )
+        # Calculate revenue in topsellers if not already present
+        if "revenue_actual" not in topsellers.columns:
+            topsellers = topsellers.copy()
+            topsellers["revenue_actual"] = (
+                pd.to_numeric(topsellers["price"], errors="coerce") *
+                pd.to_numeric(topsellers["shipped_units"], errors="coerce")
+            )
 
-        df['price_key'] = df['price'].round(2)
+        # Create merge keys
+        merge_cols = ["product", "price", "revenue_actual", "shipped_units", "deal_discount_percent"]
+        available_merge_cols = [c for c in merge_cols if c in topsellers.columns]
 
-        # Merge to get actual revenue where prices match
+        # Merge on product + price to align actual data with predictions
         df = df.merge(
-            topsellers_actual[['product', 'price_key', 'revenue_actual', 'shipped_units', 'deal_discount_percent']],
-            on=['product', 'price_key'],
-            how='left',
-            suffixes=('', '_actual')
+            topsellers[available_merge_cols],
+            on=["product", "price"],
+            how="left",
+            suffixes=("", "_actual")
         )
 
-        # Fill missing values with 0 (prices that weren't actually observed)
-        df['revenue_actual'] = df['revenue_actual'].fillna(0)
-        df['deal_discount_percent'] = df['deal_discount_percent'].fillna(0).clip(lower=0)
+        # Fill missing values
+        df["revenue_actual"] = df["revenue_actual"].fillna(0)
+        if "deal_discount_percent" in df.columns:
+            df["deal_discount_percent"] = df["deal_discount_percent"].fillna(0).clip(lower=0)
 
-        df['daily_rev'] = df['revenue_actual']
-        df['actual_revenue_scaled'] = (
-            df['price'] * (1 - df['deal_discount_percent'] / 100.0) *
-            df.get('shipped_units', 0)
-        )
+        # Keep existing derived columns
+        df["daily_rev"] = df["revenue_actual"]
+        if "shipped_units" in df.columns and "deal_discount_percent" in df.columns:
+            df["actual_revenue_scaled"] = (
+                df["price"] *
+                (1 - df["deal_discount_percent"] / 100.0) *
+                df["shipped_units"]
+            )
 
-        df.drop(columns=['price_key'], inplace=True)
         return df
+
 
 
 
@@ -1852,7 +1860,7 @@ class PricingPipeline:
         self.product_df = product_df
 
         # build the engineer internally (as before)
-        self.engineer = DataEngineer(pricing_df, product_df, top_n)
+        self.engineer = DataEngineer(pricing_df, product_df, top_n,granularity='weekly')
 
         # wire the extracted core with collaborators/constants
         self.core = PipelineCore(

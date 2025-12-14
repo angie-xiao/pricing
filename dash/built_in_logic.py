@@ -1,4 +1,9 @@
 """
+1) currenlty drop menu shows asin, not product label
+2) give a prefix company name option. so the data folder potentially could host a bunch of files and not just 2
+
+
+----
 too much weight assigned to monoticity. not enough to elasticity (e.g., gently scented 16lb)
 
 -------
@@ -135,7 +140,7 @@ class ElasticityAnalyzer:
 
 
 class DataEngineer:
-    def __init__(self, pricing_df, product_df, top_n=10, granularity="daily"):
+    def __init__(self, pricing_df, product_df, top_n=10, granularity="weekly"):
         self.pricing_df = pricing_df
         self.product_df = product_df
         self.top_n = top_n
@@ -215,9 +220,8 @@ class DataEngineer:
         if self.granularity == "weekly":
             df_days["year"] = df_days["order_date"].dt.year
             df_days["week"] = df_days["order_date"].dt.isocalendar().week
-            group_cols = ["asin", "product", "event_name", "year", "week"]
-        else:
-            group_cols = ["asin", "product", "event_name", "order_date"]
+            df_days["month"] = df_days["order_date"].dt.month
+            group_cols = ["asin", "product", "event_name", "year", "week", "month"] 
 
         df_agg = (
             df_days[
@@ -243,13 +247,7 @@ class DataEngineer:
             pd.to_numeric(df_agg["price"], errors="coerce").fillna(0).round(2)
         )
         return df_days, df_agg
-
-    def _add_temporal_features(self, df):
-        df["year"] = df["order_date"].dt.year
-        df["month"] = df["order_date"].dt.month
-        df["week"] = df["order_date"].dt.isocalendar().week
-        return df
-
+ 
     def _filter_top_n(self, df):
         top_n = (
             df.groupby("product")["revenue"]
@@ -268,7 +266,6 @@ class DataEngineer:
         df = self._normalize_inputs()
         df = self._cast_types(df)
         df_days, df_agg = self._aggregate_daily(df)
-        df_agg = self._add_temporal_features(df_agg)
 
         # filter for top n
         df_filtered = self._filter_top_n(df_agg)

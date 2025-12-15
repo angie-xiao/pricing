@@ -1706,17 +1706,19 @@ class PipelineCore:
     # ---------------------------- Results assembly ----------------------------
 
     def assemble_results(self, topsellers: pd.DataFrame, modeler) -> pd.DataFrame:
-        """
-        Selects relevant columns from topsellers to prepare the results frame.
-        Now a regular instance method.
-        """
-        # We keep 'product_encoded' so downstream steps (add_predictions) can map models
-        cols = ["product", "price", "asin", "asp", "product_encoded"]
+        # Add 'revenue_share_amt' (your actuals) and 'event_name' to the keep-list
+        cols = ["product", "price", "asin", "asp", "product_encoded", "revenue_share_amt", "event_name", "order_date"]
 
         # Select only cols that actually exist (safety)
         existing_cols = [c for c in cols if c in topsellers.columns]
 
-        return topsellers[existing_cols].copy().reset_index(drop=True)
+        df = topsellers[existing_cols].copy().reset_index(drop=True)
+        
+        # Rename for consistency downstream
+        if "revenue_share_amt" in df.columns:
+            df.rename(columns={"revenue_share_amt": "revenue_actual"}, inplace=True)
+            
+        return df
 
     def add_support_counts(
         self, topsellers: pd.DataFrame, all_gam_results: pd.DataFrame
@@ -1792,8 +1794,13 @@ class PipelineCore:
         # Create a mapping from (product, price) to actual revenue
         # This ensures we match the correct revenue to the correct price point
 
+        # If we already carried it over in assemble_results, just fill NaNs
+        if "revenue_actual" in df.columns:
+            df["revenue_actual"] = df["revenue_actual"].fillna(0)
+            return df
+        
         # Calculate revenue in topsellers if not already present
-        if "revenue_actual" not in topsellers.columns:
+        elif "revenue_actual" not in topsellers.columns:
             topsellers = topsellers.copy()
             topsellers["revenue_actual"] = (
                 pd.to_numeric(topsellers["price"], errors="coerce") *

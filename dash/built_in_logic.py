@@ -45,8 +45,8 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import GridSearchCV
 from sklearn.neighbors import KernelDensity, NearestNeighbors
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import RANSACRegressor, LinearRegression
 from pygam import ExpectileGAM, s, l, f
-
 
 # local import
 from helpers import DataEng
@@ -89,55 +89,48 @@ WEIGHT_COL = "w"
 class ElasticityAnalyzer:
     def compute(self, topsellers: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculates Price Elasticity using Log-Log Regression Slope (Beta).
-        Formula: ln(Qty) = Beta * ln(Price) + Alpha
+        Calculates Price Elasticity using Robust RANSAC Regression.
+        This ignores "Promo Outliers" automatically when calculating the slope.
         """
 
-        def _calc_log_log_slope(g):
-            # Need enough points for a regression
-            if len(g) < 4:
+        def _calc_robust_slope(g):
+            if len(g) < 5: # Need slightly more data for RANSAC
                 return np.nan
 
             # 1. Log-Log Transform
-            #    Add +1 or +0.01 to avoid log(0) errors
-            y = np.log(g["shipped_units"] + 1)
-            x = np.log(g["price"] + 0.01)
+            y = np.log(g["shipped_units"] + 1).to_numpy().reshape(-1, 1)
+            x = np.log(g["price"] + 0.01).to_numpy().reshape(-1, 1)
 
-            # 2. Linear Fit (y = mx + c)
+            # 2. Robust Fit (RANSAC)
+            #    RANSAC tries to find the "Main Line" (BAU) and ignores outliers (Promo Spikes)
             try:
-                # Returns [slope, intercept]
-                slope, _ = np.polyfit(x, y, 1)
+                ransac = RANSACRegressor(estimator=LinearRegression(), min_samples=0.6, random_state=42)
+                ransac.fit(x, y)
+                slope = ransac.estimator_.coef_[0][0]
                 return slope
             except Exception:
-                return np.nan
+                # Fallback to simple linear if RANSAC fails (e.g. too few points)
+                try:
+                    slope, _ = np.polyfit(x.flatten(), y.flatten(), 1)
+                    return slope
+                except:
+                    return np.nan
 
-        # Apply regression per product
         elasticity = (
             topsellers.groupby("product")
-            .apply(_calc_log_log_slope)
+            .apply(_calc_robust_slope)
             .reset_index(name="ratio")
         )
 
-        # 3. Labeling Logic (Economic Definitions)
-        #    Slope = -1.5  -> Price +1%, Vol -1.5% -> ELASTIC (Sensitive)
-        #    Slope = -0.5  -> Price +1%, Vol -0.5% -> INELASTIC (Not Sensitive)
-
+        # 3. Labeling & Score
         elasticity["magnitude"] = elasticity["ratio"].abs()
-
         elasticity["elasticity_label"] = np.where(
             elasticity["magnitude"] > 1.0, "ELASTIC", "INELASTIC"
         )
-
-        # 4. Percentile Score (0-100) for the UI
-        #    Higher magnitude = Higher score (More sensitive)
+        # Rank: 100 = Most Sensitive, 0 = Least Sensitive
         elasticity["elasticity_score"] = elasticity["magnitude"].rank(pct=True) * 100
-
-        elasticity = elasticity.fillna(0)
-
-        return elasticity.sort_values("magnitude", ascending=False).reset_index(
-            drop=True
-        )
-
+        
+        return elasticity.sort_values("magnitude", ascending=False).reset_index(drop=True)
 
 class DataEngineer:
     def __init__(self, pricing_df, product_df, top_n=10, granularity="weekly"):
@@ -850,6 +843,7 @@ class GAMModeler:
         m = s.rolling(window=window, center=True, min_periods=1).median().to_numpy()
         return np.where(np.isnan(m), y, m)
 
+    # wiggly fit
     def fit(self, train_df, y_train, weights=None, verbose=False):
         """
         prioritize high-rev data points
@@ -916,6 +910,68 @@ class GAMModeler:
 
         self.fitted_ = True
         return self
+
+    # flat fit
+    # def fit(self, train_df, y_train, weights=None, verbose=False):
+    #     """
+    #     Balanced Fit: Low Lambda (0.5) for flexibility + Density Weights for stability.
+    #     """
+
+    #     # 1. Prepare Feature Matrix X
+    #     X_price = np.log1p(
+    #         pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
+    #         .to_numpy(dtype=float)
+    #         .reshape(-1, 1)
+    #     )
+    #     if "event_encoded" in train_df.columns:
+    #         X_event = train_df["event_encoded"].fillna(0).to_numpy(dtype=float).reshape(-1, 1)
+    #     else:
+    #         X_event = np.zeros_like(X_price)
+    #     X = np.hstack([X_price, X_event])
+
+
+    #     # 2. Targets
+    #     y = np.log1p(np.asarray(y_train, dtype=float))
+
+
+    #     # 3. Density Weighting (Crucial for stability without stiffness)
+    #     price_series = pd.to_numeric(train_df[self.feature_cols[0]], errors="coerce")
+    #     density_map = price_series.value_counts(normalize=True)
+    #     w_density = price_series.map(density_map).to_numpy(dtype=float)
+    #     if weights is not None:
+    #         w_final = np.asarray(weights, dtype=float) * w_density
+    #     else:
+    #         w_final = w_density
+        
+        
+    #     # 4. Tuner Params (The "Flexible" Logic)
+    #     tuned_ns = self.base_gam_kwargs.get("n_splines", 10)
+        
+    #     # FIX: Return to flexibility
+    #     # 0.5 allows the curve to actually fit the "Hill" shape of revenue
+    #     final_lam = 0.5
+
+    #     # Allow enough splines to capture the curve (6-12 range)
+    #     n_unique = len(np.unique(X_price))
+    #     final_ns = max(6, min(int(tuned_ns), n_unique // 2, 12))
+
+    #     qs = getattr(self, "quantiles_", (0.025, 0.5, 0.975))
+    #     self.models_ = {}
+    #     for q in qs:
+    #         # FIX: Remove constraints to stop the "Flat Line" issue.
+    #         # Let the P97.5 bound naturally follow the data's variance.
+    #         term = s(
+    #             0,
+    #             n_splines=final_ns,
+    #             constraints=None,
+    #             lam=final_lam,
+    #         ) + l(1)
+    #         gam = ExpectileGAM(expectile=float(q), terms=term, max_iter=5000)
+    #         gam.fit(X, y, weights=w_final)
+    #         self.models_[float(q)] = gam
+    #     self.fitted_ = True
+    #     return self
+     
 
     def _predict_units(
         self,
@@ -1010,30 +1066,59 @@ class Optimizer:
     def pick_price_convex_frontier(
         self,
         df_prod: pd.DataFrame,
-        rev_col: str = "conservative_rev",  # Changed default to conservative metric
+        rev_col: str = "conservative_rev",  # Optimizing on risk-adjusted metric
         price_col: str = "price",
         max_rev_drop: float = 0.10,
-        min_support: int = 4,  # UPDATED: Minimum 4 weeks of data required
+        min_support: int = 4,
     ) -> pd.Series:
 
         if df_prod.empty:
             raise ValueError("df_prod is empty for this product.")
 
-        # 1) Filter by support (Revised Point 5)
-        # Since data is weekly, we reject prices seen for less than min_support weeks.
+        # 1. Filter by Support (Data Density)
+        #    Reject prices seen for less than min_support weeks to avoid "ghost" optimizations.
         if "support_count" in df_prod.columns:
             df_prod = df_prod[df_prod["support_count"] >= min_support].copy()
 
-        # Fallback: if filtering kills all rows, revert to top 3 supported rows to avoid empty return
+        # Fallback: if filtering kills all rows, return empty (handled by caller)
         if df_prod.empty:
             return pd.Series(dtype=float)
 
-        # 2) Compress by price
-        # We take the mean of the revenue metric (conservative_rev) for duplicate price rows
+        # 2. Compress by Price
+        #    Take the mean of the revenue metric for duplicate price rows
         g = df_prod.groupby(price_col, as_index=False).agg({rev_col: "mean"})
         g = g.sort_values(price_col).reset_index(drop=True)
 
-        # 3) Convex Frontier Logic (Unchanged)
+        if len(g) < 2:
+            return g.iloc[0] if not g.empty else pd.Series(dtype=float)
+
+        # --- 3. NEW: Derivative Stability Check ---
+        #    Calculate Marginal Revenue (Slope). If the slope is massive (> 5000), 
+        #    it's likely a spline artifact (vertical asymptote), not real demand.
+        
+        prices = g[price_col].to_numpy(dtype=float)
+        revs = g[rev_col].to_numpy(dtype=float)
+
+        # Calculate gradients (dy/dx)
+        dy = np.gradient(revs)
+        dx = np.gradient(prices)
+        
+        # Avoid division by zero
+        dx[dx == 0] = 1e-6
+        marginal_revenue = dy / dx
+        
+        # Filter: Keep only "Stable" points
+        # A slope of 5000 means $1 price change = $5000 revenue change. 
+        # That's physically impossible for CPG products and indicates a model glitch.
+        is_stable = np.abs(marginal_revenue) < 5000
+        
+        g = g[is_stable].copy().reset_index(drop=True)
+        
+        if g.empty:
+            return pd.Series(dtype=float)
+
+        # --- 4. Convex Frontier Logic ---
+        #    Find efficient frontier (points not dominated by higher prices with >= revenue)
         prices = g[price_col].to_numpy(dtype=float)
         revs = g[rev_col].to_numpy(dtype=float)
         n = len(g)
@@ -1043,22 +1128,27 @@ class Optimizer:
             for j in range(n):
                 if j == i:
                     continue
-                # Dominated: higher price exists with >= revenue
+                # Dominated: A higher price exists (j) that yields equal or greater revenue
                 if prices[j] > prices[i] and revs[j] >= revs[i]:
                     efficient[i] = False
                     break
 
         frontier = g[efficient].copy()
         if frontier.empty:
+            # Fallback to simple max if frontier fails
             idx = g[rev_col].idxmax()
             return g.loc[idx]
 
-        # 4) Select highest price within allowed drop from max frontier revenue
+        # 5. Select Best Price on Frontier
+        #    Pick the highest price that is within X% (max_rev_drop) of the absolute max revenue
         R_max = frontier[rev_col].max()
-        frontier = frontier[frontier[rev_col] >= (1.0 - max_rev_drop) * R_max]
-        idx = frontier[price_col].idxmax()
-
-        return frontier.loc[idx]
+        threshold = (1.0 - max_rev_drop) * R_max
+        
+        valid_options = frontier[frontier[rev_col] >= threshold]
+        
+        # Return the row with the highest price among valid options
+        best_idx = valid_options[price_col].idxmax()
+        return valid_options.loc[best_idx]
 
     def run(self, all_gam_results: pd.DataFrame) -> dict:
         if all_gam_results.empty:
@@ -2377,27 +2467,24 @@ class viz:
             return "Expected Avg Daily Revenue ($)"
 
     def gam_results(self, all_gam_results: pd.DataFrame):
-
         df = all_gam_results.copy()
 
-        # ---- NEW: normalize schema so the plotting code works with either old or new names ----
+        # 1. Normalize Schema (Handle old vs new column names)
         rename = {}
-
+        
         # X-axis
         if "asp" not in df.columns and "price" in df.columns:
             rename["price"] = "asp"
 
         # Predictions
+        # Map various prediction column styles to standard names
         has_new_preds = {"rev_p50", "rev_p025", "rev_p975"} <= set(df.columns)
         if has_new_preds:
-            rename.update(
-                {
-                    "rev_p50": "revenue_pred_0.5",
-                    "rev_p025": "revenue_pred_0.025",
-                    "rev_p975": "revenue_pred_0.975",
-                }
-            )
-        # Some variants I’ve seen in older runs
+            rename.update({
+                "rev_p50": "revenue_pred_0.5",
+                "rev_p025": "revenue_pred_0.025",
+                "rev_p975": "revenue_pred_0.975",
+            })
         if "revenue_pred_p50" in df.columns:
             rename["revenue_pred_p50"] = "revenue_pred_0.5"
         if "revenue_pred_p025" in df.columns:
@@ -2411,8 +2498,10 @@ class viz:
                 rename["actual_revenue"] = "revenue_actual"
             elif "revenue" in df.columns:
                 rename["revenue"] = "revenue_actual"
+        
+        df = df.rename(columns=rename)
 
-        # the rest of your current function can stay the same
+        # 2. Validation
         need_cols = [
             "product",
             "asp",
@@ -2421,42 +2510,26 @@ class viz:
             "revenue_pred_0.5",
             "revenue_pred_0.975",
         ]
+        # We also need event_name for the new coloring logic
+        if "event_name" not in df.columns:
+            df["event_name"] = None # Fill with None if missing so logic doesn't break
+
         missing = [c for c in need_cols if c not in df.columns]
         if missing:
-            raise ValueError(
-                f"gam_results: missing columns after normalization: {missing}"
-            )
+            raise ValueError(f"gam_results: missing columns after normalization: {missing}")
 
-        # This keeps the line smooth by ignoring holiday spikes
-        y_p50 = (
-            "revenue_pred_bau_0.5"
-            if "revenue_pred_bau_0.5" in df.columns
-            else "revenue_pred_0.5"
-        )
-        y_lower = (
-            "revenue_pred_bau_0.025"
-            if "revenue_pred_bau_0.025" in df.columns
-            else "revenue_pred_0.025"
-        )
-        y_upper = (
-            "revenue_pred_bau_0.975"
-            if "revenue_pred_bau_0.975" in df.columns
-            else "revenue_pred_0.975"
-        )
+        # 3. Determine Curve Columns (Prefer BAU predictions if available)
+        y_p50 = "revenue_pred_bau_0.5" if "revenue_pred_bau_0.5" in df.columns else "revenue_pred_0.5"
+        y_lower = "revenue_pred_bau_0.025" if "revenue_pred_bau_0.025" in df.columns else "revenue_pred_0.025"
+        y_upper = "revenue_pred_bau_0.975" if "revenue_pred_bau_0.975" in df.columns else "revenue_pred_0.975"
 
         fig = go.Figure()
 
-        if "order_date" in all_gam_results.columns:
-            dates = pd.to_datetime(all_gam_results["order_date"])
-            date_nums = (dates - dates.min()) / (dates.max() - dates.min())
-            opacities = 0.05 + (0.75 * date_nums)
-        else:
-            opacities = pd.Series(0.55, index=all_gam_results.index)
-
-        for group_name, g in all_gam_results.groupby("product"):
+        # 4. Plotting Loop
+        for group_name, g in df.groupby("product"):
             g = g.dropna(subset=["asp"]).sort_values("asp")
 
-            # 1. Grey Bands (Uncertainty) - Use BAU
+            # --- A. Grey Bands (Uncertainty) ---
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
@@ -2464,6 +2537,7 @@ class viz:
                     mode="lines",
                     line=dict(width=0),
                     showlegend=False,
+                    hoverinfo="skip"
                 )
             )
             fig.add_trace(
@@ -2475,11 +2549,12 @@ class viz:
                     fill="tonexty",
                     fillcolor="rgba(232, 233, 235, 0.7)",
                     opacity=0.25,
-                    name=f"{group_name} • Predicted Rev Band (BAU)",
+                    name=f"{group_name} • Predicted Rev Band",
+                    hoverinfo="skip"
                 )
             )
 
-            # 2. Red Line (Recommended) - Use BAU
+            # --- B. Red Line (Recommended Trend) ---
             fig.add_trace(
                 go.Scatter(
                     x=g["asp"],
@@ -2487,33 +2562,60 @@ class viz:
                     mode="lines",
                     name=f"{group_name} • Predicted Rev (BAU)",
                     line=dict(color="rgba(184, 33, 50, 1)"),
+                    hoverinfo="skip"
                 )
             )
 
-            # 3. Actuals (Keep Real!) - These will float ABOVE the line on Event days
-            fig.add_trace(
-                go.Scatter(
-                    x=g["asp"],
-                    y=g["revenue_actual"],
-                    mode="markers",
-                    marker_symbol="x",
-                    name=f"{group_name} • Actual Revenue",
-                    marker=dict(size=8, color="#808992", opacity=0.6),
+            # --- C. Actuals (Split: BAU vs Promo) ---
+            # Logic: If event_name exists and is not "BAU", it's a Promo
+            is_promo = g["event_name"].notna() & (g["event_name"] != "BAU")
+            
+            g_bau = g[~is_promo]
+            g_promo = g[is_promo]
+
+            # C1. BAU Actuals (Grey, subtle)
+            if not g_bau.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=g_bau["asp"],
+                        y=g_bau["revenue_actual"],
+                        mode="markers",
+                        marker_symbol="x",
+                        name=f"{group_name} • Actuals (BAU)",
+                        marker=dict(size=8, color="#9FA6B2", opacity=0.6),
+                        hovertemplate="<b>BAU</b><br>Price: %{x:$,.2f}<br>Rev: %{y:$,.0f}<extra></extra>",
+                    )
                 )
-            )
-            # ------------------- Diamonds for pred prices -------------------
+
+            # C2. Promo Actuals (Colored, distinct)
+            if not g_promo.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=g_promo["asp"],
+                        y=g_promo["revenue_actual"],
+                        mode="markers",
+                        marker_symbol="circle",
+                        name=f"{group_name} • Promo/Event",
+                        # Distinct color (e.g., Muted Purple/Red) with border
+                        marker=dict(size=10, color="#885053", opacity=0.9, line=dict(width=1, color="white")),
+                        hovertemplate="<b>%{text}</b><br>Price: %{x:$,.2f}<br>Rev: %{y:$,.0f}<extra></extra>",
+                        text=g_promo["event_name"]
+                    )
+                )
+
+            # --- D. Optimization Diamonds (P50/P2.5/P97.5 Peaks) ---
             best_rows = {
                 "Recommended (P50)": (
                     "revenue_pred_0.5",
-                    g.loc[g["revenue_pred_0.5"].idxmax()],
+                    g.loc[g["revenue_pred_0.5"].idxmax()] if not g.empty else None,
                 ),
                 "Conservative (P2.5)": (
                     "revenue_pred_0.025",
-                    g.loc[g["revenue_pred_0.025"].idxmax()],
+                    g.loc[g["revenue_pred_0.025"].idxmax()] if not g.empty else None,
                 ),
                 "Optimistic (P97.5)": (
                     "revenue_pred_0.975",
-                    g.loc[g["revenue_pred_0.975"].idxmax()],
+                    g.loc[g["revenue_pred_0.975"].idxmax()] if not g.empty else None,
                 ),
             }
             marker_colors = {
@@ -2521,28 +2623,31 @@ class viz:
                 "Optimistic (P97.5)": "#238636",
                 "Recommended (P50)": "#B82132",
             }
+            
             for label, (pred_col, row) in best_rows.items():
-                fig.add_trace(
-                    go.Scatter(
-                        x=[row["asp"]],
-                        y=[row[pred_col]],
-                        mode="markers",
-                        marker=dict(
-                            color=marker_colors[label], size=12, symbol="diamond"
-                        ),
-                        name=f"{group_name} • {label}",
-                        # legendgroup=group_name,
-                        hovertemplate=f"{label}<br>Price=%{{x:$,.2f}}<br>Rev=%{{y:$,.0f}}<extra></extra>",
+                if row is not None and pd.notna(row["asp"]):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[row["asp"]],
+                            y=[row[pred_col]],
+                            mode="markers",
+                            marker=dict(
+                                color=marker_colors[label], size=12, symbol="diamond"
+                            ),
+                            name=f"{group_name} • {label}",
+                            hovertemplate=f"<b>{label}</b><br>Target Price: %{{x:$,.2f}}<br>Exp. Rev: %{{y:$,.0f}}<extra></extra>",
+                        )
                     )
-                )
 
-        # 3) Layout (avoid crashing if self.template is not set)
-        template = getattr(self, "template", None)
+        # 5. Layout
+        template = getattr(self, "template", "lux")
         fig.update_layout(
-            legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
-            template=template if template else None,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            template=template,
             yaxis_title=self.revenue_axis_label(granularity="weekly"),
             xaxis_title="Average Selling Price (ASP)",
+            hovermode="closest",
+            margin=dict(l=20, r=20, t=60, b=20),
         )
 
         return fig

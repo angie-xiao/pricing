@@ -1,5 +1,5 @@
 /*-----------------------------------------------------------
-                           shipments 
+                        shipments 
 -------------------------------------------------------------*/
 /* Step 1: Get filtered shipments (base layer) */
 DROP TABLE IF EXISTS filtered_shipments;
@@ -22,9 +22,8 @@ CREATE TEMP TABLE filtered_shipments AS (
         AND o.shipped_units > 0
         and o.our_price > 0
         AND o.is_retail_merchant = 'Y'
-        AND o.asin in (
-            'B06ZZ4679J','B089LLHMQL','B08NTPM4Z1','B08NTQ7XVB','B08NTSCMZS','B09P323G3B','B09P32SSRL',
-            'B09P3L3BJQ','B09V65VY5J','B0B3S7JJ7G','B0B3S91RJC','B0DP36S67M'
+        AND o.asin in (            
+            'B0C3DH37FB', 'B0BG39TL34', 'B07L25PZK8', 'B091D46799'
         ) -- required filter
 );
 
@@ -77,7 +76,7 @@ CREATE TEMP TABLE orders_with_vendor AS (
     FROM orders_with_manufacturer o
         LEFT JOIN andes.roi_ml_ddl.VENDOR_COMPANY_CODES v
         ON v.vendor_code = o.vendor_code
-    WHERE v.company_code = 'CI08L' -- required filter
+    WHERE v.company_code = 'SPF89' -- required filter
 );
 
 /* Step 2d: Add revenue share amount (final base_orders) */
@@ -178,6 +177,8 @@ CREATE TEMP TABLE raw_events AS (
                 OR UPPER(bp.promotion_internal_title) LIKE '%T11%'
                 OR UPPER(bp.promotion_internal_title) LIKE '%T12%' THEN 'T5/11/12'
             -- tier 1.5
+            WHEN UPPER(bp.promotion_internal_title) LIKE '%PET MONTH%'  THEN 'PET MONTH'
+                
             WHEN UPPER(bp.promotion_internal_title) LIKE '%BACK%TO%SCHOOL%' THEN 'BACK TO SCHOOL' 
             WHEN UPPER(bp.promotion_internal_title) LIKE '%BACK%TO%UNIVERSITY%' THEN 'BACK TO UNIVERSITY'
             -- tier 2-3
